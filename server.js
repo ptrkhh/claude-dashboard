@@ -1,14 +1,16 @@
 import express from 'express';
 import os from 'node:os';
 import path from 'node:path';
-import { collectSessions, logBuffer, log, launchSession, resumeSession } from './lib/collect.js';
+import { fileURLToPath } from 'node:url';
+import { collectSessions, logBuffer, log, launchSession, resumeSession, assertValidSid } from './lib/collect.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 const run = promisify(execFile);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 app.use(express.json());
-app.use(express.static('public'));
+app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
@@ -41,7 +43,7 @@ app.post('/api/kill', handle(async req => {
   log(`kill ${name}`);
   return { ok: true };
 }));
-app.post('/api/purge', handle(async req => { ctx.purged.add(req.body.sid); return { ok: true }; }));
+app.post('/api/purge', handle(async req => { assertValidSid(req.body.sid); ctx.purged.add(req.body.sid); return { ok: true }; }));
 
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`claude-dashboard on http://localhost:${port}`));

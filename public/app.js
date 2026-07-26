@@ -2,6 +2,7 @@ const $ = s => document.querySelector(s);
 const MODELS = ['sonnet', 'opus', 'haiku', 'fable'];
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 let model = 'sonnet', effort = 'medium';
+let armedKill = null; // ponytail: survives render() replacing #running.innerHTML
 
 function seg(el, items, sel, onpick) {
   el.innerHTML = items.map(i => `<button data-v="${i}" class="${i === sel ? 'on' : ''}">${i}</button>`).join('');
@@ -57,7 +58,7 @@ function render(d) {
         ${r.rcLink
           ? `<a class="btn rc" href="${esc(r.rcLink)}" target="_blank" rel="noopener">Open Remote Control ↗</a>`
           : `<span class="btn wait">⏳ waiting for RC link…</span>`}
-        <button class="btn kill" data-kill="${esc(r.name)}">✕</button>
+        <button class="btn kill" data-kill="${esc(r.name)}" ${r.name === armedKill ? 'data-arm="1"' : ''}>${r.name === armedKill ? 'sure?' : '✕'}</button>
       </div>
     </div>`).join('') || '<p class="dim">none</p>';
 
@@ -79,7 +80,7 @@ function render(d) {
 document.body.addEventListener('click', async e => {
   const b = e.target;
   try {
-    if (b.dataset.kill) { if (b.dataset.arm) { await api('/api/kill', { name: b.dataset.kill }); poll(); } else { b.dataset.arm = '1'; b.textContent = 'sure?'; setTimeout(() => { delete b.dataset.arm; b.textContent = '✕'; }, 3000); } }
+    if (b.dataset.kill) { if (b.dataset.arm) { armedKill = null; await api('/api/kill', { name: b.dataset.kill }); poll(); } else { armedKill = b.dataset.kill; b.dataset.arm = '1'; b.textContent = 'sure?'; setTimeout(() => { if (armedKill === b.dataset.kill) armedKill = null; delete b.dataset.arm; b.textContent = '✕'; }, 3000); } }
     else if (b.dataset.resume) { b.disabled = true; try { await api('/api/resume', { sid: b.dataset.resume }); poll(); } finally { b.disabled = false; } }
     else if (b.dataset.purge) { await api('/api/purge', { sid: b.dataset.purge }); poll(); }
   } catch (err) { toast(err.message); }
