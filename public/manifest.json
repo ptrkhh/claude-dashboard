@@ -1,0 +1,9 @@
+{
+  "name": "Claude Dashboard",
+  "short_name": "ClaudeDash",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b0b0e",
+  "theme_color": "#111114",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
