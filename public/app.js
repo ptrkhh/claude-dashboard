@@ -51,7 +51,7 @@ function render(d) {
     <div class="card run ${r.working ? 'working' : 'idle'}">
       <div class="row"><b>${esc(r.dir.split('/').pop())}</b> ${gitBadge(r.git)}
         <span class="badge">${r.working ? '● working' : '○ waiting'}</span><span class="dim">${fmtUp(r.uptimeSec)}</span></div>
-      <div class="dim">${[r.model, r.effort].filter(Boolean).join(' · ') || 'resumed'} · cpu ${r.cpu}% · ${fmtKb(r.rssKb)}</div>
+      <div class="dim">${[r.model, r.effort].filter(Boolean).map(esc).join(' · ') || 'resumed'} · cpu ${r.cpu}% · ${fmtKb(r.rssKb)}</div>
       ${r.lastMessage ? `<div class="peek" onclick="this.classList.toggle('open')">${esc(r.lastMessage)}</div>` : ''}
       <div class="row">
         ${r.rcLink
@@ -80,7 +80,7 @@ document.body.addEventListener('click', async e => {
   const b = e.target;
   try {
     if (b.dataset.kill) { if (b.dataset.arm) { await api('/api/kill', { name: b.dataset.kill }); poll(); } else { b.dataset.arm = '1'; b.textContent = 'sure?'; setTimeout(() => { delete b.dataset.arm; b.textContent = '✕'; }, 3000); } }
-    else if (b.dataset.resume) { b.disabled = true; await api('/api/resume', { sid: b.dataset.resume }); poll(); }
+    else if (b.dataset.resume) { b.disabled = true; try { await api('/api/resume', { sid: b.dataset.resume }); poll(); } finally { b.disabled = false; } }
     else if (b.dataset.purge) { await api('/api/purge', { sid: b.dataset.purge }); poll(); }
   } catch (err) { toast(err.message); }
 });
