@@ -32,7 +32,7 @@ function applyMode(mode) {
   const dark = resolved(mode) === 'dark';
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
   const tt = $('#theme-toggle');
-  tt.innerHTML = mode === 'system' ? ICONS.system : dark ? ICONS.sun : ICONS.moon;
+  tt.innerHTML = mode === 'system' ? ICONS.system : dark ? ICONS.moon : ICONS.sun;
   const label = mode === 'system' ? 'Theme: system — click to override' : `Theme: ${mode} — click to change`;
   tt.setAttribute('aria-label', label);
   tt.title = label;
@@ -53,9 +53,49 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
 });
 applyMode(themeMode());
 
-/* ---------- Launcher controls ---------- */
-$('#model').innerHTML = MODELS.map((m, i) => `<option value="${m}"${i === 0 ? ' selected' : ''}>${cap(m)}</option>`).join('');
-$('#effort').innerHTML = EFFORTS.map(e => `<option value="${e}"${e === 'medium' ? ' selected' : ''}>${cap(e)}</option>`).join('');
+/* ---------- Launcher controls ----------
+   Custom dropdown: a native <select> can't be themed and double-glowed inside
+   its wrapper. Fully keyboard-accessible; closes on outside click / Escape. */
+function buildDropdown(el, label, items, initial) {
+  let value = initial;
+  el.innerHTML = `
+    <div class="cb-trigger" role="button" tabindex="0" aria-haspopup="listbox" aria-expanded="false" aria-label="${label}">
+      <span class="cb-lead">${label}</span><span class="cb-current">${cap(value)}</span><span class="cb-caret">▾</span>
+    </div>
+    <ul class="cb-menu" role="listbox" hidden>
+      ${items.map(i => `<li role="option" data-value="${i}" class="${i === value ? 'on' : ''}" aria-selected="${i === value}">${cap(i)}</li>`).join('')}
+    </ul>`;
+  const trigger = el.querySelector('.cb-trigger');
+  const menu = el.querySelector('.cb-menu');
+  const current = el.querySelector('.cb-current');
+  const opts = [...menu.querySelectorAll('li')];
+  let active = -1;
+  const isOpen = () => !menu.hidden;
+  const setActive = i => { active = i; opts.forEach((o, idx) => o.classList.toggle('active', idx === i)); if (opts[i]) opts[i].scrollIntoView({ block: 'nearest' }); };
+  const open = () => {
+    document.querySelectorAll('.cb-menu:not([hidden])').forEach(m => { if (m !== menu) { m.hidden = true; m.previousElementSibling.setAttribute('aria-expanded', 'false'); } });
+    menu.hidden = false; trigger.setAttribute('aria-expanded', 'true');
+    setActive(Math.max(0, opts.findIndex(o => o.dataset.value === value)));
+  };
+  const close = () => { menu.hidden = true; trigger.setAttribute('aria-expanded', 'false'); setActive(-1); };
+  const pick = li => {
+    value = li.dataset.value; current.textContent = cap(value);
+    opts.forEach(o => { const on = o === li; o.classList.toggle('on', on); o.setAttribute('aria-selected', on); });
+    close(); trigger.focus();
+  };
+  trigger.addEventListener('click', e => { e.stopPropagation(); isOpen() ? close() : open(); });
+  menu.addEventListener('click', e => { const li = e.target.closest('[data-value]'); if (li) pick(li); });
+  el.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { if (isOpen()) { close(); trigger.focus(); } return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); isOpen() ? setActive(Math.min(opts.length - 1, active + 1)) : open(); return; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); if (isOpen()) setActive(Math.max(0, active - 1)); return; }
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!isOpen()) open(); else if (opts[active]) pick(opts[active]); }
+  });
+  document.addEventListener('click', e => { if (isOpen() && !el.contains(e.target)) close(); });
+  return { get value() { return value; } };
+}
+const modelDD = buildDropdown($('#model'), 'Model', MODELS, 'sonnet');
+const effortDD = buildDropdown($('#effort'), 'Effort', EFFORTS, 'medium');
 
 function toast(msg) {
   const t = $('#toast');
@@ -185,7 +225,7 @@ $('#launcher').addEventListener('submit', async e => {
   const btn = $('#launch');
   const dir = $('#dir').value.trim();
   if (!dir) { toast('Enter a project directory first'); $('#dir').focus(); return; }
-  const model = $('#model').value, effort = $('#effort').value;
+  const model = modelDD.value, effort = effortDD.value;
   btn.disabled = true; btn.innerHTML = `${ICONS.play}<span>Launching…</span>`;
   try { await api('/api/launch', { dir, model, effort }); $('#dir').value = ''; poll(); }
   catch (err) { toast(err.message); }

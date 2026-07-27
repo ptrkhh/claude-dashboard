@@ -57,8 +57,8 @@
   <form class="command-bar" id="launcher">
     <input id="dir" class="cb-dir" list="dirs" placeholder="/path/to/project" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Project directory">
     <datalist id="dirs"></datalist>
-    <label class="cb-field"><span class="cb-lead">Model</span><select id="model" aria-label="Model"></select></label>
-    <label class="cb-field"><span class="cb-lead">Effort</span><select id="effort" aria-label="Reasoning effort"></select></label>
+    <div class="cb-select" id="model"></div>
+    <div class="cb-select" id="effort"></div>
     <button id="launch" class="cb-launch" type="submit"></button>
   </form>
 
