@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111114">
+<title>Claude Dashboard</title>
+<link rel="stylesheet" href="style.css">
+<link rel="manifest" href="manifest.json">
+<body>
+<div class="layout">
+  <aside class="side">
+    <header><h1>⚡ Claude Dashboard</h1><span id="health" class="dot"></span></header>
+    <section class="card launcher">
+      <h2>New session</h2>
+      <input id="dir" list="dirs" placeholder="/path/to/project" autocapitalize="off" autocorrect="off">
+      <datalist id="dirs"></datalist>
+      <div class="seg" id="model"></div>
+      <div class="seg" id="effort"></div>
+      <button id="launch" class="primary">▶ Launch Session</button>
+    </section>
+    <div id="stats" class="stats"></div>
+    <details id="logbox"><summary>Dashboard logs</summary><pre id="logs"></pre></details>
+  </aside>
+  <main>
+    <h2>Running · <span id="nrun">0</span></h2>
+    <div id="running" class="grid"></div>
+    <h2>Resumable · <span id="nres">0</span></h2>
+    <div id="resumable" class="grid"></div>
+  </main>
+</div>
+<div id="toast"></div>
+<script src="app.js"></script>
+<script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');</script>
+</body>
+</html>
