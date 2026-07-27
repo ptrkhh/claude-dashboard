@@ -119,6 +119,7 @@ const esc = s => (s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;',
 const fmtUp = s => s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m` : s >= 60 ? `${Math.floor(s / 60)}m` : `${s}s`;
 const fmtKb = k => k >= 1048576 ? `${(k / 1048576).toFixed(1)}G` : `${Math.round(k / 1024)}M`;
 const fmtTs = t => new Date(t < 1e12 ? t * 1000 : t).toISOString().slice(5, 16).replace('T', ' '); // history.jsonl timestamps may be seconds or ms
+const fmtReset = iso => { const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); };
 
 function gitBadge(g) {
   if (!g?.branch) return '';
@@ -129,11 +130,12 @@ function gitBadge(g) {
   return `<span class="branch">${s}</span>`;
 }
 
-function statTile({ label, value, pct }) {
+function statTile({ label, value, pct, sub }) {
   const cls = pct == null ? '' : pct >= 90 ? 'crit' : pct >= 75 ? 'warn' : '';
   const meter = pct == null ? ''
     : `<div class="meter"><div class="meter-fill ${cls}" style="width:${Math.min(100, Math.max(0, pct))}%"></div></div>`;
-  return `<div class="stat"><div class="stat-top"><span class="stat-label">${label}</span><span class="stat-value">${value}</span></div>${meter}</div>`;
+  const caption = sub ? `<div class="stat-sub">${esc(sub)}</div>` : '';
+  return `<div class="stat"><div class="stat-top"><span class="stat-label">${label}</span><span class="stat-value">${value}</span></div>${meter}${caption}</div>`;
 }
 
 function runningCard(r) {
@@ -195,6 +197,12 @@ function render(d) {
     { label: 'CPU', value: `${st.cpuPct}<span class="unit">%</span>`, pct: st.cpuPct },
     { label: 'RAM', value: `${fmtKb(st.ramUsedKb)}<span class="unit"> / ${fmtKb(st.ramTotalKb)}</span>`, pct: st.ramTotalKb ? Math.round(st.ramUsedKb / st.ramTotalKb * 100) : null },
     ...st.disks.map(x => ({ label: esc(x.mount), value: `${fmtKb(x.freeKb)}<span class="unit"> free</span>`, pct: x.totalKb ? Math.round((x.totalKb - x.freeKb) / x.totalKb * 100) : null })),
+    ...(st.claudeUsage || []).map(u => ({
+      label: esc(u.short),
+      value: `${u.pct}<span class="unit">% used</span>`,
+      pct: u.pct,
+      sub: u.resetsAt ? `Resets ${fmtReset(u.resetsAt)}` : null,
+    })),
   ];
   $('#stats').innerHTML = tiles.map(statTile).join('');
 
