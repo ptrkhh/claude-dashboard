@@ -1,34 +1,83 @@
 <!doctype html>
 <html lang="en">
+<head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#111114">
+<meta name="theme-color" content="#f2f0e9" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1a1917" media="(prefers-color-scheme: dark)">
 <title>Claude Dashboard</title>
+<!-- Resolve theme before first paint to avoid a flash of the wrong mode. -->
+<script>
+  (function () {
+    try {
+      var stored = localStorage.getItem('cdash-theme'); // 'light' | 'dark' | else = follow system
+      var dark = stored === 'dark' ||
+        (stored !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+      document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    } catch (e) { document.documentElement.dataset.theme = 'light'; }
+  })();
+</script>
 <link rel="stylesheet" href="style.css">
+<link rel="icon" href="icon.svg">
 <link rel="manifest" href="manifest.json">
+</head>
 <body>
-<div class="layout">
-  <aside class="side">
-    <header><h1>⚡ Claude Dashboard</h1><span id="health" class="dot"></span></header>
-    <section class="card launcher">
-      <h2>New session</h2>
-      <input id="dir" list="dirs" placeholder="/path/to/project" autocapitalize="off" autocorrect="off">
-      <datalist id="dirs"></datalist>
-      <div class="seg" id="model"></div>
-      <div class="seg" id="effort"></div>
-      <button id="launch" class="primary">▶ Launch Session</button>
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+          <g fill="var(--accent)">
+            <rect x="47" y="10" width="6" height="34" rx="3"/>
+            <rect x="47" y="10" width="6" height="34" rx="3" transform="rotate(30 50 50)"/>
+            <rect x="47" y="10" width="6" height="34" rx="3" transform="rotate(60 50 50)"/>
+            <rect x="47" y="10" width="6" height="34" rx="3" transform="rotate(90 50 50)"/>
+            <rect x="47" y="10" width="6" height="34" rx="3" transform="rotate(120 50 50)"/>
+            <rect x="47" y="10" width="6" height="34" rx="3" transform="rotate(150 50 50)"/>
+            <rect x="47" y="10" width="6" height="34" rx="3" transform="rotate(180 50 50)"/>
+            <rect x="47" y="10" width="6" height="34" rx="3" transform="rotate(210 50 50)"/>
+            <rect x="47" y="10" width="6" height="34" rx="3" transform="rotate(240 50 50)"/>
+            <rect x="47" y="10" width="6" height="34" rx="3" transform="rotate(270 50 50)"/>
+            <rect x="47" y="10" width="6" height="34" rx="3" transform="rotate(300 50 50)"/>
+            <rect x="47" y="10" width="6" height="34" rx="3" transform="rotate(330 50 50)"/>
+          </g>
+        </svg>
+      </span>
+      <span class="brand-text">
+        <span class="brand-name">Claude Dashboard</span>
+        <span class="brand-sub">Code sessions</span>
+      </span>
+    </div>
+    <div class="topbar-actions">
+      <span class="health"><span id="health" class="dot"></span><span id="health-label">Connecting…</span></span>
+      <button id="theme-toggle" class="icon-btn" type="button" aria-label="Toggle color theme"></button>
+    </div>
+  </header>
+
+  <form class="command-bar" id="launcher">
+    <input id="dir" class="cb-dir" list="dirs" placeholder="/path/to/project" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Project directory">
+    <datalist id="dirs"></datalist>
+    <div class="cb-select" id="model"></div>
+    <div class="cb-select" id="effort"></div>
+    <button id="launch" class="cb-launch" type="submit"></button>
+  </form>
+
+  <div id="stats" class="stats-strip"></div>
+
+  <main class="content">
+    <section class="section">
+      <div class="section-head"><h2>Running</h2><span id="nrun" class="count">0</span></div>
+      <div id="running" class="grid"></div>
     </section>
-    <div id="stats" class="stats"></div>
-    <details id="logbox"><summary>Dashboard logs</summary><pre id="logs"></pre></details>
-  </aside>
-  <main>
-    <h2>Running · <span id="nrun">0</span></h2>
-    <div id="running" class="grid"></div>
-    <h2>Resumable · <span id="nres">0</span></h2>
-    <div id="resumable" class="grid"></div>
+    <section class="section">
+      <div class="section-head"><h2>Resumable</h2><span id="nres" class="count">0</span></div>
+      <div id="resumable" class="grid"></div>
+    </section>
+    <details id="logbox" class="logs"><summary>Dashboard logs</summary><pre id="logs"></pre></details>
   </main>
 </div>
-<div id="toast"></div>
+
+<div id="toast" role="status" aria-live="polite"></div>
 <script src="app.js"></script>
 <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');</script>
 </body>

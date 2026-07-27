@@ -1,15 +1,101 @@
 const $ = s => document.querySelector(s);
 const MODELS = ['sonnet', 'opus', 'haiku', 'fable'];
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
-let model = 'sonnet', effort = 'medium';
 let armedKill = null; // ponytail: survives render() replacing #running.innerHTML
+const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 
-function seg(el, items, sel, onpick) {
-  el.innerHTML = items.map(i => `<button data-v="${i}" class="${i === sel ? 'on' : ''}">${i}</button>`).join('');
-  el.onclick = e => { const v = e.target.dataset.v; if (v) { onpick(v); seg(el, items, v, onpick); } };
+/* ---------- Inline icons (stroke = currentColor, sized via CSS) ---------- */
+const svg = body => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
+const ICONS = {
+  play: `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15a1 1 0 0 0 1.5.87l12-7.5a1 1 0 0 0 0-1.74l-12-7.5A1 1 0 0 0 7 4.5z"/></svg>`,
+  external: svg('<path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/>'),
+  x: svg('<path d="M18 6 6 18"/><path d="M6 6l12 12"/>'),
+  refresh: svg('<path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/>'),
+  trash: svg('<path d="M4 7h16"/><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/><path d="M18 7l-.8 12a2 2 0 0 1-2 1.9H8.8a2 2 0 0 1-2-1.9L6 7"/>'),
+  spinner: svg('<path d="M12 3a9 9 0 1 0 9 9"/>'),
+  sun: svg('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>'),
+  moon: svg('<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>'),
+  system: svg('<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>'),
+};
+
+/* ---------- Theme ----------
+   Three modes cycled by the toggle: system → light → dark → system.
+   'system' (the default, no stored value) follows the OS via prefers-color-scheme
+   and stays live if the OS setting changes. */
+const THEME_KEY = 'cdash-theme';
+const MODES = ['system', 'light', 'dark'];
+const systemDark = () => matchMedia('(prefers-color-scheme: dark)').matches;
+const themeMode = () => { const s = localStorage.getItem(THEME_KEY); return s === 'light' || s === 'dark' ? s : 'system'; };
+const resolved = mode => mode === 'system' ? (systemDark() ? 'dark' : 'light') : mode;
+
+function applyMode(mode) {
+  const dark = resolved(mode) === 'dark';
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  const tt = $('#theme-toggle');
+  tt.innerHTML = mode === 'system' ? ICONS.system : dark ? ICONS.moon : ICONS.sun;
+  const label = mode === 'system' ? 'Theme: system — click to override' : `Theme: ${mode} — click to change`;
+  tt.setAttribute('aria-label', label);
+  tt.title = label;
+  document.querySelectorAll('meta[name="theme-color"]').forEach(m => m.remove());
+  const m = document.createElement('meta');
+  m.name = 'theme-color';
+  m.content = dark ? '#1a1917' : '#f2f0e9';
+  document.head.appendChild(m);
 }
-seg($('#model'), MODELS, model, v => model = v);
-seg($('#effort'), EFFORTS, effort, v => effort = v);
+$('#theme-toggle').onclick = () => {
+  const next = MODES[(MODES.indexOf(themeMode()) + 1) % MODES.length];
+  if (next === 'system') localStorage.removeItem(THEME_KEY);
+  else localStorage.setItem(THEME_KEY, next);
+  applyMode(next);
+};
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  if (themeMode() === 'system') applyMode('system');
+});
+applyMode(themeMode());
+
+/* ---------- Launcher controls ----------
+   Custom dropdown: a native <select> can't be themed and double-glowed inside
+   its wrapper. Fully keyboard-accessible; closes on outside click / Escape. */
+function buildDropdown(el, label, items, initial) {
+  let value = initial;
+  el.innerHTML = `
+    <div class="cb-trigger" role="button" tabindex="0" aria-haspopup="listbox" aria-expanded="false" aria-label="${label}">
+      <span class="cb-lead">${label}</span><span class="cb-current">${cap(value)}</span><span class="cb-caret">▾</span>
+    </div>
+    <ul class="cb-menu" role="listbox" hidden>
+      ${items.map(i => `<li role="option" data-value="${i}" class="${i === value ? 'on' : ''}" aria-selected="${i === value}">${cap(i)}</li>`).join('')}
+    </ul>`;
+  const trigger = el.querySelector('.cb-trigger');
+  const menu = el.querySelector('.cb-menu');
+  const current = el.querySelector('.cb-current');
+  const opts = [...menu.querySelectorAll('li')];
+  let active = -1;
+  const isOpen = () => !menu.hidden;
+  const setActive = i => { active = i; opts.forEach((o, idx) => o.classList.toggle('active', idx === i)); if (opts[i]) opts[i].scrollIntoView({ block: 'nearest' }); };
+  const open = () => {
+    document.querySelectorAll('.cb-menu:not([hidden])').forEach(m => { if (m !== menu) { m.hidden = true; m.previousElementSibling.setAttribute('aria-expanded', 'false'); } });
+    menu.hidden = false; trigger.setAttribute('aria-expanded', 'true');
+    setActive(Math.max(0, opts.findIndex(o => o.dataset.value === value)));
+  };
+  const close = () => { menu.hidden = true; trigger.setAttribute('aria-expanded', 'false'); setActive(-1); };
+  const pick = li => {
+    value = li.dataset.value; current.textContent = cap(value);
+    opts.forEach(o => { const on = o === li; o.classList.toggle('on', on); o.setAttribute('aria-selected', on); });
+    close(); trigger.focus();
+  };
+  trigger.addEventListener('click', e => { e.stopPropagation(); isOpen() ? close() : open(); });
+  menu.addEventListener('click', e => { const li = e.target.closest('[data-value]'); if (li) pick(li); });
+  el.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { if (isOpen()) { close(); trigger.focus(); } return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); isOpen() ? setActive(Math.min(opts.length - 1, active + 1)) : open(); return; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); if (isOpen()) setActive(Math.max(0, active - 1)); return; }
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!isOpen()) open(); else if (opts[active]) pick(opts[active]); }
+  });
+  document.addEventListener('click', e => { if (isOpen() && !el.contains(e.target)) close(); });
+  return { get value() { return value; } };
+}
+const modelDD = buildDropdown($('#model'), 'Model', MODELS, 'sonnet');
+const effortDD = buildDropdown($('#effort'), 'Effort', EFFORTS, 'medium');
 
 function toast(msg) {
   const t = $('#toast');
@@ -35,75 +121,132 @@ function gitBadge(g) {
   if (g.dirty) s += ` ●${g.dirty}`;
   if (g.ahead) s += ` ↑${g.ahead}`;
   if (g.behind) s += ` ↓${g.behind}`;
-  return `<span class="branch">(${s})</span>`;
+  return `<span class="branch">${s}</span>`;
+}
+
+function statTile({ label, value, pct }) {
+  const cls = pct == null ? '' : pct >= 90 ? 'crit' : pct >= 75 ? 'warn' : '';
+  const meter = pct == null ? ''
+    : `<div class="meter"><div class="meter-fill ${cls}" style="width:${Math.min(100, Math.max(0, pct))}%"></div></div>`;
+  return `<div class="stat"><div class="stat-top"><span class="stat-label">${label}</span><span class="stat-value">${value}</span></div>${meter}</div>`;
+}
+
+function runningCard(r) {
+  const status = r.working ? 'working' : 'idle';
+  const chips = [r.model, r.effort].filter(Boolean);
+  const chipHtml = chips.length
+    ? chips.map(x => `<span class="chip">${esc(x)}</span>`).join('')
+    : `<span class="chip">${r.external ? 'external' : 'resumed'}</span>`;
+  const peek = r.lastMessage
+    ? `<div class="peek" onclick="this.classList.toggle('open')"><span class="peek-text">${esc(r.lastMessage)}</span></div>` : '';
+  const rc = r.rcLink
+    ? `<a class="action primary" href="${esc(r.rcLink)}" target="_blank" rel="noopener">${ICONS.external}<span>Open in Claude</span></a>`
+    : `<span class="action pending">${ICONS.spinner}<span>Waiting for link…</span></span>`;
+  const kill = r.external ? ''
+    : `<button class="action danger" type="button" data-kill="${esc(r.name)}" ${r.name === armedKill ? 'data-arm="1"' : ''} aria-label="Kill session">${r.name === armedKill ? 'Sure?' : ICONS.x}</button>`;
+  return `
+    <div class="session ${status} ${r.external ? 'external' : ''}">
+      <div class="session-head">
+        <div class="session-headline">
+          <span class="session-title">${esc(r.dir.split('/').pop())}</span>
+          ${gitBadge(r.git)}
+        </div>
+        <span class="status ${r.working ? 'on' : 'off'}"><span class="dot"></span>${r.working ? 'Working' : 'Waiting'}</span>
+      </div>
+      <div class="session-meta">
+        ${chipHtml}<span>cpu ${r.cpu}%</span><span class="sep">·</span><span>${fmtKb(r.rssKb)}</span>
+        <span class="time">${fmtUp(r.uptimeSec)}</span>
+      </div>
+      ${peek}
+      <div class="actions">${rc}${kill}</div>
+    </div>`;
+}
+
+function resumableCard(s) {
+  return `
+    <div class="session resumable">
+      <div class="session-head">
+        <div class="session-headline">
+          <span class="session-title">${esc(s.dir?.split('/').pop() || '?')}</span>
+          ${gitBadge({ branch: s.branch })}
+        </div>
+        <span class="time">${fmtTs(s.ts)}</span>
+      </div>
+      <div class="desc">${esc(s.title)}</div>
+      <div class="prompts">↳ ${esc(s.prompts.join(' · '))}</div>
+      <div class="actions">
+        <button class="action" type="button" data-resume="${esc(s.sid)}">${ICONS.refresh}<span>Resume</span></button>
+        <button class="action ghost" type="button" data-purge="${esc(s.sid)}" aria-label="Purge from list">${ICONS.trash}</button>
+      </div>
+    </div>`;
 }
 
 function render(d) {
   $('#nrun').textContent = d.running.length;
   $('#nres').textContent = d.resumable.length;
+
   const st = d.stats;
-  $('#stats').innerHTML = [
-    `CPU<br><b>${st.cpuPct}%</b>`,
-    `RAM<br><b>${fmtKb(st.ramUsedKb)}/${fmtKb(st.ramTotalKb)}</b>`,
-    ...st.disks.map(x => `${esc(x.mount)}<br><b>${fmtKb(x.freeKb)} free</b>`),
-  ].map(h => `<div>${h}</div>`).join('');
+  const tiles = [
+    { label: 'CPU', value: `${st.cpuPct}<span class="unit">%</span>`, pct: st.cpuPct },
+    { label: 'RAM', value: `${fmtKb(st.ramUsedKb)}<span class="unit"> / ${fmtKb(st.ramTotalKb)}</span>`, pct: st.ramTotalKb ? Math.round(st.ramUsedKb / st.ramTotalKb * 100) : null },
+    ...st.disks.map(x => ({ label: esc(x.mount), value: `${fmtKb(x.freeKb)}<span class="unit"> free</span>`, pct: x.totalKb ? Math.round((x.totalKb - x.freeKb) / x.totalKb * 100) : null })),
+  ];
+  $('#stats').innerHTML = tiles.map(statTile).join('');
 
-  $('#running').innerHTML = d.running.map(r => `
-    <div class="card run ${r.working ? 'working' : 'idle'} ${r.external ? 'ext' : ''}">
-      <div class="row"><b>${esc(r.dir.split('/').pop())}</b> ${gitBadge(r.git)}
-        ${r.external ? '<span class="tag">external</span>' : ''}
-        <span class="badge">${r.working ? '● working' : '○ waiting'}</span><span class="dim">${fmtUp(r.uptimeSec)}</span></div>
-      <div class="dim">${[r.model, r.effort].filter(Boolean).map(esc).join(' · ') || (r.external ? 'external' : 'resumed')} · cpu ${r.cpu}% · ${fmtKb(r.rssKb)}</div>
-      ${r.lastMessage ? `<div class="peek" onclick="this.classList.toggle('open')">${esc(r.lastMessage)}</div>` : ''}
-      <div class="row">
-        ${r.rcLink
-          ? `<a class="btn rc" href="${esc(r.rcLink)}" target="_blank" rel="noopener">Open Remote Control ↗</a>`
-          : `<span class="btn wait">⏳ waiting for RC link…</span>`}
-        ${r.external ? '' : `<button class="btn kill" data-kill="${esc(r.name)}" ${r.name === armedKill ? 'data-arm="1"' : ''}>${r.name === armedKill ? 'sure?' : '✕'}</button>`}
-      </div>
-    </div>`).join('') || '<p class="dim">none</p>';
-
-  $('#resumable').innerHTML = d.resumable.map(s => `
-    <div class="card res">
-      <div class="row"><b>${esc(s.dir?.split('/').pop() || '?')}</b> ${gitBadge({ branch: s.branch })}<span class="dim">${fmtTs(s.ts)}</span></div>
-      <div>${esc(s.title)}</div>
-      <div class="dim prompts">↳ ${esc(s.prompts.join(' · '))}</div>
-      <div class="row">
-        <button class="btn" data-resume="${esc(s.sid)}">↻ Resume</button>
-        <button class="btn dim" data-purge="${esc(s.sid)}">Purge</button>
-      </div>
-    </div>`).join('') || '<p class="dim">none</p>';
+  $('#running').innerHTML = d.running.map(runningCard).join('') || '<div class="empty">No running sessions</div>';
+  $('#resumable').innerHTML = d.resumable.map(resumableCard).join('') || '<div class="empty">No resumable sessions</div>';
 
   const dirs = [...new Set(d.resumable.map(s => s.dir).filter(Boolean))];
   $('#dirs').innerHTML = dirs.map(x => `<option value="${esc(x)}">`).join('');
 }
 
 document.body.addEventListener('click', async e => {
-  const b = e.target;
+  const el = e.target.closest('[data-kill],[data-resume],[data-purge]');
+  if (!el) return;
   try {
-    if (b.dataset.kill) { if (b.dataset.arm) { armedKill = null; await api('/api/kill', { name: b.dataset.kill }); poll(); } else { armedKill = b.dataset.kill; b.dataset.arm = '1'; b.textContent = 'sure?'; setTimeout(() => { if (armedKill === b.dataset.kill) armedKill = null; delete b.dataset.arm; b.textContent = '✕'; }, 3000); } }
-    else if (b.dataset.resume) { b.disabled = true; try { await api('/api/resume', { sid: b.dataset.resume }); poll(); } finally { b.disabled = false; } }
-    else if (b.dataset.purge) { await api('/api/purge', { sid: b.dataset.purge }); poll(); }
+    if (el.dataset.kill) {
+      if (el.dataset.arm) { armedKill = null; await api('/api/kill', { name: el.dataset.kill }); poll(); }
+      else {
+        armedKill = el.dataset.kill; el.dataset.arm = '1'; el.textContent = 'Sure?';
+        setTimeout(() => { if (armedKill === el.dataset.kill) armedKill = null; delete el.dataset.arm; el.innerHTML = ICONS.x; }, 3000);
+      }
+    } else if (el.dataset.resume) {
+      el.disabled = true;
+      try { await api('/api/resume', { sid: el.dataset.resume }); poll(); } finally { el.disabled = false; }
+    } else if (el.dataset.purge) {
+      await api('/api/purge', { sid: el.dataset.purge }); poll();
+    }
   } catch (err) { toast(err.message); }
 });
 
-$('#launch').onclick = async () => {
+// Launch: submitting the command bar (button or Enter in the directory field).
+$('#launcher').addEventListener('submit', async e => {
+  e.preventDefault();
   const btn = $('#launch');
   const dir = $('#dir').value.trim();
   if (!dir) { toast('Enter a project directory first'); $('#dir').focus(); return; }
-  btn.disabled = true; btn.textContent = '⏳ launching…';
+  const model = modelDD.value, effort = effortDD.value;
+  btn.disabled = true; btn.innerHTML = `${ICONS.play}<span>Launching…</span>`;
   try { await api('/api/launch', { dir, model, effort }); $('#dir').value = ''; poll(); }
   catch (err) { toast(err.message); }
-  finally { btn.disabled = false; btn.textContent = '▶ Launch Session'; }
-};
+  finally { btn.disabled = false; btn.innerHTML = `${ICONS.play}<span>Launch</span>`; }
+});
 
 async function poll() {
   try {
     render(await api('/api/sessions'));
     $('#health').className = 'dot ok';
+    $('#health-label').textContent = 'Connected';
     if ($('#logbox').open) $('#logs').textContent = (await api('/api/logs')).lines.join('\n');
-  } catch { $('#health').className = 'dot bad'; }
+  } catch {
+    $('#health').className = 'dot bad';
+    $('#health-label').textContent = 'Offline';
+  }
 }
+
+// Give the launch button its resting icon + label.
+$('#launch').innerHTML = `${ICONS.play}<span>Launch</span>`;
+
 poll();
 setInterval(() => { if (!document.hidden) poll(); }, 4000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
