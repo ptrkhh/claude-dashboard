@@ -1,8 +1,8 @@
 const $ = s => document.querySelector(s);
 const MODELS = ['sonnet', 'opus', 'haiku', 'fable'];
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
-let model = 'sonnet', effort = 'medium';
 let armedKill = null; // ponytail: survives render() replacing #running.innerHTML
+const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 
 /* ---------- Inline icons (stroke = currentColor, sized via CSS) ---------- */
 const svg = body => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
@@ -42,13 +42,9 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', e => {
 });
 applyTheme(curTheme());
 
-/* ---------- Segmented controls ---------- */
-function seg(el, items, sel, onpick) {
-  el.innerHTML = items.map(i => `<button type="button" data-v="${i}" class="${i === sel ? 'on' : ''}">${i}</button>`).join('');
-  el.onclick = e => { const v = e.target.dataset.v; if (v) { onpick(v); seg(el, items, v, onpick); } };
-}
-seg($('#model'), MODELS, model, v => model = v);
-seg($('#effort'), EFFORTS, effort, v => effort = v);
+/* ---------- Launcher controls ---------- */
+$('#model').innerHTML = MODELS.map((m, i) => `<option value="${m}"${i === 0 ? ' selected' : ''}>${cap(m)}</option>`).join('');
+$('#effort').innerHTML = EFFORTS.map(e => `<option value="${e}"${e === 'medium' ? ' selected' : ''}>${cap(e)}</option>`).join('');
 
 function toast(msg) {
   const t = $('#toast');
@@ -81,7 +77,7 @@ function statTile({ label, value, pct }) {
   const cls = pct == null ? '' : pct >= 90 ? 'crit' : pct >= 75 ? 'warn' : '';
   const meter = pct == null ? ''
     : `<div class="meter"><div class="meter-fill ${cls}" style="width:${Math.min(100, Math.max(0, pct))}%"></div></div>`;
-  return `<div class="stat"><div class="stat-label">${label}</div><div class="stat-value">${value}</div>${meter}</div>`;
+  return `<div class="stat"><div class="stat-top"><span class="stat-label">${label}</span><span class="stat-value">${value}</span></div>${meter}</div>`;
 }
 
 function runningCard(r) {
@@ -169,15 +165,18 @@ document.body.addEventListener('click', async e => {
   } catch (err) { toast(err.message); }
 });
 
-$('#launch').onclick = async () => {
+// Launch: submitting the command bar (button or Enter in the directory field).
+$('#launcher').addEventListener('submit', async e => {
+  e.preventDefault();
   const btn = $('#launch');
   const dir = $('#dir').value.trim();
   if (!dir) { toast('Enter a project directory first'); $('#dir').focus(); return; }
+  const model = $('#model').value, effort = $('#effort').value;
   btn.disabled = true; btn.innerHTML = `${ICONS.play}<span>Launching…</span>`;
   try { await api('/api/launch', { dir, model, effort }); $('#dir').value = ''; poll(); }
   catch (err) { toast(err.message); }
-  finally { btn.disabled = false; btn.innerHTML = `${ICONS.play}<span>Launch session</span>`; }
-};
+  finally { btn.disabled = false; btn.innerHTML = `${ICONS.play}<span>Launch</span>`; }
+});
 
 async function poll() {
   try {
@@ -192,7 +191,7 @@ async function poll() {
 }
 
 // Give the launch button its resting icon + label.
-$('#launch').innerHTML = `${ICONS.play}<span>Launch session</span>`;
+$('#launch').innerHTML = `${ICONS.play}<span>Launch</span>`;
 
 poll();
 setInterval(() => { if (!document.hidden) poll(); }, 4000);

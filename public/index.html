@@ -54,42 +54,27 @@
     </div>
   </header>
 
-  <div class="layout">
-    <aside class="sidebar">
-      <section class="panel launcher">
-        <h2 class="panel-title"><span class="accent-tick"></span>New session</h2>
-        <div class="field">
-          <label class="field-label" for="dir">Project directory</label>
-          <input id="dir" list="dirs" placeholder="/path/to/project" autocapitalize="off" autocorrect="off" spellcheck="false">
-          <datalist id="dirs"></datalist>
-        </div>
-        <div class="control">
-          <span class="field-label">Model</span>
-          <div class="segmented" id="model"></div>
-        </div>
-        <div class="control">
-          <span class="field-label">Reasoning effort</span>
-          <div class="segmented" id="effort"></div>
-        </div>
-        <button id="launch" class="btn-launch" type="button">Launch session</button>
-      </section>
+  <form class="command-bar" id="launcher">
+    <input id="dir" class="cb-dir" list="dirs" placeholder="/path/to/project" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Project directory">
+    <datalist id="dirs"></datalist>
+    <label class="cb-field"><span class="cb-lead">Model</span><select id="model" aria-label="Model"></select></label>
+    <label class="cb-field"><span class="cb-lead">Effort</span><select id="effort" aria-label="Reasoning effort"></select></label>
+    <button id="launch" class="cb-launch" type="submit"></button>
+  </form>
 
-      <div id="stats" class="stats"></div>
+  <div id="stats" class="stats-strip"></div>
 
-      <details id="logbox" class="logs"><summary>Dashboard logs</summary><pre id="logs"></pre></details>
-    </aside>
-
-    <main class="content">
-      <section class="section">
-        <div class="section-head"><h2>Running</h2><span id="nrun" class="count">0</span></div>
-        <div id="running" class="grid"></div>
-      </section>
-      <section class="section">
-        <div class="section-head"><h2>Resumable</h2><span id="nres" class="count">0</span></div>
-        <div id="resumable" class="grid"></div>
-      </section>
-    </main>
-  </div>
+  <main class="content">
+    <section class="section">
+      <div class="section-head"><h2>Running</h2><span id="nrun" class="count">0</span></div>
+      <div id="running" class="grid"></div>
+    </section>
+    <section class="section">
+      <div class="section-head"><h2>Resumable</h2><span id="nres" class="count">0</span></div>
+      <div id="resumable" class="grid"></div>
+    </section>
+    <details id="logbox" class="logs"><summary>Dashboard logs</summary><pre id="logs"></pre></details>
+  </main>
 </div>
 
 <div id="toast" role="status" aria-live="polite"></div>
