@@ -16,6 +16,11 @@ const ICONS = {
   sun: svg('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>'),
   moon: svg('<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>'),
   system: svg('<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>'),
+  folder: svg('<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>'),
+  chevronRight: svg('<path d="M9 6l6 6-6 6"/>'),
+  clock: svg('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'),
+  star: svg('<path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.5 9.7l5.9-.9z"/>'),
+  starFilled: `<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.5 9.7l5.9-.9z"/></svg>`,
 };
 
 /* ---------- Theme ----------
@@ -231,6 +236,137 @@ $('#launcher').addEventListener('submit', async e => {
   catch (err) { toast(err.message); }
   finally { btn.disabled = false; btn.innerHTML = `${ICONS.play}<span>Launch</span>`; }
 });
+
+/* ---------- Folder picker ----------
+   A touch-friendly modal that browses server directories from "/", plus
+   server-backed Recents and Favorites. Folders only; dotfolders hidden by
+   default. Selecting a folder fills the directory field. */
+$('#browse').innerHTML = ICONS.folder;
+$('#picker-close').innerHTML = ICONS.x;
+
+const picker = $('#picker');
+const pkList = $('#picker-list');
+const pkCrumbs = $('#picker-crumbs');
+const pkFoot = document.querySelector('.picker-foot');
+const pkHiddenInput = $('#picker-hidden');
+let pkTab = 'browse';
+let pkPath = null;      // current browse directory
+let favorites = [];     // cached from /api/places, for the star state
+
+function openPicker() {
+  const typed = $('#dir').value.trim();
+  pkPath = typed.startsWith('/') ? typed : null; // seed from field, else server default (home)
+  api('/api/places').then(p => { favorites = p.favorites; }).catch(() => {}).finally(() => setTab('browse'));
+  picker.showModal();
+}
+function closePicker() { if (picker.open) picker.close(); }
+
+$('#browse').onclick = openPicker;
+$('#picker-close').onclick = closePicker;
+picker.addEventListener('click', e => { if (e.target === picker) closePicker(); }); // backdrop
+pkHiddenInput.addEventListener('change', () => { if (pkTab === 'browse') browseTo(pkPath); });
+$('#picker-select').onclick = () => { if (pkPath) selectFolder(pkPath); };
+$('#picker-tabs').addEventListener('click', e => { const t = e.target.dataset.tab; if (t) setTab(t); });
+
+function setTab(tab) {
+  pkTab = tab;
+  [...$('#picker-tabs').children].forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
+  const browse = tab === 'browse';
+  pkCrumbs.hidden = !browse;
+  pkFoot.hidden = !browse;
+  if (browse) browseTo(pkPath); else renderPlaces(tab);
+}
+
+function starBtn(path) {
+  const fav = favorites.includes(path);
+  return `<button class="pk-star ${fav ? 'on' : ''}" type="button" data-fav="${esc(path)}" aria-label="${fav ? 'Remove favorite' : 'Add favorite'}">${fav ? ICONS.starFilled : ICONS.star}</button>`;
+}
+function folderRow(name, path) {
+  return `<div class="pk-row">
+    <button class="pk-main" type="button" data-nav="${esc(path)}">
+      <span class="pk-icon">${ICONS.folder}</span><span class="pk-name">${esc(name)}</span>
+      <span class="pk-chevron">${ICONS.chevronRight}</span>
+    </button>${starBtn(path)}</div>`;
+}
+function placeRow(path, icon) {
+  const name = path.split('/').filter(Boolean).pop() || path;
+  return `<div class="pk-row">
+    <button class="pk-main" type="button" data-pick="${esc(path)}">
+      <span class="pk-icon">${icon}</span>
+      <span class="pk-col"><span class="pk-name">${esc(name)}</span><span class="pk-sub">${esc(path)}</span></span>
+    </button>${starBtn(path)}</div>`;
+}
+
+async function browseTo(path) {
+  pkList.innerHTML = '<div class="picker-empty">Loading…</div>';
+  try {
+    const q = new URLSearchParams();
+    if (path) q.set('path', path);
+    if (pkHiddenInput.checked) q.set('hidden', '1');
+    const d = await api('/api/browse?' + q);
+    pkPath = d.path;
+    $('#picker-current').textContent = d.path;
+    renderCrumbs(d.path);
+    pkList.innerHTML = d.entries.length
+      ? d.entries.map(e => folderRow(e.name, e.path)).join('') + (d.truncated ? '<div class="picker-empty">…more folders not shown</div>' : '')
+      : '<div class="picker-empty">No subfolders here — use “Use this folder” to pick it.</div>';
+  } catch (err) {
+    if (path) { pkPath = null; return browseTo(null); } // dead-end guard: fall back to home
+    pkList.innerHTML = `<div class="picker-empty">${esc(err.message)}</div>`;
+  }
+}
+
+async function renderPlaces(tab) {
+  pkList.innerHTML = '<div class="picker-empty">Loading…</div>';
+  try {
+    const p = await api('/api/places');
+    favorites = p.favorites;
+    const list = tab === 'recents' ? p.recents : p.favorites;
+    const icon = tab === 'recents' ? ICONS.clock : ICONS.starFilled;
+    pkList.innerHTML = list.length
+      ? list.map(path => placeRow(path, icon)).join('')
+      : `<div class="picker-empty">No ${tab} yet</div>`;
+  } catch (err) { pkList.innerHTML = `<div class="picker-empty">${esc(err.message)}</div>`; }
+}
+
+function renderCrumbs(path) {
+  const parts = path.split('/').filter(Boolean);
+  let acc = '';
+  const out = [`<button class="picker-crumb" type="button" data-nav="/">/</button>`];
+  for (const part of parts) {
+    acc += '/' + part;
+    out.push('<span class="picker-crumb-sep">›</span>');
+    out.push(`<button class="picker-crumb" type="button" data-nav="${esc(acc)}">${esc(part)}</button>`);
+  }
+  pkCrumbs.innerHTML = out.join('');
+  pkCrumbs.scrollLeft = pkCrumbs.scrollWidth; // keep the deepest crumb in view
+}
+
+function refreshStars() {
+  pkList.querySelectorAll('.pk-star').forEach(btn => {
+    const on = favorites.includes(btn.dataset.fav);
+    btn.classList.toggle('on', on);
+    btn.innerHTML = on ? ICONS.starFilled : ICONS.star;
+    btn.setAttribute('aria-label', on ? 'Remove favorite' : 'Add favorite');
+  });
+}
+async function toggleFav(path) {
+  try {
+    favorites = (await api('/api/favorites', { path })).favorites;
+    if (pkTab === 'favorites') renderPlaces('favorites'); else refreshStars();
+  } catch (err) { toast(err.message); }
+}
+function selectFolder(path) { $('#dir').value = path; closePicker(); $('#dir').focus(); }
+
+pkList.addEventListener('click', e => {
+  const fav = e.target.closest('[data-fav]');
+  if (fav) { e.stopPropagation(); toggleFav(fav.dataset.fav); return; }
+  const nav = e.target.closest('[data-nav]');
+  if (nav) { pkPath = nav.dataset.nav; browseTo(pkPath); return; }
+  const pick = e.target.closest('[data-pick]');
+  if (pick) selectFolder(pick.dataset.pick);
+});
+pkCrumbs.addEventListener('click', e => { const c = e.target.closest('[data-nav]'); if (c) { pkPath = c.dataset.nav; browseTo(pkPath); } });
 
 async function poll() {
   try {

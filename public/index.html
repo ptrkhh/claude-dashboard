@@ -55,7 +55,10 @@
   </header>
 
   <form class="command-bar" id="launcher">
-    <input id="dir" class="cb-dir" list="dirs" placeholder="/path/to/project" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Project directory">
+    <div class="cb-dir-wrap">
+      <input id="dir" class="cb-dir" list="dirs" placeholder="/path/to/project" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Project directory">
+      <button id="browse" class="cb-browse" type="button" aria-label="Browse folders"></button>
+    </div>
     <datalist id="dirs"></datalist>
     <div class="cb-select" id="model"></div>
     <div class="cb-select" id="effort"></div>
@@ -76,6 +79,27 @@
     <details id="logbox" class="logs"><summary>Dashboard logs</summary><pre id="logs"></pre></details>
   </main>
 </div>
+
+<dialog id="picker" class="dialog" aria-label="Choose project folder">
+  <div class="dialog-body">
+    <div class="dialog-head">
+      <span class="dialog-title">Choose folder</span>
+      <button id="picker-close" class="icon-btn" type="button" aria-label="Close"></button>
+    </div>
+    <div class="picker-tabs" id="picker-tabs" role="tablist">
+      <button type="button" data-tab="browse" class="on" role="tab">Browse</button>
+      <button type="button" data-tab="recents" role="tab">Recents</button>
+      <button type="button" data-tab="favorites" role="tab">Favorites</button>
+    </div>
+    <div class="picker-crumbs" id="picker-crumbs"></div>
+    <div class="picker-list" id="picker-list"></div>
+    <div class="picker-foot">
+      <label class="picker-hidden"><input type="checkbox" id="picker-hidden"> Show hidden</label>
+      <div class="picker-current"><span class="picker-current-label">Selected</span><span id="picker-current" class="picker-current-path">/</span></div>
+      <button id="picker-select" class="btn-launch" type="button">Use this folder</button>
+    </div>
+  </div>
+</dialog>
 
 <div id="toast" role="status" aria-live="polite"></div>
 <script src="app.js"></script>
