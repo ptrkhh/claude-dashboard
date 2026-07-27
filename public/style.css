@@ -275,21 +275,25 @@ button, input, select { font: inherit; }
 .session.resumable { background: var(--surface-2); box-shadow: var(--shadow-sm); }
 .session.resumable::before { background: var(--border-strong); }
 
-.session-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.session-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+/* Title + branch + tag share one truncating group so the status pill always
+   stays pinned on the first line, even when the external tag is present. */
+.session-headline { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; overflow: hidden; }
 .session-title {
   font-size: 15px; font-weight: 600; letter-spacing: -0.01em; color: var(--text);
-  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .branch {
   font-family: var(--font-mono); font-size: 11.5px; color: var(--text-faint);
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .tag {
+  flex: none;
   font-size: 10px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
   color: var(--info); background: var(--info-weak); border-radius: var(--r-sm); padding: 2px 7px;
 }
 .status {
-  margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+  flex: none; display: inline-flex; align-items: center; gap: 6px;
   font-size: 11.5px; font-weight: 600; white-space: nowrap;
   padding: 3px 9px 3px 8px; border-radius: var(--r-pill);
 }
@@ -307,7 +311,7 @@ button, input, select { font: inherit; }
 .session-meta .sep { color: var(--border-strong); }
 .session-meta .time { margin-left: auto; color: var(--text-faint); }
 .session-head .time {
-  margin-left: auto; color: var(--text-faint); font-size: 12px;
+  flex: none; color: var(--text-faint); font-size: 12px;
   white-space: nowrap; font-variant-numeric: tabular-nums;
 }
 .chip {
