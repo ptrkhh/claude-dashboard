@@ -130,12 +130,12 @@ function gitBadge(g) {
   return `<span class="branch">${s}</span>`;
 }
 
-function statTile({ label, value, pct, title }) {
+function statTile({ label, value, pct, sub }) {
   const cls = pct == null ? '' : pct >= 90 ? 'crit' : pct >= 75 ? 'warn' : '';
   const meter = pct == null ? ''
     : `<div class="meter"><div class="meter-fill ${cls}" style="width:${Math.min(100, Math.max(0, pct))}%"></div></div>`;
-  const tip = title ? ` title="${esc(title)}"` : '';
-  return `<div class="stat"${tip}><div class="stat-top"><span class="stat-label">${label}</span><span class="stat-value">${value}</span></div>${meter}</div>`;
+  const caption = sub ? `<div class="stat-sub">${esc(sub)}</div>` : '';
+  return `<div class="stat"><div class="stat-top"><span class="stat-label">${label}</span><span class="stat-value">${value}</span></div>${meter}${caption}</div>`;
 }
 
 function runningCard(r) {
@@ -198,10 +198,10 @@ function render(d) {
     { label: 'RAM', value: `${fmtKb(st.ramUsedKb)}<span class="unit"> / ${fmtKb(st.ramTotalKb)}</span>`, pct: st.ramTotalKb ? Math.round(st.ramUsedKb / st.ramTotalKb * 100) : null },
     ...st.disks.map(x => ({ label: esc(x.mount), value: `${fmtKb(x.freeKb)}<span class="unit"> free</span>`, pct: x.totalKb ? Math.round((x.totalKb - x.freeKb) / x.totalKb * 100) : null })),
     ...(st.claudeUsage || []).map(u => ({
-      label: `Claude ${esc(u.short)}`,
+      label: esc(u.short),
       value: `${u.pct}<span class="unit">% used</span>`,
       pct: u.pct,
-      title: u.resetsAt ? `${u.long} · Resets ${fmtReset(u.resetsAt)}` : u.long,
+      sub: u.resetsAt ? `Resets ${fmtReset(u.resetsAt)}` : null,
     })),
   ];
   $('#stats').innerHTML = tiles.map(statTile).join('');
