@@ -49,16 +49,17 @@ function render(d) {
   ].map(h => `<div>${h}</div>`).join('');
 
   $('#running').innerHTML = d.running.map(r => `
-    <div class="card run ${r.working ? 'working' : 'idle'}">
+    <div class="card run ${r.working ? 'working' : 'idle'} ${r.external ? 'ext' : ''}">
       <div class="row"><b>${esc(r.dir.split('/').pop())}</b> ${gitBadge(r.git)}
+        ${r.external ? '<span class="tag">external</span>' : ''}
         <span class="badge">${r.working ? '● working' : '○ waiting'}</span><span class="dim">${fmtUp(r.uptimeSec)}</span></div>
-      <div class="dim">${[r.model, r.effort].filter(Boolean).map(esc).join(' · ') || 'resumed'} · cpu ${r.cpu}% · ${fmtKb(r.rssKb)}</div>
+      <div class="dim">${[r.model, r.effort].filter(Boolean).map(esc).join(' · ') || (r.external ? 'external' : 'resumed')} · cpu ${r.cpu}% · ${fmtKb(r.rssKb)}</div>
       ${r.lastMessage ? `<div class="peek" onclick="this.classList.toggle('open')">${esc(r.lastMessage)}</div>` : ''}
       <div class="row">
         ${r.rcLink
           ? `<a class="btn rc" href="${esc(r.rcLink)}" target="_blank" rel="noopener">Open Remote Control ↗</a>`
           : `<span class="btn wait">⏳ waiting for RC link…</span>`}
-        <button class="btn kill" data-kill="${esc(r.name)}" ${r.name === armedKill ? 'data-arm="1"' : ''}>${r.name === armedKill ? 'sure?' : '✕'}</button>
+        ${r.external ? '' : `<button class="btn kill" data-kill="${esc(r.name)}" ${r.name === armedKill ? 'data-arm="1"' : ''}>${r.name === armedKill ? 'sure?' : '✕'}</button>`}
       </div>
     </div>`).join('') || '<p class="dim">none</p>';
 
@@ -88,8 +89,10 @@ document.body.addEventListener('click', async e => {
 
 $('#launch').onclick = async () => {
   const btn = $('#launch');
+  const dir = $('#dir').value.trim();
+  if (!dir) { toast('Enter a project directory first'); $('#dir').focus(); return; }
   btn.disabled = true; btn.textContent = '⏳ launching…';
-  try { await api('/api/launch', { dir: $('#dir').value.trim(), model, effort }); poll(); }
+  try { await api('/api/launch', { dir, model, effort }); $('#dir').value = ''; poll(); }
   catch (err) { toast(err.message); }
   finally { btn.disabled = false; btn.textContent = '▶ Launch Session'; }
 };
