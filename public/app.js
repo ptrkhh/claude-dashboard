@@ -17,6 +17,7 @@ const ICONS = {
   moon: svg('<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>'),
   system: svg('<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>'),
   folder: svg('<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>'),
+  send: svg('<path d="M21.5 2.5 11 13"/><path d="M21.5 2.5 15 21l-4-8-8-4z"/>'),
   chevronRight: svg('<path d="M9 6l6 6-6 6"/>'),
   clock: svg('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'),
   star: svg('<path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.5 9.7l5.9-.9z"/>'),
@@ -149,6 +150,14 @@ function runningCard(r) {
     : `<span class="action pending">${ICONS.spinner}<span>Waiting for link…</span></span>`;
   const kill = r.external ? ''
     : `<button class="action danger" type="button" data-kill="${esc(r.name)}" ${r.name === armedKill ? 'data-arm="1"' : ''} aria-label="Kill session">${r.name === armedKill ? 'Sure?' : ICONS.x}</button>`;
+  // Types into the session's TUI — the thing the Claude app's remote control
+  // can't do. tmux-owned panes only; external sessions live elsewhere.
+  const send = r.external ? ''
+    : `<form class="send" data-send="${esc(r.name)}">
+         <input class="send-input" type="text" placeholder="! gcloud auth login" aria-label="Type into the Claude TUI"
+                autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
+         <button class="send-btn" type="submit" aria-label="Send to session">${ICONS.send}</button>
+       </form>`;
   return `
     <div class="session ${status} ${r.external ? 'external' : ''}">
       <div class="session-head">
@@ -164,6 +173,7 @@ function runningCard(r) {
       </div>
       ${peek}
       <div class="actions">${rc}${kill}</div>
+      ${send}
     </div>`;
 }
 
@@ -198,7 +208,11 @@ function render(d) {
   ];
   $('#stats').innerHTML = tiles.map(statTile).join('');
 
-  $('#running').innerHTML = d.running.map(runningCard).join('') || '<div class="empty">No running sessions</div>';
+  // The 4s poll replaces this grid wholesale, which would wipe a half-typed
+  // command (and drop the phone keyboard) mid-sentence. Leave it alone while
+  // someone is typing into a card; it refreshes on the next poll after blur.
+  if (!document.activeElement?.classList.contains('send-input'))
+    $('#running').innerHTML = d.running.map(runningCard).join('') || '<div class="empty">No running sessions</div>';
   $('#resumable').innerHTML = d.resumable.map(resumableCard).join('') || '<div class="empty">No resumable sessions</div>';
 
   const dirs = [...new Set(d.resumable.map(s => s.dir).filter(Boolean))];
@@ -222,6 +236,21 @@ document.body.addEventListener('click', async e => {
       await api('/api/purge', { sid: el.dataset.purge }); poll();
     }
   } catch (err) { toast(err.message); }
+});
+
+// Send-to-TUI: delegated, because render() replaces the cards every poll.
+document.body.addEventListener('submit', async e => {
+  const form = e.target.closest('form.send');
+  if (!form) return;
+  e.preventDefault();
+  const input = form.querySelector('.send-input');
+  const btn = form.querySelector('.send-btn');
+  const text = input.value.trim();
+  if (!text) return;
+  btn.disabled = true;
+  try { await api('/api/keys', { name: form.dataset.send, text }); input.value = ''; toast('Sent to session'); }
+  catch (err) { toast(err.message); }
+  finally { btn.disabled = false; }
 });
 
 // Launch: submitting the command bar (button or Enter in the directory field).

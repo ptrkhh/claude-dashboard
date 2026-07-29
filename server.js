@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { collectSessions, logBuffer, log, launchSession, resumeSession, assertValidSid } from './lib/collect.js';
 import { listDirs } from './lib/browse.js';
 import { readPlaces, addRecent, toggleFavorite } from './lib/places.js';
+import { parseSendKeys, sendKeysArgs } from './lib/keys.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 const run = promisify(execFile);
@@ -66,6 +67,21 @@ app.post('/api/kill', handle(async req => {
   return { ok: true };
 }));
 app.post('/api/purge', handle(async req => { assertValidSid(req.body.sid); ctx.purged.add(req.body.sid); return { ok: true }; }));
+
+// Type into a session's TUI. Stopgap for the Claude app's remote control,
+// which can send prompts but can't answer a session that asks you to run
+// something interactively (`! gcloud auth login`).
+app.post('/api/keys', handle(async req => {
+  const keys = parseSendKeys(req.body);
+  const [literal, enter] = sendKeysArgs(keys);
+  await run('tmux', literal);
+  // Claude's TUI coalesces a fast burst into a paste; a beat's pause keeps the
+  // Enter a keypress that submits rather than part of the pasted text.
+  await new Promise(r => setTimeout(r, 50));
+  await run('tmux', enter);
+  log(`keys ${keys.name}: ${keys.text.slice(0, 60)}`);
+  return { ok: true };
+}));
 
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`claude-dashboard on http://localhost:${port}`));
