@@ -299,14 +299,23 @@ through to the sections it touched.
 | # | Finding | Severity | Resolution |
 |---|---|---|---|
 | **F-1** | The `Profile` struct still read `auth: None \| Bearer \| CfServiceToken \| Both` — no `Password` variant — while three other sections (the `CDASH_AUTH` table, Rule A, sequencing step 7) required one | MEDIUM | Variant added; composition with `CfServiceToken` stated so the client mirrors the guard chain's AND-semantics |
-| **F-2** | Secret storage still asserted "**one** credential lifecycle" and "no credential in this design is machine-generated." `POST /api/login` mints an opaque sid the client must hold: machine-generated and short-lived. Transport (cookie jar vs. explicit) and restart behaviour were both unspecified — implementation-blocking | HIGH | Two credential classes restored. Sid **persisted** across restarts (user decision), keychain-stored, no `reqwest` cookie jar, explicit attachment. `login_attempted` pinned as in-memory per process so a launch always carries one attempt |
+| **F-2** | Secret storage still asserted "**one** credential lifecycle" and "no credential in this design is machine-generated." `POST /api/login` mints an opaque sid the client must hold. Transport (cookie jar vs. explicit) and restart behaviour were both unspecified — implementation-blocking | HIGH | Specified: no `reqwest` cookie jar, explicit attachment, `login_attempted` in-memory per process so a launch always carries one attempt. **The sid is held in memory and never persisted** — see F-4 |
 | **F-3** | `__Host-` mandates `Secure`, so a browser on a plain-HTTP origin discards the cookie **silently** — login 200s, every later request 401s, `/login` redirects forever, and no symptom points at TLS. Browsers exempt `localhost`, so it reproduces only on first public deploy. Test 8 asserts `Secure` is *present*, which is the property that causes it | HIGH | Boot refuses `password` without an `https://` `CDASH_PUBLIC_URL` unless `CDASH_ALLOW_INSECURE_COOKIE=1`, which drops `Secure` and `__Host-` together. Test 11 added |
 
+| **F-4** | F-2's first resolution **persisted** the sid in the keychain, justified as "the convenience of not re-prompting on every launch." There is no re-prompt to avoid: the passphrase is itself keychain-stored, so the client logs in unattended either way. The real saving is one round trip and one KDF per launch — against a credential granting RCE for up to 12 h *without* the passphrase, unrevocable by changing it | MEDIUM | Persistence dropped. Sid is in-memory only; the second credential class disappears with it. Ponytail rung 1 — the cheaper answer was to delete the thing, not to store it well |
+
 **Correction to this ledger's own record.** P1 reported "credential classes
-2→1". That was true of the design as it stood at `b78d041`, and F-2 reopened it:
-the amended requirement reintroduced a second class through a different door.
-The count is 2. P1's reasoning was not wrong — the WSL ephemeral credential it
-deleted has not returned — but the headline no longer describes the design.
+2→1". F-2 briefly reopened it and F-4 closed it again by deleting the second
+class rather than storing it more carefully. **The count is 1**, and P1's
+headline stands — but it stood for a moment on a design where it was false, which
+is worth recording: a ledger headline is only true of the commit it describes.
+
+**A UX note that decided F-4, and that no severity label captures.** The
+question that resolved it was not "how risky is a stored sid" but "what does the
+user actually do at each launch." The answer — *nothing, either way* — collapsed
+the benefit to zero and made the risk unjustifiable at any size. §"What the user
+actually does" now states the full flow as a table, because a login design is
+judged by the prompts it produces, and that had never been written down.
 
 **The pattern, again.** All three are the ledger's existing shape: *a decision
 correct in isolation, not carried through to the sections it composes with.* The

@@ -103,7 +103,7 @@ a formality.
 | Service worker | Runtime caching, no precache manifest; exists for PWA installability |
 | VPS web browser auth | First-party `password` guard: scrypt hash + opaque session cookie. CF Access optional, not required |
 | Browser session storage | Opaque server-side session id in a `__Host-` cookie. No stateless token, so logout and restart both revoke |
-| Client session storage | The Tauri client persists the session id in the OS keychain across app restarts. Two credential classes, both stored the same way |
+| Client session storage | In memory only, never persisted. The passphrase is keychain-stored, so the client re-logs in on launch without the user present |
 | TLS under `password` | Boot refuses without an `https://` public URL unless `CDASH_ALLOW_INSECURE_COOKIE=1`, because a dropped `Secure` cookie is undiagnosable from its symptom |
 | Login throttling | Delay, never deny. Counts distinct credentials, not attempts |
 | Default bind address | `127.0.0.1` (breaking change), explicit opt-out to expose |
@@ -732,26 +732,25 @@ keystroke stream; an XSS at any later time reads nothing. This is weaker than
 Non-secret profile fields (name, URL, distro) go in `tauri-plugin-store` as
 plain JSON.
 
-There are **two** credential classes. The `password` guard introduced the second:
-before it, every credential was user-entered and long-lived, and the design said
-so. A session id is neither.
+There is **one** credential lifecycle: user-entered, persisted, long-lived. A CF
+service-token pair, a bearer token the user obtained elsewhere, or the `password`
+passphrase — typed once into a form and expected to persist. Replaced only by the
+user.
 
-**Class 1 — user-entered, persisted, long-lived.** A CF service-token pair, a
-bearer token the user obtained elsewhere, or the `password` passphrase: typed
-once into a form and expected to persist. Replaced only by the user.
+**The session id is not stored.** It lives in memory for the life of the client
+process and is discarded on exit. Persisting it was considered and rejected: the
+stated benefit was avoiding a re-prompt on launch, and there is no re-prompt to
+avoid — the passphrase is already persisted, so the client logs in for itself
+without the user present. The real saving would have been one round trip and one
+KDF (~100 ms) per app launch, against a credential that grants RCE for up to 12
+hours *without* the passphrase and that cannot be revoked by changing it. Not
+worth a second credential class.
 
-**Class 2 — server-minted, persisted, short-lived.** The opaque session id from
-`POST /api/login`. Machine-generated, 12-hour absolute lifetime, and — by
-decision — **persisted across app restarts**, so relaunching the client does not
-re-prompt or re-run the KDF while a session is still valid.
-
-Both live in the `keyring` crate: macOS Keychain, Windows Credential Manager,
-Linux Secret Service. A class-2 entry is not weaker than a class-1 entry and must
-not be stored more cheaply — per the trust boundary, **a stolen session id is
-exactly as privileged as the passphrase that minted it**, differing only in
-expiring on its own. The user can see that a credential exists (`has_secret`) and
-can replace or delete it. No managed server is spawned with any credential. Two
-fallbacks are designed in rather than discovered later:
+Stored credentials live in the `keyring` crate: macOS Keychain, Windows
+Credential Manager, Linux Secret Service. The user can see that one exists
+(`has_secret`) and can replace or delete it. No credential is machine-generated
+and no managed server is spawned with one. Two fallbacks are designed in rather
+than discovered later:
 
 - **Headless Linux** with no Secret Service running: fall back to a `0600` file
   in the app config directory, with a visible UI warning that the token is
@@ -761,30 +760,40 @@ fallbacks are designed in rather than discovered later:
   and it is weaker than hardware-backed Keystore.
 
 **Session transport.** `reqwest` is configured with **no cookie jar**. The client
-reads the sid out of `Set-Cookie` on login, stores it, and attaches it explicitly
-on each request. An implicit jar would put a class-2 credential in `reqwest`'s
-in-memory store with no persistence and no `has_secret` visibility, which is the
-opposite of the decision above. Explicit attachment also keeps one rule for all
+reads the sid out of `Set-Cookie` on login, holds it in memory, and attaches it
+explicitly on each request. Explicit attachment keeps one rule for all
 credentials: `api_request` adds what the profile holds, and nothing is added by a
 layer beneath it.
 
-**Restart, and the Rule A interaction.** On launch the client attaches its stored
-sid. If the server has restarted, or 12 hours have passed, that sid draws a 401 —
-which is the *expected* path, not a failure, and it must not surface as
-"credentials rejected." Rule A resolves it: `login_attempted` is **in-memory, per
-process**, so a fresh launch always carries exactly one login attempt. The 401
-discards the stored sid, spends that attempt, stores the new sid, and retries the
-request once.
+### What the user actually does
 
-The bound still holds. A stale *passphrase* yields one attempt per app launch —
-user-initiated, not automatic — and under Rule B every one of those replays the
-same credential, so the throttle counter never advances past 1. Persisting the
-flag instead would be strictly worse: it would make "restart the app" fail to
-recover from a server-side session reset, which is the ordinary case.
+Stated plainly, because a login flow that quietly re-prompts is worse than no
+login flow at all:
 
-`POST /api/logout` deletes the stored sid on success **and on failure** — a
-logout that cannot reach the server must not leave a credential behind. Deleting
-a profile deletes both classes.
+| Moment | What the user does |
+|---|---|
+| Creating a VPS profile | Types the passphrase **once**, into the profile form |
+| Every app launch after that | **Nothing.** The client reads the passphrase from the keychain and logs in for itself — one request, no UI |
+| Session expiring mid-use (12 h) | **Nothing.** The next 401 spends the launch's login attempt, and the request is retried |
+| Passphrase changed on the server | Types the new one **once**, via the **Update password** action that the terminal 401 surfaces |
+| In a browser | Signs in at `/login` when the cookie expires or the server restarts — a browser has no keychain to log in from |
+
+**Rule A makes the automatic path work.** `login_attempted` is **in-memory, per
+process**, so a fresh launch always carries exactly one login attempt. The client
+starts with no session, its first request 401s, that spends the attempt, and the
+request is retried with the new session. A server restart or an expired session
+therefore recovers by itself.
+
+The bound Rule A exists for still holds. A *stale passphrase* yields one attempt
+per app launch — user-initiated, not automatic — and under Rule B every one of
+those replays the same credential, so the throttle counter never advances past 1.
+Persisting the flag instead would be strictly worse: it would make "restart the
+app" fail to recover from an expired session, which is the ordinary case.
+
+`POST /api/logout` discards the in-memory session on success **and on failure** —
+a logout that cannot reach the server must not leave one live in the process.
+
+### Managed-server readiness
 
 Readiness is `GET /api/health` returning 200. Managed servers run with
 `CDASH_AUTH=none`, so there is no credential to mismatch and no authenticated
@@ -1215,12 +1224,11 @@ macOS, safe on a VPS, **and operable on a VPS**, with or without any Tauri work.
   concurrent connections, ~51 req/s). This process cannot defend that and does
   not claim to; existing sessions are unaffected, but a 12-hour absolute
   lifetime means a long enough attack eventually bites.
-- **Persisting the session id widens what a stolen keychain yields.** A class-2
-  entry read off a compromised client grants RCE for up to 12 hours *without the
-  passphrase*, and unlike the passphrase it cannot be changed to revoke — only
-  `POST /api/logout` or a server restart clears it. Accepted for the convenience
-  of not re-prompting on every launch; the entry sits behind the same OS keychain
-  as the passphrase, so the attacker who reads one reads both anyway.
+- **Every app launch costs one login round trip** (~100 ms of KDF on the server).
+  The alternative — persisting the session id — was rejected: it buys only that
+  round trip, since the passphrase is already stored and no re-prompt is avoided,
+  and it costs a credential that grants RCE for up to 12 hours without the
+  passphrase and cannot be revoked by changing it.
 - **A forgotten passphrase is unrecoverable** — no reset flow, by design, since
   one needs an identity provider. Remedy is shell access to re-set the hash.
 - **Offline works from the second visit.** A service worker does not control the
