@@ -259,7 +259,7 @@ One Rust codebase, one binary per platform, driven by user-configured profiles:
 ```
 Profile {
   name, base_url,
-  managed: None | Node { .. } | Wsl { distro, .. },   // does the client start the server?
+  managed: None | InProcess | Wsl { distro, .. },   // how does the agent get running?
   auth:    None | Password | Bearer | CfServiceToken | Bearer+CfServiceToken,
 }
 ```
@@ -1141,9 +1141,11 @@ required.
   removable by the documented command.
 
 Distro selection comes from `wsl.exe -l -q` (note: UTF-16LE output), shown as a
-settings dropdown defaulting to the WSL default distro. Windows uses the distro's
-own Node — a Windows Node binary cannot run inside WSL — with detect-and-guide if
-absent. Node is near-certainly present, since Claude Code requires it.
+settings dropdown defaulting to the WSL default distro. **The distro needs no
+Node and no runtime of any kind** — a static `x86_64-unknown-linux-musl` binary
+is copied in and executed directly, which is the point of the copy-in path above.
+The Node design's detect-and-guide-if-absent step is deleted along with the
+dependency that motivated it.
 
 Because the folder picker browses *the server's* filesystem, it naturally shows
 WSL paths. No `\\wsl$\` path translation is needed anywhere.
@@ -1300,7 +1302,7 @@ single-host local tool, not across four platforms and a network.
 | Managed server will not start | readiness probe times out, **or the spawned child exits non-zero** | Startup screen with the child's captured stderr |
 | Port held by another process | spawned child exits 3 with `port <p> already in use` | Same startup screen, naming the port. The spawn result outranks a successful health poll |
 | `tmux` or `claude` missing | `HostProfile` probe via `/api/hostinfo` | Setup screen naming the binary and install command |
-| Wrong WSL distro, or no Node in it | `wsl.exe` exit code and stderr | Settings error naming the distro |
+| Wrong WSL distro, or the copied-in binary will not execute | `wsl.exe` exit code and stderr | Settings error naming the distro |
 | Host unreachable | `api_request` transport error | "Cannot reach host" plus the URL tried |
 | Auth rejected | HTTP 401 or 403 | "Reached host, auth rejected" plus the profile's configured auth method and URL. The server body names no guard. Halts the poll |
 | Stored password out of date | 401 after the profile's one login attempt | "Reached host, credentials rejected — the stored password may be out of date" with an **Update password** action. Halts the poll; no further login attempt until the credential is edited |
