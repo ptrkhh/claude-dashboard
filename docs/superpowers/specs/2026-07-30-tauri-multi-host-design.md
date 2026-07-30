@@ -528,7 +528,15 @@ a zero, because it is plausible.
   processes and the resident cost is under 600 KB, so this is not a tradeoff.
 - Serve CPU as **`null` when the sample is younger than 200 ms or older than a
   60-second cap**, alongside a `cpuSampleAgeMs` field — never a number the server
-  knows to be wrong. The UI renders `null` as `—`, not `0%`.
+  knows to be wrong.
+- **The UI must render `null` as `—`.** It does not today: `app.js:162`
+  interpolates `r.cpu` directly, so a `null` reaches the page as the string
+  `cpu null%`. The one-line fix (`r.cpu ?? '—'`) is the **sole exception** to
+  "the pivot does not rewrite `public/`", and it ships **with step 3**, not with
+  the step 7 UI work. Step 7 is otherwise independent of phase 1; this line is
+  not, because between a step 3 that emits `null` and a step 7 that renders it,
+  the dashboard would display `cpu null%` — a defect introduced by a remedy and
+  fixed two phases later.
 - Do **not** add a background ticker to keep the sample warm. Rung 1 of the
   ponytail ladder applies — the mechanism is not needed, since consecutive user
   polls are already 4 s apart — and on Android an always-on 200 ms loop is
@@ -1164,7 +1172,13 @@ login flow at all:
 | Every app launch after that | **Nothing.** The client reads the passphrase from the keychain and logs in for itself — one request, no UI |
 | Session expiring mid-use (12 h) | **Nothing.** The next 401 spends the launch's login attempt, and the request is retried |
 | Passphrase changed on the server | Types the new one **once**, via the **Update password** action that the terminal 401 surfaces |
+| **Keychain locked at launch** | **Unlocks the keychain** and retries. The credential is not readable and is deliberately *not* re-prompted for — re-prompting would train the user to retype an RCE-granting passphrase whenever a dialog appears, and writing it elsewhere is what the [fallback trigger](#secret-storage) exists to prevent |
+| **Running on the unencrypted file fallback** | **Nothing**, but a persistent banner names the exposure until a working keychain is found and the credential migrates back automatically |
 | In a browser | Signs in at `/login` when the cookie expires or the server restarts — a browser has no keychain to log in from |
+
+The two keychain rows are the only launches that are not "nothing", and neither
+is a re-prompt. This is the cost of the narrow fallback trigger: a locked store
+blocks rather than silently degrading to plaintext.
 
 **Rule A makes the automatic path work.** `login_attempted` is **in-memory, per
 process**, so a fresh launch always carries exactly one login attempt. The client
@@ -1513,6 +1527,8 @@ single-host local tool, not across four platforms and a network.
 | Host unreachable | `api_request` transport error | "Cannot reach host" plus the URL tried |
 | Auth rejected | HTTP 401 or 403 | "Reached host, auth rejected" plus the profile's configured auth method and URL. The server body names no guard. Halts the poll |
 | Stored password out of date | 401 after the profile's one login attempt | "Reached host, credentials rejected — the stored password may be out of date" with an **Update password** action. Halts the poll; no further login attempt until the credential is edited |
+| Keychain locked or inaccessible | `NoStorageAccess` from `Entry::new()` | "The keychain is locked — unlock it and retry." Blocks the launch; **nothing is written to disk** and no re-prompt is offered. Retry is the only action |
+| No keychain on this machine | `NoDefaultStore` / `PlatformFailure` from `Entry::new()` | Falls back to the `0600` file with a persistent banner naming the exposure. Non-blocking; clears automatically when a keychain appears and the credential migrates back |
 | Host throttling logins | HTTP 429, or 503 with `Retry-After` | Transient: back off and retry, honouring `Retry-After`. **Never halts** — a halt here would let an attacker who saturates the throttle stop a client whose credentials are valid |
 | CF JWT expired in browser | 403 from the `cf-access` guard | Full-page reload; the service worker passes navigations to the network, so the CF SSO redirect fires |
 | Server version differs from client | `/api/hostinfo` version | Non-blocking banner |
@@ -1742,14 +1758,29 @@ honest.
    finished; nothing after it may begin while it fails. The Node tree stays on
    disk until this passes and is deleted immediately after.
 
-   **`/api/sessions` — field-by-field equality**, with two declared exemptions:
-   `cpu` (a sampled quantity in Rust and a lifetime average under BSD `ps` — see
-   [the sampling rule](#host-layer--os-abstraction)), and any field whose
-   **type** may now be `null` where Node emitted a number. The exemption is on
-   type as well as value; asserting only on value would pass a `null` against a
-   `0`. Everything else, `dir` included, must match exactly — which is why the
-   tmux remedy above deliberately preserves Node's field semantics rather than
-   improving them.
+   **`/api/sessions` — field-by-field equality over a closed exemption list.**
+   The list is enumerated here, not expressed as a predicate: a rule like "any
+   field whose type changed" would exempt a real port defect *because* the port
+   caused it, which is the one thing this gate exists to catch.
+
+   | Exempt field | Why it cannot be compared for equality |
+   |---|---|
+   | `uptimeSec` | Clock-derived (`collect.js:254`); differs between two agents run seconds apart. **Assert: both ≥ 0 and within 5 s of each other.** |
+   | `working` | Clock-derived (`collect.js:247`, a 10 s window on transcript mtime). **Assert: equal when both runs fall on the same side of the window; otherwise skipped.** |
+   | `git` | The 15 s background cache (`4551f39`) returns `null` cold and an object warm, so the value depends on which run warmed it. **Assert: warm both agents first, then compare the object.** |
+   | `cpu` | A sampled quantity in Rust, a lifetime average under BSD `ps` — see [the sampling rule](#host-layer--os-abstraction). **Assert: type only.** |
+   | `cpuSampleAgeMs` | Rust-only; Node has no such field. **Assert: present in Rust, absent in Node.** |
+
+   Everything else — `name`, `dir`, `pid`, `model`, `effort`, `rcLink`, `sid`,
+   `lastMessage` — must match **exactly**, `dir` included. That is why the tmux
+   remedy above deliberately preserves Node's field semantics rather than
+   improving them: an improvement here would be indistinguishable from a
+   regression.
+
+   *Adding a sixth exemption is a design decision, not a test fix.* Each of the
+   five above is a property of the data, not of the port; a new one almost
+   certainly means the port changed behaviour, which is the finding the gate is
+   for.
 
    **`/api/logs` — not compared for equality.** It cannot be: lines carry
    `HH:MM:SS` (`collect.js:23`), the buffer is a 200-entry ring whose contents
@@ -1816,7 +1847,22 @@ honest.
 **Release engineering** is not a step but a standing obligation from step 5 on:
 `x86_64` and `aarch64` musl static builds for VPS, WSL, and Termux, plus the
 desktop targets. It is new work the Node design never carried, because shipping a
-`node` binary meant shipping someone else's build.
+`node` binary meant shipping someone else's build. Three things it must carry
+from the start:
+
+- **`-D clippy::disallowed_types` is a required gate**, not advisory — it is the
+  only enforcement of the subprocess time-box (see
+  [the command helper](#host-layer--os-abstraction)). A green build with this
+  lint disabled is not a valid release.
+- **Pin the linkage explicitly.** `x86_64-unknown-linux-musl` produces static-PIE
+  and `aarch64-unknown-linux-musl` produces static non-PIE under `rust-lld`;
+  cross-building the latter requires `-C linker=rust-lld` or an equivalent
+  toolchain. Both were built here; only the x86_64 one was executed.
+- **`aarch64` ships for the VPS from step 5, so it must be executed by step 5** —
+  on any `aarch64` Linux host, which is an ordinary cloud instance. Do not defer
+  this to step 11: step 11 is Android, it is deferred, and leaving the only
+  execution of an `aarch64` binary inside a deferred step means shipping an
+  architecture to VPS users that nothing has ever run.
 
 Steps 1–6 are independently valuable: they make the agent correct on macOS, safe
 on a VPS, and operable on a VPS, with no Tauri work at all. Step 7 is independent
@@ -1901,6 +1947,12 @@ of all of them.
 - **The untested surface is the newest surface.** Automated coverage reaches
   steps 1–4 well. Everything from step 5 on — spawn precedence, WSL lifecycle,
   the loopback measurement, keychain access — is manual-checklist-only.
+- **Two ordering hazards are closed by sequencing alone, and would re-open if the
+  sequence were rearranged.** The `cpu ?? '—'` render ships with step 3 rather
+  than with the step 7 UI work, because a step 3 that emits `null` without it
+  displays `cpu null%` until phase 2; and the `aarch64` build is executed at step
+  5 rather than at the deferred step 11, because it ships to VPS users from step
+  5. Neither is enforced by anything but this document.
 - **Every host under the registrable domain is inside the trust boundary.** A
   compromised sibling subdomain is same-site, and only the content-type layer
   stands between it and an authenticated POST.
