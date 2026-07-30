@@ -19,6 +19,20 @@ We want three delivery modes:
    known at build time and access is guarded by Cloudflare Access (with other
    auth methods possible)
 
+**Amended requirement (2026-07-30).** The site — e.g. `claude.myweb.site` — must
+be reachable from a plain browser on the public internet **with no separate LAN
+app and no mandatory identity provider**: no Tailscale, no Cloudflare Zero
+Trust. A user who *wants* those may still use them. This makes CF Access an
+optional path rather than the browser path.
+
+> **Unresolved: first-party browser auth.** The guard chain as specified has no
+> browser-usable first-party method. `cf-access` is now optional; `bearer`
+> cannot be attached by a browser; `trusted-proxy` requires the reverse proxy
+> that must not be mandatory; `none` is an unauthenticated RCE origin on the
+> public internet. A browser therefore has no way to authenticate. This is a
+> HIGH-severity gap against the amended requirement and is under design; nothing
+> below should be read as closing it.
+
 ## Constraints that shape the design
 
 **The backend cannot move into the client.** `lib/collect.js` shells out to
@@ -72,7 +86,7 @@ If any of these differ, the `cf-access` guard changes but no other component doe
 
 Nothing in this design was verified on macOS, Windows, WSL, Android, or against
 a live Cloudflare tenant. Every claim about those five is reasoned rather than
-tested. The first manual checklist run is the first real test of steps 6–9, not
+tested. The first manual checklist run is the first real test of steps 5–8, not
 a formality.
 
 ## Decisions
@@ -83,10 +97,11 @@ a formality.
 | Client transport | All API calls proxied through Rust, not webview `fetch` |
 | macOS missing `tmux` | Detect and guide the user to `brew install tmux`; do not bundle |
 | Auth architecture | Pluggable guard chain, composable, AND-semantics |
-| VPS web browser auth | CF Access JWT verification only, no bearer token |
+| Service worker | Runtime caching, no precache manifest; exists for PWA installability |
+| VPS web browser auth | **OPEN — see "Unresolved: first-party browser auth"** |
 | Default bind address | `127.0.0.1` (breaking change), explicit opt-out to expose |
 | JWT verification | Add the `jose` dependency; do not hand-roll |
-| UI module system | Classic scripts publishing globals; no build step, no bundler |
+| UI module system | Classic scripts only; transport branch inside `api()`; no build step, no bundler |
 
 ## Architecture
 
@@ -101,40 +116,46 @@ chain.
 
 ### 2. UI — `public/`
 
-One copy, shared by all delivery modes. `api()` (`public/app.js:112`) stops
-calling `fetch` directly and goes through a transport selected at runtime.
+One copy, shared by all delivery modes. The transport branch lives **inside
+`api()`** (`public/app.js:112`), which the design already identifies as the
+single chokepoint:
 
-Four **statically declared classic scripts**, loaded in document order before
-`app.js`:
-
-```html
-<script src="transport/backoff.js"></script>   <!-- globalThis.CDASH_BACKOFF    -->
-<script src="transport/web.js"></script>       <!-- CDASH_TRANSPORTS.web        -->
-<script src="transport/tauri.js"></script>     <!-- CDASH_TRANSPORTS.tauri      -->
-<script src="transport/select.js"></script>    <!-- globalThis.CDASH_TRANSPORT  -->
-<script src="app.js"></script>
+```js
+async function api(path, body) {
+  if (isTauri) return invokeTauri(path, body);   // ~7 lines inside the existing function
+  ...                                            // existing fetch path, unchanged
+}
 ```
 
-`select.js` **selects over already-loaded globals and loads nothing**. This is
-load-bearing: `app.js:386` calls `poll()` synchronously at top level, which
-reaches `api()` and therefore the transport global. Every runtime script-loading
-mechanism available to a classic script is asynchronous, so any arrangement in
-which `select.js` *fetches* an implementation throws `TypeError` on first paint.
-Parser-inserted classic scripts without `async`/`defer` execute synchronously in
-document order, which is what makes the global safe to read.
+No new files, no script tags, no load ordering. `api()`'s body evaluates when
+it is *called*, long after `app.js` has finished parsing, so the synchronous
+top-level `poll()` at `app.js:386` is safe by construction rather than by
+careful arrangement.
 
-Accepted costs: `tauri.js` ships to web clients and `web.js` ships to Tauri
-clients (a few hundred inert bytes each, each guarding its own availability),
-and four script tags must stay mirrored in `sw.js`'s `SHELL` — which the
-shell-manifest test enforces.
+A separate-file transport layer was rejected: `public/app.js` is a classic
+script with no `import`/`export` statements, so selecting between implementation
+files requires either `type="module"` (which changes scope and execution timing
+throughout a 388-line file relying on top-level globals) or a runtime loader
+(every mechanism available to a classic script is asynchronous, so it races
+`poll()` and throws `TypeError` on first paint). Branching inside the chokepoint
+has neither problem.
 
-`type="module"` was rejected: `public/app.js` is a 388-line classic script with
-no `import`/`export` statements that relies on top-level globals, so converting
-it changes scope and execution timing throughout.
+`public/transport/backoff.js` is the one new file, and it exists for
+**testability**, not transport selection — see [UI logic tests](#testing).
 
-Nothing else in the UI changes *for the transport swap itself*. Two adjacent
-changes ship alongside it: the service-worker shell list and cache version, and
-the error-model changes under [Error handling](#error-handling).
+**The Tauri detection predicate must be measured, not assumed.** `isTauri` keys
+on a global the Tauri runtime injects before page scripts. Whether that global
+is present is a *configuration* question, not a runtime guarantee — current
+Tauri exposes it only on opt-in, and the documented alternative is importing the
+API as a module, which needs a bundler and would break the no-build-step
+property. Confirm the flag during step 5 and record the predicate here. This
+matters twice: the predicate gates the transport branch **and** service-worker
+registration, so a wrong answer silently gives a Tauri webview the web transport
+*and* a registered service worker whose same-origin `/api/` assumption is
+exactly what breaks there.
+
+Nothing else in the UI changes *for the transport swap itself*. The error-model
+changes under [Error handling](#error-handling) ship alongside it.
 
 ### 3. Tauri client — `src-tauri/`
 
@@ -200,20 +221,37 @@ screen rather than a hang. Without the timeout, a login shell that prompts or a
 screen shows the sidecar's captured stderr — which is empty, because the process
 hung rather than failed.
 
-**Binary resolution.** `host.bin('tmux')` returns an **absolute path**, resolved
-through a lookup chain — bundled resource, then `PATH`, then known locations
-(`/opt/homebrew/bin`, `/usr/local/bin`) — recording which are missing. Every
-call site passes the resolved absolute path as `cmd`. This touches all seven
-current sites: `lib/collect.js:41,135,141,221,222,223` and `server.js:63`.
+Known locations are folded into the same assignment rather than being a
+resolution tier:
 
-The claim that this chain "allows bundling a binary later without touching call
-sites" applies to *subsequent* changes; introducing the seam necessarily touches
-every site that will use it.
+```js
+process.env.PATH = dedupe([probedPath, '/opt/homebrew/bin', '/usr/local/bin',
+                           inheritedPath]).join(path.delimiter);
+```
 
-`server.js:63`'s `run('tmux', ['kill-session', …])` additionally moves into
-`lib/collect.js` as an exported `killSession(ctx, name)`, so `server.js` contains
-no subprocess call at all and the invariant "all subprocess spawning lives in
-`lib/`" becomes checkable by grep. `server.js` keeps the name-regex validation.
+`/opt/homebrew/bin` and `/usr/local/bin` are **the backstop for a failed probe**,
+not a step toward bundling. If the probe times out, boot continues with the
+inherited PATH — which on a macOS GUI launch is exactly the minimal PATH the
+probe existed to fix, so without these entries the fallback fixes nothing. The
+probed login-shell PATH still comes first, so a user's own ordering wins.
+
+**No absolute-path binary resolution, and no call-site changes.** All seven
+invocations (`lib/collect.js:41,135,141,221,222,223` and `server.js:63`) pass
+bare names, and one `process.env.PATH` assignment resolves all of them — the
+effect is process-global and reaches a spawn issued from any module, including
+`server.js:63`. Verified.
+
+A bundled-resource → PATH → known-locations lookup chain returning absolute
+paths was rejected: it would change seven call sites to achieve what one
+assignment achieves, and its only stated purpose is enabling a bundled `tmux`,
+which §Out of scope says will not happen. If that is ever reversed, the seven
+call-site edits are one mechanical commit — which is what "a later configuration
+change rather than a rewrite" always meant.
+
+**Missing-binary detection** is a pure function, not a side effect of
+resolution: `fs.accessSync(…, X_OK)` over `PATH.split(path.delimiter)` for each
+of `tmux`, `claude`, `git`, `ps`, `df`. No subprocess, unit-testable, and it is
+what feeds `/api/hostinfo`'s `missing: [...]`.
 
 **The `df` fix.** `lib/collect.js:223` uses `df -k --output=target,avail,size`,
 which is GNU coreutils only and fails on macOS, where BSD `df` has no
@@ -406,8 +444,8 @@ that reaches a previous-generation server holding the port.
 
 Bumping the version is what invalidates the WSL copy-in cache. Forgetting to
 bump it after editing `lib/` leaves a stale server in the distro, and **no
-adopted mechanism detects that** — the token matches, the version matches, and
-reclamation does not fire. It is on the Windows manual checklist.
+adopted mechanism detects that** — the versions match, so the skew banner cannot
+fire. It is on the Windows manual checklist.
 
 ## Tauri client
 
@@ -446,14 +484,13 @@ keystroke stream; an XSS at any later time reads nothing. This is weaker than
 Non-secret profile fields (name, URL, distro) go in `tauri-plugin-store` as
 plain JSON.
 
-**Two credential classes.**
-
-**Class 1 — user credentials.** A CF service-token pair or a bearer token the
-user obtained elsewhere, typed once into a form, and expects to persist. Stored
-via the `keyring` crate: macOS Keychain, Windows Credential Manager, Linux
-Secret Service. Long-lived; survives app restarts; the user can see that one
-exists (`has_secret`) and can replace or delete it. Two fallbacks are designed
-in rather than discovered later:
+There is **one** credential lifecycle: user-entered, persisted, long-lived. A CF
+service-token pair or a bearer token the user obtained elsewhere, typed once into
+a form, and expected to persist. Stored via the `keyring` crate: macOS Keychain,
+Windows Credential Manager, Linux Secret Service. The user can see that one
+exists (`has_secret`) and can replace or delete it. No credential in this design
+is machine-generated, and no managed server is spawned with one. Two fallbacks
+are designed in rather than discovered later:
 
 - **Headless Linux** with no Secret Service running: fall back to a `0600` file
   in the app config directory, with a visible UI warning that the token is
@@ -462,99 +499,89 @@ in rather than discovered later:
   the OS isolates per-app. This is the same protection Termux's own data has,
   and it is weaker than hardware-backed Keystore.
 
-**Class 2 — ephemeral managed-server credentials.** Machine-generated by the
-Tauri client at spawn time for a server *it starts* — currently the WSL
-profile's `CDASH_TOKEN`. Never shown to the user, never written to the keyring,
-never written to the fallback file, never placed in `tauri-plugin-store`; held
-only in the Tauri process's memory and passed to the child through its
-environment. The user cannot see it, is never asked for it, and must never be
-asked to fix it — **a prompt for a Class 2 credential is a bug by definition.**
-
-**The governing rule.** *An ephemeral credential must not outlive, nor be
-outlived by, the server process it authenticates.* The client owns both ends of
-the pair and must keep them in the same generation.
-
-**Where the rule is violated, and what must follow.** The client cannot
-guarantee the server dies with it — killing `wsl.exe` does not reliably kill the
-Linux process, orphans hold the port, and nothing automated proves teardown
-works. So the rule is enforced by **detection and reclamation**, not by
-assumption: a managed profile that reaches a listening server it cannot
-authenticate to has, by the rule, found a previous generation of its own server.
-It must reclaim and respawn, never surface the condition as an auth failure.
-
-The Linux/macOS sidecar uses `CDASH_AUTH=none`, has no Class 2 credential, and
-no generation to mismatch; the rule is vacuous there. If a future change gives
-it a token, the reclamation path becomes mandatory for it too.
-
 ### Managed-server readiness
 
-Readiness is a **two-step probe**, on every managed platform:
+Readiness is `GET /api/health` returning 200. Managed servers run with
+`CDASH_AUTH=none`, so there is no credential to mismatch and no authenticated
+second step.
 
-1. Poll `GET /api/health` until 200 — *something* is listening.
-2. Call `GET /api/hostinfo` **with the profile's credentials**. Only a 200 here
-   declares the managed server ready.
+**Precedence, which must be stated because the two signals can disagree.** The
+client spawns a server *and* polls health, and when an orphan holds the port
+those return contradictory answers: the spawned child exits 3 with
+`port <p> already in use` on stderr while `/api/health` returns 200 from the
+orphan. **The spawn result wins.** A client whose child exited non-zero does not
+proceed on a successful health poll; it reports the startup failure with the
+child's stderr and stops. Otherwise the client silently binds its session to a
+server it did not start, of a previous generation, with only a non-blocking
+banner to say so.
 
-- `hostinfo` **200** → ready; load the UI.
-- `hostinfo` **401/403 on a managed profile** → the port is held by a server this
-  client cannot authenticate to. Diagnosed as **"a previous server is still
-  running"**, not as an auth failure. Reclaim (below) and respawn **once**. If
-  the second attempt also fails, report and stop.
-- `hostinfo` **401/403 on a VPS profile** → genuine auth failure.
-
-Using an unauthenticated liveness probe as a readiness signal is what would
-otherwise let an orphaned server answer 200 while rejecting every real call, on
-a profile where the user was never asked for a credential and has nothing to
-correct.
+A previous-generation orphan that *does* answer successfully — because the
+client's own spawn was never attempted, or succeeded on another port — is caught
+by the version-skew banner, which is the design's only detector for that case.
 
 ### Managed server, per platform
 
 **Linux and macOS.** Tauri sidecar. Bundle a per-arch `node` binary plus
 `server.js` and `lib/` as resources. On launch: pick a free port, spawn
 `node server.js` with `CDASH_BIND=127.0.0.1` and `CDASH_AUTH=none`, run the
-two-step readiness probe, then load the UI. No-auth is correct here precisely
+readiness probe, then load the UI. No-auth is correct here precisely
 because the socket is loopback-only **on the same kernel**, with no relay in
 between, and free-port selection means a new client never contacts an orphan.
 Tear the child down explicitly on exit.
 
 **Windows.** Spawn through `wsl.exe -d <distro> -- bash -lc "..."`.
 
-- **Spawn contract:** `CDASH_BIND=127.0.0.1` inside the distro, plus
-  `CDASH_AUTH=bearer` and `CDASH_TOKEN=<random per-launch secret>` generated by
-  the client and held in memory (Class 2). The client attaches it via
-  `api_request`, so no UI or user action is involved. Rationale: whether WSL2's
-  localhost relay reaches a `127.0.0.1` listener inside the distro, or requires
-  `0.0.0.0`, is unverified. The token makes the safety posture **independent of
-  that answer** — if a fix later requires `0.0.0.0`, the listener is still
-  credentialed. Cost is near zero; the token path already exists.
+- **Spawn contract:** `CDASH_BIND=127.0.0.1` and `CDASH_AUTH=none` inside the
+  distro — identical to the Linux/macOS sidecar. The exposure is "any local
+  process on the Windows box," which is the same exposure the sidecar's
+  same-kernel loopback argument already accepts on two other platforms.
+- **Measure the relay before building around it.** Whether WSL2's localhost
+  forwarding reaches a `127.0.0.1` listener inside the distro is unverified, and
+  step 6 cannot be implemented without a Windows machine anyway — at which point
+  the check costs one command. Do it first.
+
+  **There is no code path that binds `0.0.0.0` with `CDASH_AUTH=none`.** If the
+  client cannot reach the server it started, it reports *"the server started
+  inside `<distro>` but is not reachable at `localhost:<port>`; WSL loopback
+  forwarding is not working on this system"* and **stops**. It does not retry on
+  another interface, does not fall back, and offers no setting that would. If
+  the measurement comes out badly, Windows delivery is blocked until this is
+  redesigned with a measured fact in hand. That risk is real and is stated here
+  rather than concealed behind a credential that made the design independent of
+  an answer nobody had looked up.
+
+  Note this constraint is a design constant in the client, not a runtime
+  assertion: `CDASH_BIND=0.0.0.0` remains permitted generally, because the bind
+  decision deliberately allows it behind a warning. Nothing mechanically
+  prevents a future edit from adding the fallback.
 - **Copy the server into the distro** at `~/.cdash/<version>/` on first run and
   on version change, rather than executing from `/mnt/c/...`. Running Node
   across the 9p filesystem boundary is slow and occasionally unreliable.
-- **Pidfile rules.** Shutdown and reclamation both depend on the pidfile, so its
-  semantics are specified rather than assumed:
+- **Pidfile rules.** Shutdown depends on the pidfile, so its semantics are
+  specified rather than assumed:
   1. The pidfile is written **only after the `listening` event fires — never
      before**. It contains `{pid, port, version, startedAt}`.
   2. It is deleted on clean exit.
-  3. On `EADDRINUSE` the server exits 3 with stderr and writes **no pidfile**
-     (see [Server structure](#server-structure)).
-  4. Reclamation trusts a pidfile only if its recorded `port` equals the port
-     being probed **and** its `pid` is live. Otherwise the client reports
-     *"port `<p>` is held by a process this client did not start"* — naming
-     **the port, never a pid**. A dead or mismatched pid is never shown.
-  5. After the kill, the client polls until `/api/health` stops answering
-     (bounded, 5s) before respawning. Exactly one respawn.
+  3. On `EADDRINUSE` the server exits 3 with a diagnosed stderr line and writes
+     **no pidfile** (see [Server structure](#server-structure)).
 
   Rules 1 and 3 together mean the pidfile can only ever name a process that
   actually listened. Without them, a server that dies on a held port before
-  listening leaves a pidfile naming a dead pid; reclamation then kills a corpse,
-  the respawn fails, the client reports a pid that was never the orphan, and the
-  real orphan survives every restart.
+  listening leaves a pidfile naming a dead pid, and teardown kills a corpse while
+  the real orphan survives every restart. This is required for teardown alone and
+  does not depend on any recovery protocol.
 - **Cleanup.** The copy-in path is keyed by version, so a new version creates a
-  new directory rather than replacing one. On a successful start, delete every
-  `~/.cdash/*` directory other than the one just started from. Uninstalling the
-  Tauri app leaves `~/.cdash/` behind, because an uninstaller cannot reach inside
-  a WSL distro; the README documents `rm -rf ~/.cdash` as the manual step. This
-  is the only place in the design that writes persistent state into a namespace
-  an uninstaller cannot reach.
+  new directory rather than replacing one. Uninstalling the Tauri app leaves
+  `~/.cdash/` behind, because an uninstaller cannot reach inside a WSL distro;
+  the README documents `rm -rf ~/.cdash` as the manual step, and the Windows
+  checklist includes it. This is the only place in the design that writes
+  persistent state into a namespace an uninstaller cannot reach.
+
+  No automatic garbage collection. Deleting directories inside a filesystem the
+  app does not own is real behaviour with a real blast radius, traded against a
+  few megabytes per version on a developer's home directory — a cost, not a
+  failure. Accumulation is unbounded but slow, single-platform, visible, and
+  removable by the documented command.
 
 Distro selection comes from `wsl.exe -l -q` (note: UTF-16LE output), shown as a
 settings dropdown defaulting to the WSL default distro. Windows uses the distro's
@@ -592,41 +619,78 @@ carries to a phone webview without layout work.
 
 ### Service worker
 
-`public/sw.js` caches `/`, `/app.js`, and other shell paths. Three changes:
+**Why `sw.js` exists.** Not primarily for offline caching. `public/manifest.json`
+declares `"display": "standalone"` with `start_url` and icons, and
+`index.html:22` links it — this is a genuine installable PWA, and installability
+requires a service worker with a fetch handler. Its load-bearing job is the
+**Android delivery mode**; caching is secondary. State that before deciding how
+much caching machinery it deserves.
 
-**Navigations become network-first.** Today the fetch handler is cache-first for
-everything outside `/api/`, and `SHELL` includes `/`. That means a full-page
-reload is answered from cache and never reaches the network — so the prescribed
-recovery for an expired CF session (reload, re-trigger the SSO redirect) cannot
-execute, because the request never reaches Cloudflare's edge.
+**No precache manifest.** The `SHELL` array and `install`'s `addAll` are deleted.
+A hand-maintained precache list is a build artifact in a project with no build
+step, and keeping it synchronised with `index.html` produced four separate
+defects during design review, every one caught by a person reading and none by a
+tool, each invisible in development because a browser with an empty cache works
+perfectly. Runtime caching needs no manifest, so there is nothing to drift.
 
 ```js
+const CACHE = 'cdash';   // namespace, not a version — never bumped
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
-  if (url.pathname.startsWith('/api/')) return;                     // network only, unchanged
+  if (url.pathname.startsWith('/api/')) return;                  // network only, unchanged
   if (e.request.mode === 'navigate') {
-    e.respondWith(fetch(e.request).catch(() => caches.match('/'))); // network first, cache is offline fallback
+    e.respondWith(fetch(e.request)
+      .then(r => { if (r.ok) caches.open(CACHE).then(c => c.put('/', r.clone())); return r; })
+      .catch(() => caches.match('/')));                           // network first
     return;
   }
-  e.respondWith(caches.match(e.request).then(hit => hit || fetch(e.request)));
+  e.respondWith(caches.match(e.request).then(hit => {             // stale-while-revalidate
+    const fresh = fetch(e.request)
+      .then(r => { if (r.ok) caches.open(CACHE).then(c => c.put(e.request, r.clone())); return r; })
+      .catch(() => hit);
+    return hit || fresh;
+  }));
 });
 ```
 
-Sub-resources stay cache-first, so the offline story is unchanged; the `catch`
-bounds the online-but-slow cost at one failed request.
+**`if (r.ok)` on every `cache.put` is load-bearing, not defensive.** `addAll`
+rejected the whole install if any response was not ok — a fail-closed guarantee
+that made it *impossible* to cache an error body. `cache.put` has no such
+guarantee and writes whatever it is handed, so removing the manifest silently
+replaces a fail-closed primitive with a fail-open one. Two concrete failures the
+condition prevents, both on adopted behaviour:
 
-**Registration is gated to web mode only.** Both of `sw.js`'s assumptions break
-in a Tauri webview. The gate is an `index.html:106` edit reading the same
-detection `select.js` uses, with a `.catch()` on `register()`.
+- `public/` sits behind the guard, so a background revalidation fired while the
+  session has expired receives a **401 body**, and unguarded that body is cached
+  as `/app.js` and served as the application script until a revalidation
+  succeeds.
+- Navigations are fetched with `redirect: "manual"`, so an expired session yields
+  an **opaqueredirect** (status 0, null body) — which is the entire mechanism
+  that lets the SSO redirect fire. Caching it poisons the offline fallback;
+  awaiting a `put` that rejects on it routes into `.catch()` and serves the
+  cached shell *instead of* following the redirect. `r.ok` is false for both 401
+  and status 0, and closes both.
 
-**Standing rule: any change to `public/` bumps `CACHE`, and adding a script or
-stylesheet adds it to `SHELL`.** `install` only re-runs when `sw.js`'s bytes
-change, and only primes from `SHELL`; a bump without the corresponding `SHELL`
-entry re-primes an incomplete shell, and a `SHELL` entry without a bump never
-reaches an installed client. Either mistake is invisible in development — a
-browser with an empty cache works perfectly — and breaks only an installed PWA,
-only offline. The shell-manifest test enforces the `SHELL` half; nothing
-enforces the bump.
+**Navigations are network-first** so a full-page reload reaches the origin and
+any redirect fires; sub-resources are stale-while-revalidate, so a new `app.js`
+is picked up on the next load automatically. That is what removes the need for a
+cache version: there is no constant to bump and no rule to remember. `CACHE`
+stays a plain namespace string, and `activate`'s delete-non-matching logic
+remains as a one-time reset lever.
+
+**Registration is gated to web mode only**, on the same predicate as the `api()`
+transport branch, with a `.catch()` on `register()`. Both of `sw.js`'s
+assumptions break in a Tauri webview.
+
+**Cost, stated plainly.** A service worker does not control the page load during
+which it installs, and `sw.js` sets neither `skipWaiting` nor `clients.claim`.
+Under precache, `install`'s `addAll` fetched the shell independently, so
+visit-1-then-offline worked. Under runtime caching it does not: **offline works
+from the second visit onward.** For a monitor of a server — whose entire content
+is unavailable offline, leaving a shell that renders "disconnected" — the
+difference between that shell and a browser error page, in the window between
+installing and using it a second time, does not justify a manifest that misfired
+four times.
 
 ### Remote-control links
 
@@ -644,8 +708,8 @@ single-host local tool, not across four platforms and a network.
 
 | Failure | Detected by | Surfaced as |
 |---|---|---|
-| Managed server will not start | readiness probe times out | Startup screen with the sidecar's captured stderr |
-| Port held by a server we cannot authenticate to | `/api/health` 200 but `/api/hostinfo` 401 on a managed profile | "A previous server is still running" → pidfile reclamation and one respawn |
+| Managed server will not start | readiness probe times out, **or the spawned child exits non-zero** | Startup screen with the child's captured stderr |
+| Port held by another process | spawned child exits 3 with `port <p> already in use` | Same startup screen, naming the port. The spawn result outranks a successful health poll |
 | `tmux` or `claude` missing | `HostProfile` probe via `/api/hostinfo` | Setup screen naming the binary and install command |
 | Wrong WSL distro, or no Node in it | `wsl.exe` exit code and stderr | Settings error naming the distro |
 | Host unreachable | `api_request` transport error | "Cannot reach host" plus the URL tried |
@@ -694,12 +758,12 @@ mocking framework. Follow that pattern; do not introduce one.
   class of bug `jose` exists to prevent and gets an explicit test.
 - Guard composition — `bearer,cf-access` requires both
 - `backoff` — the ladder, reset-on-success, and the 401-halt rule
-- **Service-worker shell consistency** — parse `public/index.html` for local
-  `src`/`href` references and assert each appears in `public/sw.js`'s `SHELL`.
-  Pure, ~15 lines, passes green against HEAD today. This defect class recurred
-  three times during design review and was caught by a human every time; the
-  failure is invisible in development and breaks only an installed PWA, offline.
-  It is one-directional and does not catch a missing `CACHE` bump.
+- **Missing-binary detection** — the `fs.accessSync` PATH walk, against a
+  temporary directory with and without an executable present
+
+No shell-consistency test: with the precache manifest deleted there is no
+manifest to be inconsistent with. That test existed to police a coupling that no
+longer exists — the root cause is removed rather than guarded.
 
 **UI logic tests.** Decision logic in `public/` that is not DOM manipulation
 lives in a file under `public/transport/` containing **no `import`/`export`
@@ -740,40 +804,44 @@ test in the suite.
 sidecar spawn, WSL lifecycle, keychain access, Android and Termux. Driving these
 in CI costs more than it returns for a personal tool. Checklist per platform:
 install, first run, launch a session, kill it, quit the app, confirm no orphaned
-process. Windows adds: force-quit the app and relaunch, confirming the orphan is
-reclaimed rather than stranding the client; and confirm only one `~/.cdash/*`
-version directory remains after an upgrade.
+process. Windows adds: measure loopback forwarding before anything else; force-quit the
+app and relaunch, confirming the held port is diagnosed by name rather than the
+client silently attaching to the orphan; and confirm `rm -rf ~/.cdash` is the
+documented removal step.
 
-**Known gaps:** nothing automated proves the Windows pidfile teardown or
-reclamation works. Nothing detects a stale-but-same-version WSL copy-in.
+**Known gaps:** nothing automated proves the Windows pidfile teardown works.
+Nothing detects a stale-but-same-version WSL copy-in.
 
 ## Sequencing
 
 Each step leaves the tree working and testable.
 
-1. **`lib/host/`** — PATH resolution with its timeout, absolute-path binary
-   chain (7 sites incl. `server.js:63` → `killSession`), `df` contract, `sh()`
-   explicit dedupe key. **Plus the shell-manifest test**, which lands green
-   before any `public/` change and therefore guards every step that follows.
-2. **UI error model, web mode** — `backoff.js` + its test; `api()` propagates
-   status; `poll()` applies `next()`; `sw.js` navigations network-first;
-   `/transport/backoff.js` added to `SHELL`; `CACHE` bumped. Ships before any
-   auth exists, so 401 is unreachable and the only user-visible change is
-   reconnect latency after a sustained outage.
+1. **`lib/host/`** — PATH prepend (probed + known locations + inherited,
+   deduped) with its 2000 ms timeout and inherited-PATH fallback, the pure
+   `missing` probe, `df` contract change, `sh()` explicit dedupe key. **No
+   call-site changes.**
+2. **UI** — `backoff.js` + its test (one script tag); `api()` propagates status
+   **and** gains the transport branch; `poll()` applies `next()`; `sw.js`
+   navigations network-first and cache-populating, sub-resources
+   stale-while-revalidate, precache deleted; service-worker registration gated
+   to web mode on the same predicate. Ships before any auth exists, so 401 is
+   unreachable and the only user-visible change is reconnect latency after a
+   sustained outage.
 3. **`server.js` restructure** — `export createApp(ctx)`, log the bound port,
-   `server.on('error')`. `const host = process.env.CDASH_BIND` **with no
-   default**, which is byte-equivalent to today's `listen(port, cb)`. Pure
-   refactor.
+   `server.on('error')` → diagnosed stderr and exit 3.
+   `const host = process.env.CDASH_BIND` **with no default**, which is
+   byte-equivalent to today's `listen(port, cb)`. Pure refactor.
 4. **`lib/auth/`** — guard chain, registration order, **bind default
    `127.0.0.1` lands here**, `/api/hostinfo`, `package.json` version field, and
    the integration test.
-5. **`public/transport/`** — four statically declared files, `index.html` script
-   tags, service-worker mode gate, `sw.js` `SHELL` + `CACHE` bumped again.
-6. Tauri client — Linux and macOS managed profile; two-step readiness probe.
-7. Windows and WSL profile — Class 2 token, pidfile teardown and reclamation,
-   copy-in cleanup.
-8. VPS profile — auth UI and keychain (Class 1); the client-side failure rows.
-9. Android.
+5. Tauri client — Linux and macOS managed profile; `/api/health` readiness with
+   spawn-result precedence. **Confirm the Tauri detection predicate here.**
+6. Windows and WSL profile — **measure the loopback relay first**;
+   `CDASH_BIND=127.0.0.1 CDASH_AUTH=none`; copy-in; pidfile written after
+   `listening` and deleted on exit; teardown by pid; fail loudly and stop if
+   unreachable.
+7. VPS profile — auth UI and keychain; the client-side failure rows.
+8. Android.
 
 Steps 1–4 are independently valuable: they make the existing web app correct on
 macOS, safe on a VPS, **and operable on a VPS**, with or without any Tauri work.
@@ -786,16 +854,20 @@ macOS, safe on a VPS, **and operable on a VPS**, with or without any Tauri work.
   `--dangerously-skip-permissions` and enumerates from `/`. The integration
   test's router enumeration plus the explicit `/` and `/sw.js` assertions is the
   only mechanism standing between a one-line reordering and a breach.
-- **The version string is load-bearing in three places and bumped by hand.**
-  `/api/hostinfo`, the WSL copy-in cache key, and the copy-in cleanup key all
-  read it; nothing verifies it, and no cheap check exists.
-- **Cache coherence has three couplings and one-and-a-half enforcement
-  mechanisms.** `index.html` ↔ `SHELL` is enforced; `SHELL` ↔ `CACHE` is not;
-  "every `public/` step bumps" is convention only.
-- **The untested surface grew faster than the tested one.** Automated coverage
-  reaches steps 1–5 well. The two-step readiness probe, the reclamation
-  protocol, Class 2 token generation, and copy-in cleanup are all
-  manual-checklist-only, and three of them are destructive or lifecycle-critical.
+- **The version string is load-bearing in two places and bumped by hand.**
+  `/api/hostinfo` and the WSL copy-in cache key both read it; nothing verifies
+  it, and no cheap check exists. Forgetting to bump it after editing `lib/`
+  leaves a stale server in the distro, undetected — the version-skew banner
+  cannot fire, because the versions match.
+- **An orphaned WSL server is diagnosed, not recovered.** Automatic reclamation
+  was removed with the credential that made it necessary. A held port becomes a
+  startup failure naming the port; a previous-generation orphan reached on
+  another port is caught only by the version-skew banner.
+- **The untested surface is the newest surface.** Automated coverage reaches
+  steps 1–4 well. Everything from step 5 on — spawn precedence, WSL lifecycle,
+  the loopback measurement, keychain access — is manual-checklist-only.
+- **Offline works from the second visit.** A service worker does not control the
+  page load during which it installs, and precaching was removed.
 - **Every credential path terminates at the same blast radius.** Nothing here
   reduces what an authenticated caller can do — correctly, since confining
   `/api/browse` is out of scope. The design's safety is a perimeter argument with
