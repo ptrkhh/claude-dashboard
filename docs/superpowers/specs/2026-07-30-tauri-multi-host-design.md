@@ -300,13 +300,15 @@ crates/agent/            the host agent: lib + bin targets
   src/http/              router, routes, static serving
   src/auth/              guard chain, password guard, throttle
 crates/tauri-app/        the client; depends on agent as a library
-public/                  the UI — unchanged, still JavaScript, still no build step
+public/                  the UI — still JavaScript, still no build step
 docs/superpowers/specs/
 ```
 
 `server.js`, `lib/`, and `test/` are replaced by `crates/agent/`. `public/` is
-carried over as-is. The Node tree stays in git history and, during the port,
-stays on disk as the parity reference — see
+carried over **with a single one-line exception** — the `cpu ?? '—'` render at
+`app.js:162`, required by [the CPU sampling rule](#host-layer--os-abstraction)
+and shipping with step 3. The Node tree stays in git history and, during the
+port, stays on disk as the parity reference — see
 [the parity gate](#sequencing).
 
 ## Why Rust
@@ -1769,6 +1771,7 @@ honest.
    | `working` | Clock-derived (`collect.js:247`, a 10 s window on transcript mtime). **Assert: equal when both runs fall on the same side of the window; otherwise skipped.** |
    | `git` | The 15 s background cache (`4551f39`) returns `null` cold and an object warm, so the value depends on which run warmed it. **Assert: warm both agents first, then compare the object.** |
    | `cpu` | A sampled quantity in Rust, a lifetime average under BSD `ps` — see [the sampling rule](#host-layer--os-abstraction). **Assert: type only.** |
+   | `rssKb` | Sampled RSS of a live process tree, from the same `procTreeUsage` return as `cpu` (`collect.js:260`); it drifts between any two samples — measured 44,192 → 44,264 KB over 3 s on a working session. **Assert: both > 0 and within 10% of each other.** |
    | `cpuSampleAgeMs` | Rust-only; Node has no such field. **Assert: present in Rust, absent in Node.** |
 
    Everything else — `name`, `dir`, `pid`, `model`, `effort`, `rcLink`, `sid`,
@@ -1777,10 +1780,12 @@ honest.
    improving them: an improvement here would be indistinguishable from a
    regression.
 
-   *Adding a sixth exemption is a design decision, not a test fix.* Each of the
-   five above is a property of the data, not of the port; a new one almost
-   certainly means the port changed behaviour, which is the finding the gate is
-   for.
+   *Adding a seventh exemption is a design decision, not a test fix* — **unless
+   the field is a sampled machine quantity**, which is the one category that
+   legitimately cannot be compared for equality and the category this list has
+   already had to be extended for twice. For anything else, a new exemption
+   almost certainly means the port changed behaviour, which is the finding the
+   gate is for.
 
    **`/api/logs` — not compared for equality.** It cannot be: lines carry
    `HH:MM:SS` (`collect.js:23`), the buffer is a 200-entry ring whose contents
