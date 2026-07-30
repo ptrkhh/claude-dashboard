@@ -104,7 +104,8 @@ a formality.
 | VPS web browser auth | First-party `password` guard: scrypt hash + opaque session cookie. CF Access optional, not required |
 | Browser session storage | Opaque server-side session id in a `__Host-` cookie. No stateless token, so logout and restart both revoke |
 | Client session storage | In memory only, never persisted. The passphrase is keychain-stored, so the client re-logs in on launch without the user present |
-| TLS under `password` | Boot refuses without an `https://` public URL unless `CDASH_ALLOW_INSECURE_COOKIE=1`, because a dropped `Secure` cookie is undiagnosable from its symptom |
+| TLS under `password` | On a non-loopback bind, boot refuses without an `https://` public URL unless `CDASH_ALLOW_INSECURE_COOKIE=1`, because a dropped `Secure` cookie is undiagnosable from its symptom. **Loopback is exempt** — `http://localhost` is a secure context, and refusing it would force stripping protections the browser would have honoured |
+| Termux server auth | `password`, not `none`. Android does not isolate loopback between apps, so a loopback bind is not a perimeter there |
 | Login throttling | Delay, never deny. Counts distinct credentials, not attempts |
 | Default bind address | `127.0.0.1` (breaking change), explicit opt-out to expose |
 | JWT verification | Add the `jose` dependency; do not hand-roll |
@@ -442,14 +443,30 @@ It will not appear in testing either. Browsers treat `http://localhost` as a
 secure context and honour the cookie, so this reproduces **only** on a first
 public deployment — the moment the design can least afford a misleading symptom.
 
-So: if `CDASH_AUTH` includes `password`, boot requires either `CDASH_PUBLIC_URL`
-with an `https://` scheme, or an explicit `CDASH_ALLOW_INSECURE_COOKIE=1`, which
-drops the `__Host-` prefix and the `Secure` attribute together (the prefix is
-refused without `Secure`, so keeping one without the other yields a cookie no
-browser will store) and logs a warning naming the session-theft exposure on a
-plain-HTTP origin. Same shape as the unset-hash rule above, for the same reason:
-a misconfiguration that cannot be diagnosed from its symptom must be refused at
-boot rather than debugged in production.
+So: if `CDASH_AUTH` includes `password` **and the bind address is not loopback**,
+boot requires either `CDASH_PUBLIC_URL` with an `https://` scheme, or an explicit
+`CDASH_ALLOW_INSECURE_COOKIE=1`, which drops the `__Host-` prefix and the
+`Secure` attribute together (the prefix is refused without `Secure`, so keeping
+one without the other yields a cookie no browser will store) and logs a warning
+naming the session-theft exposure on a plain-HTTP origin. Same shape as the
+unset-hash rule above, for the same reason: a misconfiguration that cannot be
+diagnosed from its symptom must be refused at boot rather than debugged in
+production.
+
+**Loopback is exempt, and the exemption is load-bearing.** When `CDASH_BIND` is
+`127.0.0.1` or `::1`, boot proceeds with `Secure` and `__Host-` intact and no
+`https://` URL required. Browsers treat `http://localhost` as a secure context
+and store the cookie normally, so the failure this rule exists to prevent cannot
+occur. Without the exemption the rule inverts: a password-guarded loopback server
+would refuse to boot, and the only way forward — `CDASH_ALLOW_INSECURE_COOKIE=1`
+— would *strip two protections the browser was willing to honour*. A safety check
+whose remedy is less safe than the configuration it rejected is a defect.
+
+This is not a corner case. It is the **Termux configuration** (see
+[Android's loopback exposure](#deployment-topology-and-trust-boundary)), where a
+password on a loopback bind is the recommended posture rather than an unusual
+one, and it is also how anyone runs a password-guarded server on their own
+machine.
 
 Hashing uses **`crypto.scrypt` (async, libuv threadpool)**, not `scryptSync`.
 The parameters are `N=16384, r=8, p=1, 32-byte key`; the *cost* is
@@ -894,6 +911,18 @@ and then runs the readiness probe; because that channel returns no exit code or
 stdout, it is a convenience, not supervision, and it requires the user to have
 set `allow-external-apps=true` themselves.
 
+The default Termux profile carries `auth: Password`, not `auth: None`, per
+[the loopback exposure](#deployment-topology-and-trust-boundary) — a loopback
+bind is not a perimeter on Android. The setup documentation configures the Termux
+server with `CDASH_AUTH=password` and `CDASH_BIND=127.0.0.1`, which the loopback
+exemption permits with `Secure` and `__Host-` intact.
+
+**A phone holds both kinds of profile.** Reaching a VPS and reaching its own
+Termux server are both first-class, not one plus a fallback, so the profile
+switcher is a primary surface on Android rather than a settings detail — the two
+targets differ in reachability minute to minute (Termux dies in the background;
+the VPS does not), which is exactly when a user wants to switch.
+
 **VPS profile, any platform.** `managed: None` — a base URL plus credentials.
 
 ### First run
@@ -1136,6 +1165,11 @@ Under `CDASH_AUTH=password`, additionally assert:
     succeeds and the `Set-Cookie` carries **neither `Secure` nor the `__Host-`
     prefix** — the two must move together, since either alone yields a cookie no
     browser will store.
+12. **Loopback exemption.** `CDASH_AUTH=password` with `CDASH_BIND=127.0.0.1`,
+    no `CDASH_PUBLIC_URL` and no `CDASH_ALLOW_INSECURE_COOKIE` **boots**, and its
+    `Set-Cookie` carries `Secure` **and** the `__Host-` prefix. This is the
+    Termux posture; the assertion is that the safe configuration is reachable
+    without setting the flag that would degrade it.
 
 Under `CDASH_AUTH=none`, assert every route returns **anything other than 401 or
 403** — the invariant is that the guard refactor did not start rejecting the
@@ -1240,7 +1274,7 @@ macOS, safe on a VPS, **and operable on a VPS**, with or without any Tauri work.
 
 ## Deployment topology and trust boundary
 
-Four facts that were implicit for most of this design's life and are stated here
+Five facts that were implicit for most of this design's life and are stated here
 because two HIGH-severity defects came from reasoning about the origin in
 isolation when it is not isolated.
 
@@ -1262,6 +1296,26 @@ isolation when it is not isolated.
    exhaust it.** The login throttle's pending-request bound is the only such
    shared resource today; it took a HIGH-severity finding to notice it, and a
    second one to notice that its overflow behaviour mattered more than its size.
+5. **"Loopback is safe" is a desktop assumption that does not hold on Android.**
+   Everywhere else in this design, binding `127.0.0.1` reduces the exposure to
+   "any local process on this box," and that is accepted: on a desktop or a VPS
+   the local process population is the user's own software. **Android does not
+   isolate loopback between apps.** Any installed application can open
+   `http://127.0.0.1:8080` and reach a Termux-hosted host agent — which means
+   RCE inside Termux for any app that scans local ports, with no permission
+   prompt and nothing in the UI to indicate it happened.
+
+   Consequence: **`CDASH_AUTH=password` is the recommended posture for the Termux
+   server, not just for the VPS.** It is the only configuration in this design
+   where a loopback bind alone is not a sufficient perimeter. This is what makes
+   the loopback exemption in
+   [the `password` guard](#browser-authentication--the-password-guard) necessary
+   rather than a convenience — without it, the recommended Android posture is one
+   the boot check refuses to start.
+
+   The exposure is not created by this design and cannot be closed by it: any
+   server Termux hosts has the same property. What this design owes is to not
+   *recommend* the unguarded configuration, and to make the guarded one bootable.
 
 ## Out of scope
 
