@@ -467,27 +467,125 @@ moment it exists to help ([UX-5](2026-07-30-tauri-multi-host-ux-review.md)).
 
 **Disk and process stats stop being parsing problems.** The Node design shelled
 out to `df` and `ps` and parsed their columns, which produced three defects: a
-GNU-only `--output` flag that fails on macOS, a mount path containing a space
-yielding `freeKb: NaN`, and an `sh()` dedupe key that collapsed every `df` call
-to the constant `"df -k"` and silenced all but the first failure.
+GNU-only `--output` flag that fails on macOS (`collect.js:223`), a mount path
+containing a space yielding `freeKb: NaN` (`stats.js:26-29` — which also
+truncates the mount name and shifts `totalKb`, and reaches the browser as `null`
+rather than `NaN`), and an `sh()` dedupe key that collapsed repeated failures to
+a constant and silenced all but the first (`collect.js:15`).
+
+The third is worth stating at its true size: the key is
+``format!("{cmd} {}", args[0])``, so **every `git status` failure across every
+repository collapses to the single key `"git -C"`** (`collect.js:41`). `df` has
+one call site; `git` has as many as there are project directories. The doc
+previously named only the `df` instance, which is the lesser one.
 
 None of them survive the port, because none of them are addressed — the text
 being parsed is no longer produced:
 
 - **Disk** — `statvfs` per mount path. The caller names the mount, so there is no
-  mount column to parse and no space-in-path bug to have.
+  mount column to parse and no space-in-path bug to have. (`statvfs` itself is
+  the one item in this section not exercised in the verification pass.)
 - **Process tree** — the `sysinfo` crate, which covers Linux and macOS and
-  exposes pid, parent pid, CPU and RSS as typed values. The `procTreeUsage`
-  walk survives as logic; only its input changes from a string to a struct.
+  exposes pid, parent pid, CPU and RSS as typed values with **no `target_os`
+  gates**, and where `memory()` is RSS on both. The `procTreeUsage` walk survives
+  as logic, but **its input is not merely a struct instead of a string** — see
+  the sampling rule immediately below, which is a real constraint the string
+  version did not have.
 
-This is the clearest single argument for the pivot: three OS-portability defects
-and their tests are deleted rather than fixed.
+**`sysinfo` CPU is a sampled quantity, and this changes the design.** Measured:
+`cpu_usage()` returns `0.0` unless the process has been refreshed **twice, at
+least `MINIMUM_CPU_UPDATE_INTERVAL` (200 ms) apart** — two back-to-back refreshes
+return zero for every process, and a refresh interval *shorter* than 200 ms
+returns a silently **deflated** number rather than zero (measured 102.50 → 12.50
+→ 5.00 across successive sub-interval refreshes). A deflated number is worse than
+a zero, because it is plausible.
+
+`collectSessions` is **request-driven** — there is no server-side timer; the
+4-second cadence belongs to the browser (`app.js:387`), and `app.js` also fires
+`poll()` imperatively after kill, resume, purge and launch. So a per-request
+`System` is exactly the broken configuration. The rules:
+
+- Hold **one long-lived `System` in `Ctx`**, refreshed on request, never
+  constructed per request. Measured cost of the refresh is ~4 ms for 112
+  processes and the resident cost is under 600 KB, so this is not a tradeoff.
+- Serve CPU as **`null` when the sample is younger than 200 ms or older than a
+  60-second cap**, alongside a `cpuSampleAgeMs` field — never a number the server
+  knows to be wrong. The UI renders `null` as `—`, not `0%`.
+- Do **not** add a background ticker to keep the sample warm. Rung 1 of the
+  ponytail ladder applies — the mechanism is not needed, since consecutive user
+  polls are already 4 s apart — and on Android an always-on 200 ms loop is
+  actively hostile: Android 12+ kills phantom processes and processes using
+  excessive CPU ([the Termux posture](#android--the-artifact-fork)).
+
+On macOS there is a further trap, from source: `get_task_info` **ignores the
+`proc_pidinfo` return value** and returns a zeroed struct on failure, so a
+process owned by another uid reports `memory() == 0, cpu_usage() == 0` — *no
+error, indistinguishable from genuinely idle*. `procTreeUsage` walks the user's
+own descendants, so this is out of reach; it would bite any future system-wide
+listing, and that is why this design does not grow one.
+
+This is still a strong argument for the pivot — three OS-portability defects and
+their tests are deleted rather than fixed — but it is **not** the free win the
+earlier revision claimed. The sampling rule above is new obligation the `ps`
+version did not carry, and it was discovered by measurement, not by reading.
 
 **Subprocesses that remain** are the ones whose output is genuinely an interface:
 `tmux` (session control), `git status --porcelain=v1 -b` (a stable machine
 format), and `claude` itself (spawned, never parsed). Each keeps the existing
 time-box and the log-once-per-failure behaviour, now keyed explicitly rather than
 by first argument.
+
+**The delimiter defect the pivot does *not* delete, and how it is closed.**
+Deleting `df` and `ps` removes three defects of a class — text meant for humans,
+parsed by position — but it does not remove the class, because `tmux` is still
+shelled out to. `parseTmuxPanes` splits on `|` (`sessions.js:53-57`), so a pane
+whose path contains `|` shifts every field after it. That is the same bug as the
+space-in-mount-path one, in a subprocess the pivot keeps. Claiming the class was
+deleted while an instance survives would be false, so the instance is closed
+here:
+
+**Put the path last and split with a bounded `splitn(4, '|')`:**
+
+```
+-F "#{session_name}|#{pane_pid}|#{session_created}|#{pane_current_path}"
+```
+
+Nothing follows the path, so the remainder of the line *is* the path and an
+embedded `|` cannot shift anything. Line integrity is unconditional because tmux
+substitutes control characters — including newline and tab — to `_`, so one pane
+is always one line. Verified against paths containing `|`, `|||`, a newline, a
+tab and `$`: all fields exact, six hostile panes produced six correct rows. The
+parser additionally applies `^cdash-[\w-]+$` to the session name rather than a
+bare prefix test, so a hand-made `cdash-a|b` session is rejected rather than
+parsed into garbage.
+
+Two rejected alternatives are recorded so they are not re-proposed:
+
+- **An `\x1f` (unit separator) delimiter does not work at all.** tmux emits a raw
+  `0x1f` in a format string as the **four printable bytes** `\037`, so a split on
+  `\x1f` finds zero delimiters and every pane parses as a single field — a
+  regression, not a fix. Measured on tmux 3.4.
+- **`#{q:}` quoting is not invertible.** tmux's *plain* output already escapes
+  `$`, and control characters are substituted to `_` identically in quoted and
+  unquoted mode, so an escape-aware splitter round-trips `p1|p2` exactly but
+  returns `d1\$d2` for `d1$d2` and `t1_t2` for a tab. It narrows the corruption
+  without eliminating it.
+
+Residue, stated: a path containing a tab or newline reads back with `_`, and `$`
+reads back escaped. This is **identical to the current Node behaviour** — it is
+not a regression introduced by the port, and it is therefore invisible to the
+parity gate. Carried in [Tradeoffs](#tradeoffs-carried).
+
+An earlier revision of this section proposed taking the path from
+`sysinfo::Process::cwd()` on the pane pid instead. That is **withdrawn**: `cwd()`
+and `pane_current_path` are different quantities — tmux reports the foreground
+process's directory, `cwd()` reports the pane pid's — and they agree for
+cdash-created panes only because `claude` runs directly and never `chdir`s, which
+is an assumption rather than a property. Substituting one for the other would
+also have made `dir` derive from tmux in the Node agent and from `sysinfo` in the
+Rust agent, **breaking the parity gate on a difference that is not a port
+defect**, and would have put an unverified macOS syscall on the primary path.
+The bounded split preserves Node semantics exactly and needs no gate exemption.
 
 ### `src/auth/` — guard chain
 
@@ -988,14 +1086,45 @@ hours *without* the passphrase and that cannot be revoked by changing it. Not
 worth a second credential class.
 
 Stored credentials live in the `keyring` crate: macOS Keychain, Windows
-Credential Manager, Linux Secret Service. The user can see that one exists
-(`has_secret`) and can replace or delete it. No credential is machine-generated
-and no managed server is spawned with one. Two fallbacks are designed in rather
-than discovered later:
+Credential Manager, Linux Secret Service. `keyring = "4"` is the whole manifest —
+`default = ["v1"]` enables all three target-conditional backends. The user can
+see that one exists (`has_secret`) and can replace or delete it. No credential is
+machine-generated and no managed server is spawned with one.
 
-- **Headless Linux** with no Secret Service running: fall back to a `0600` file
-  in the app config directory, with a visible UI warning that the token is
-  stored unencrypted.
+**`keyring` provides no fallback chain, and the fallback below is therefore ours
+to build.** Verified: `v1` binds exactly **one** store per platform, and on a
+Linux box with no Secret Service running, `Entry::new()` fails with
+`PlatformFailure(Unavailable)` **before any get or set**. Error handling sits at
+construction, not at first use. (v4 API notes: `Entry::new` returns `Result`;
+`delete_password` is now `delete_credential`.)
+
+- **Headless Linux**, no Secret Service: fall back to a `0600` file in the app
+  config directory, with a visible UI warning that the credential is stored
+  unencrypted. **The trigger is the error variant, never "an error".**
+
+  This distinction is load-bearing, because the credential is a passphrase that
+  grants RCE. Falling back on *any* `Entry::new` failure means a transient D-Bus
+  hiccup — or a keyring that is merely **locked** — silently writes that
+  passphrase to plaintext on disk, and nothing ever moves it back.
+
+  | `keyring-core` error | Meaning | Action |
+  |---|---|---|
+  | `NoDefaultStore`, `PlatformFailure` | No usable store exists on this box | **Fall back** to the `0600` file, warn |
+  | `NoStorageAccess` | A store exists but is locked or inaccessible | **Never fall back.** Surface *"keyring is locked — unlock it and retry"*; write nothing to disk |
+
+  **Precedence:** the keychain is attempted **first on every launch**; the file
+  may never shadow a working store. **Migration back:** on the first launch where
+  the keychain succeeds, the credential is written to it and **the file is
+  deleted** — the degraded state is exited automatically, not left to the user.
+  **UI:** while the file store is in use, a persistent non-dismissible banner
+  names the exposure; it clears on migration.
+
+  *Carried risk (E4):* that a locked `gnome-keyring` reports `NoStorageAccess`
+  rather than `PlatformFailure` was read from `keyring-core`'s `error.rs`, not
+  observed — no desktop session was available. If it reports `PlatformFailure`
+  instead, the narrow trigger degrades to the unsafe broad one, so **step 10
+  verifies this against a real locked keyring before the fallback ships.**
+
 - **Android**, which `keyring` does not cover: use app-private storage, which
   the OS isolates per-app. This is the same protection Termux's own data has,
   and it is weaker than hardware-backed Keystore.
