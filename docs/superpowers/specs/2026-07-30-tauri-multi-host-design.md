@@ -25,13 +25,16 @@ app and no mandatory identity provider**: no Tailscale, no Cloudflare Zero
 Trust. A user who *wants* those may still use them. This makes CF Access an
 optional path rather than the browser path.
 
-> **Unresolved: first-party browser auth.** The guard chain as specified has no
-> browser-usable first-party method. `cf-access` is now optional; `bearer`
-> cannot be attached by a browser; `trusted-proxy` requires the reverse proxy
-> that must not be mandatory; `none` is an unauthenticated RCE origin on the
-> public internet. A browser therefore has no way to authenticate. This is a
-> HIGH-severity gap against the amended requirement and is under design; nothing
-> below should be read as closing it.
+A reverse proxy **on the VPS itself** (Caddy, nginx) is not a "separate LAN app":
+the user installs nothing and no third party is involved. That is what lets
+`CDASH_BIND=127.0.0.1` remain the recommended public posture, with TLS
+terminated in front of the host agent.
+
+This requirement is met by the [`password` guard](#browser-authentication), and
+it is the reason that guard exists: without it, `cf-access` is optional,
+`bearer` cannot be attached by a browser, `trusted-proxy` needs the excluded
+proxy, and `none` is an unauthenticated RCE origin — leaving a browser no way
+in at all.
 
 ## Constraints that shape the design
 
@@ -98,7 +101,9 @@ a formality.
 | macOS missing `tmux` | Detect and guide the user to `brew install tmux`; do not bundle |
 | Auth architecture | Pluggable guard chain, composable, AND-semantics |
 | Service worker | Runtime caching, no precache manifest; exists for PWA installability |
-| VPS web browser auth | **OPEN — see "Unresolved: first-party browser auth"** |
+| VPS web browser auth | First-party `password` guard: scrypt hash + opaque session cookie. CF Access optional, not required |
+| Browser session storage | Opaque server-side session id in a `__Host-` cookie. No stateless token, so logout and restart both revoke |
+| Login throttling | Delay, never deny. Counts distinct credentials, not attempts |
 | Default bind address | `127.0.0.1` (breaking change), explicit opt-out to expose |
 | JWT verification | Add the `jose` dependency; do not hand-roll |
 | UI module system | Classic scripts only; transport branch inside `api()`; no build step, no bundler |
@@ -319,7 +324,9 @@ the value must match what the origin's clients can actually present:
 | Origin serves | `CDASH_AUTH` | Why |
 |---|---|---|
 | Local only, loopback bind | `none` | The socket is unreachable off-box |
-| VPS, browsers **and** Tauri clients | `cf-access` | One guard; `email` for browser SSO, `common_name` for the service token |
+| **Public VPS, browsers and Tauri, no third party** | **`password`** | **The default for the amended requirement. One guard serves the browser via cookie and the Tauri client via `api_request` login.** |
+| VPS, browsers **and** Tauri clients, CF Access in front | `cf-access` | One guard; `email` for browser SSO, `common_name` for the service token |
+| Public VPS, defence in depth | `password,cf-access` | Both required; the optional-CF case |
 | VPS, Tauri clients only, defence in depth | `bearer,cf-access` | **Locks browsers out by design** — no browser can attach a bearer header |
 | Behind Authelia/oauth2-proxy/Tailscale, origin unreachable | `trusted-proxy` | Escape hatch; unsafe if the origin is reachable |
 
@@ -351,6 +358,203 @@ The **Tauri client** is a separate budget and is not small: `tauri`, `reqwest`,
 the real cost of delivery modes 2 and 3, and it is accepted. It is stated so
 that "one dependency to two" is not read as the project's total.
 
+
+### Browser authentication — the `password` guard
+
+The guard that satisfies the amended requirement. A single-secret, first-party,
+cookie-session login served by the origin itself. **Dependency delta: zero** —
+`node:crypto` plus express's existing `res.cookie`.
+
+```
+CDASH_AUTH=password
+CDASH_PASSWORD_HASH=scrypt$16384$8$1$<salt>$<dk>     # set once, never plaintext
+```
+
+- `GET /login` — self-contained HTML, reachable unauthenticated.
+- `POST /api/login` — reachable unauthenticated, throttled, `{password}` →
+  `Set-Cookie: __Host-cdash_sid=<43 chars>; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=<session>`.
+- `POST /api/logout` — behind the guard; deletes the session server-side.
+- The guard looks up the sid in an in-memory `Map<sid, expiresAt>`. Present and
+  unexpired → `next()`. Otherwise `/api/*` → `401 {error:"unauthorized"}`,
+  anything else → `302 → /login`.
+
+**Why an opaque session id and not a signed token, given `jose` is already
+installed.** A stateless token must be signed, must carry an expiry the server
+re-checks, must pin its algorithm, and **cannot be revoked**. An opaque id in a
+`Map` has none of those properties to get wrong: no algorithm field to
+influence, expiry is a number the server owns, `sessions.delete(sid)` is a
+working logout, and a restart is a working panic button. Reaching for the
+installed dependency here would have been the more fashionable and less safe
+choice. The "do not hand-roll" rule still binds and is not violated — it targets
+signature verification of attacker-supplied tokens, which is `cf-access`'s job
+and stays with `jose`. There is no signature here.
+
+**Why not HTTP Basic.** Basic satisfies the requirement on its face — plain
+browser, no agent, no third party, no login page, no cookie, no session store —
+and it dissolves several of this design's failure modes. It was rejected for two
+reasons. **Cost:** verifying a password on every request means running the KDF
+on every request; an eight-asset page load costs ~750 ms of KDF and the
+4-second poll costs ~186 ms per cycle. Avoiding that means caching the verified
+credential server-side, which is a session store under another name — Basic then
+carries all of this machinery and none of the cookie controls. **Security, and
+this decides it:** browsers attach cached Basic credentials to cross-site
+requests automatically, and **there is no `SameSite` for an `Authorization`
+header** — no attribute, no opt-out. Under Basic the sibling-subdomain exposure
+below becomes fully cross-site. The cookie design is better precisely because
+`SameSite` exists at all, even given that it is site- rather than origin-scoped.
+
+Everything below Basic was surveyed and rejected: TLS client certificates
+require an install (excluded, and hostile on mobile); a secret in a URL query
+string puts an RCE credential into browser history, `Referer`, and `logBuffer`,
+which `/api/logs` returns verbatim; magic links need a mail provider, i.e. a
+mandatory third party; IP allowlisting fails the "from anywhere" premise.
+
+**Credential storage.** One secret, hashed, in an environment variable. No user
+database, and none is possible. Set with `npm run set-password` (~15 lines,
+`node:readline` with echo suppressed), which requires **≥12 characters**, never
+writes a file, and never echoes. Plaintext was rejected because *this* process
+serves `/api/browse` (enumerates from `/`) and `/api/logs` (returns `logBuffer`
+verbatim, which accumulates absolute paths) — a plaintext secret in its
+environment is one disclosure away from total compromise. Boot **refuses to
+start** if `CDASH_AUTH` includes `password` and the hash is unset or
+unparseable: a named stderr error, never a silent fall back to `none`.
+
+Hashing uses **`crypto.scrypt` (async, libuv threadpool)**, not `scryptSync`.
+The parameters are `N=16384, r=8, p=1, 32-byte key`; the *cost* is
+machine-dependent (42 ms and 93.5 ms measured on two boxes, likely slower on a
+modest VPS) and is deliberately not quoted as a design constant. A slower box
+strengthens brute-force resistance and, because the throttle delays rather than
+denies, costs no availability. `timingSafeEqual` throws on length mismatch and
+is wrapped to return `false`.
+
+**Session lifetime, and what a stolen session gets.** Stated plainly: a stolen
+session cookie **is** remote code execution as the running user. Every
+authenticated route is equally privileged; there is no lesser tier. Bounds: a
+**12-hour absolute lifetime with no sliding renewal** (conventional 7–30 day
+sessions are calibrated for accounts that can be re-secured after theft, and
+this one cannot be); `POST /api/logout` revokes immediately; a restart revokes
+everything; `HttpOnly` keeps it out of JS; `Secure` keeps it off plain HTTP.
+
+The store needs no sweeper. Entries are minted only by a successful login, so
+they cannot be grown without the passphrase; twice-daily logins accumulate under
+75 KB a year, expired entries are rejected at lookup, and every restart resets
+it to zero.
+
+### Login throttling — delay, never deny
+
+Three rules. The first two bound a *client*; the third bounds an *attacker*, and
+it carries the safety load.
+
+**Rule A — one login attempt per credential generation.** `api_request` holds
+`login_attempted` per profile, cleared only by the user editing the credential
+or by a success. On 401 with the flag unset: attempt login once, set the flag,
+retry the request. On 401 with the flag set: **halt the poll**, surface
+*"Reached host, credentials rejected — the stored password may be out of date"*
+with an **Update password** action. No automatic retry, ever.
+
+Without this, a stale stored passphrase turns the 4-second poll into a login
+attempt every 4 seconds — which is precisely what the error-model rule against
+retrying auth failures exists to forbid, aimed at the origin's own throttle
+instead of Cloudflare's.
+
+**Rule B — count distinct credentials, not attempts.** A failure whose
+credential fingerprint equals the previous failure's does not advance the
+counter. Fingerprint is an HMAC under a boot-random key, **one value retained** —
+no growth, no stored password, no reusable hash.
+
+This is the discriminator: a stale client repeats itself, a brute-forcer must
+vary to learn anything. Replaying one password 50 times leaves the counter at 1;
+40 distinct guesses advance it 40 times; alternating between two wrong passwords
+is strictly worse for the attacker than distinct guessing. **Rule B is an
+optimisation, not a guarantee** — two clients with *different* stale credentials
+advance the counter exactly as a brute-forcer does, which is an ordinary state
+for a multi-device, multi-profile design. That is why Rule C must be sound
+alone.
+
+**Rule C — the throttle delays; it never denies.** After 5 distinct failures,
+each subsequent attempt is **delayed before evaluation** by
+`min(1s · 2^(n−5), 20s)`, then processed normally. The counter resets on success
+or after 15 minutes idle. The throttle lives in `POST /api/login` only: a caller
+holding a valid session is never affected.
+
+**A login attempt is never rejected for throttle reasons.** Once accepted it is
+always eventually evaluated. Pending delayed logins are bounded by
+`CDASH_LOGIN_PENDING_MAX`, **default 1024**, derived from what a pending request
+actually costs — one socket and one entry in a shared wake list, with scrypt
+running after the delay on the threadpool, so nothing pending holds CPU or a
+timer. On overflow the response is **503 with `Retry-After`**, and that path is
+reachable only under volumetric load.
+
+The bound is set by resource cost, not by guesswork, and the difference is the
+whole point:
+
+| Pending bound | Connections to hold it | Sustained rate | Verdict |
+|---|---|---|---|
+| 4 | 4 | **0.2 req/s** | A design defect — trivially cheap denial |
+| **1024** | **1024** | **51.2 req/s** | Ordinary volumetric DoS |
+
+Sustaining 1024 concurrent connections at ~51 req/s against a single-user Node
+process is not an attack on this throttle — the same load aimed at `GET /` is
+just as effective, and defending it belongs to the reverse proxy that already
+terminates TLS. That is a fact of the internet, not a property of this
+mechanism. At 0.2 req/s it would have been the latter.
+
+**What an attacker achieves:** a sustained guessing attack adds latency to new
+logins — up to 20 seconds per attempt — and does not deny them. Existing
+sessions are unaffected. Because sessions are 12-hour absolute, a sufficiently
+long attack does eventually bite: a new device cannot log in while one is
+running.
+
+The counter is **global, not per-IP**. Per-IP is defeated by rotation and is
+meaningless behind a reverse proxy, where every request carries the proxy's
+address.
+
+### CSRF — the layering, stated correctly
+
+**The primary control is that `express.json()` parses `application/json` only**,
+combined with the absence of CORS headers. A form POST arrives with
+`req.body = {}` and every handler rejects at validation; a cross-origin `fetch`
+carrying JSON triggers a preflight that fails. Verified for all four
+content-types **with a valid session cookie attached**.
+
+**`SameSite=Lax` is defence in depth, not the primary control.** `SameSite` is
+scoped to the registrable domain, not the origin: for `claude.myweb.site` every
+sibling — `blog.myweb.site`, a parked subdomain, one carrying an XSS — is
+**same-site**, and Lax attaches the session cookie to their POSTs in full. It
+blocks fully cross-site requests and does nothing against a sibling.
+
+`__Host-cdash_sid` closes the adjacent hole. The prefix is refused unless the
+cookie is `Secure`, `Path=/`, and carries **no `Domain`**, so a sibling cannot
+mint one scoped to the registrable domain; anything it sets stays host-only to
+itself. Shadowing becomes structurally impossible rather than merely detectable,
+at a cost of seven characters. (The flags already specified satisfy the prefix
+with no change.)
+
+No GET performs an attacker-useful state change. `GET /api/sessions` does
+refresh caches and spawn the same read-only probes the dashboard runs every four
+seconds anyway — so "read-only" is inaccurate — but nothing creates, kills, or
+resumes a session, and every mutation is POST. That is the premise `SameSite`
+depends on and it is stated in its true form.
+
+**Consequence for deployment:** every host under the registrable domain is
+inside this origin's trust boundary. Prefer a domain with no untrusted siblings.
+
+### What `/login` may contain
+
+A password field, a submit button, an error region. **No product name, no
+version, no logo, no favicon reference, no title beyond "Sign in."** Failure
+text is *"Incorrect password"* — identical for a wrong password and an expired
+session.
+
+The no-leak rule that governs `/api/health` and the uniform rejection body
+applies here too: naming the product on an unauthenticated page tells a scanner
+that a successful guess against this endpoint yields RCE as the running user.
+A generic prompt is the same number of lines.
+
+**`login.html` must remain asset-free** — inline CSS, no external stylesheet,
+script, image, or font. This is what keeps the unauthenticated exception count
+at three; a logo would silently add a fourth.
+
 ### Guard placement
 
 `buildGuard` is registered in `server.js` **after** `express.json()` and the
@@ -358,8 +562,20 @@ that "one dependency to two" is not read as the project's total.
 `/api` route:
 
 ```
-express.json() → /api/health → buildGuard(config) → express.static(public) → all /api routes
+express.json()
+GET  /api/health     ← exception 1: liveness, {ok:true}, nothing more
+GET  /login          ← exception 2: static HTML, no host data
+POST /api/login      ← exception 3: throttled, no host data
+buildGuard(config)
+express.static(public)
+… every other /api route
 ```
+
+The three exceptions are enumerated, not implied, and they are complete:
+`GET /login` is an explicit route registered before the guard, so
+`public/login.html` stays behind `express.static` and `/login.html` itself
+correctly redirects. A browser's automatic `/favicon.ico` request redirects
+harmlessly.
 
 Consequence: `/api/health` is the only unauthenticated endpoint on the origin,
 and UI assets — including `sw.js` — require a credential. Under
@@ -639,9 +855,15 @@ self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (url.pathname.startsWith('/api/')) return;                  // network only, unchanged
   if (e.request.mode === 'navigate') {
-    e.respondWith(fetch(e.request)
-      .then(r => { if (r.ok) caches.open(CACHE).then(c => c.put('/', r.clone())); return r; })
-      .catch(() => caches.match('/')));                           // network first
+    e.respondWith((async () => {
+      try {
+        const r = await fetch(e.request);
+        if (r.status === 200 && !r.redirected &&
+            new URL(e.request.url).pathname === '/')               // ← the key, and its guard
+          (await caches.open(CACHE)).put('/', r.clone());
+        return r;
+      } catch { return (await caches.match('/')) || Response.error(); }
+    })());
     return;
   }
   e.respondWith(caches.match(e.request).then(hit => {             // stale-while-revalidate
@@ -652,6 +874,14 @@ self.addEventListener('fetch', e => {
   }));
 });
 ```
+
+**The navigation branch writes under the fixed key `/`, and only when the
+request's pathname is `/`.** That is symmetric with the offline fallback's
+`caches.match('/')` and makes the login page unwritable to the shell key by
+construction. Without the pathname test, the third redirect path escapes: after
+the browser follows a `302 → /login`, it issues a *fresh* navigation whose
+response is `status 200` with `redirected === false` — passing both the status
+and redirect tests, and caching a login page as the application shell.
 
 **`if (r.ok)` on every `cache.put` is load-bearing, not defensive.** `addAll`
 rejected the whole install if any response was not ok — a fail-closed guarantee
@@ -732,9 +962,17 @@ Two behaviors are specified explicitly:
   the whole time. Switching away and back forces an immediate poll. Symptom: the
   "disconnected" indicator persists briefly after `npm start` returns.
 
-- **Auth failures do not retry.** A 401 stops the poll and requires user action.
-  Only transport errors back off and retry. Otherwise a stale token generates
-  login attempts against Cloudflare indefinitely.
+- **Auth failures do not retry — but throttling is not an auth failure.** Only
+  transport errors and transient throttling — HTTP 429 and 503, honouring
+  `Retry-After` when present — back off and retry. Any **terminal**
+  authentication failure — HTTP 401 or 403 — halts the poll and requires user
+  action. Otherwise a stale credential generates login attempts indefinitely.
+
+  The 401/429 split is load-bearing. A 401 means *your credential is wrong*:
+  terminal, human action required. A 429 means *try again later*: transient by
+  definition. Classifying 429 as terminal would let an attacker who saturates
+  the login throttle permanently halt clients whose credentials are valid, with
+  every manual resume re-halting within one poll.
 
 Both require `api()` to propagate the HTTP status and `poll()` to branch on it —
 neither of which it does today. The decision logic lives in
@@ -790,6 +1028,28 @@ ephemeral port via `createApp(ctx)`. Under each non-`none` auth mode assert:
    guard are non-route layers invisible to enumeration.
 4. With a valid credential, `/api/sessions` → 200.
 
+Under `CDASH_AUTH=password`, additionally assert:
+
+7. `GET /login` → **200** unauthenticated; `POST /api/login` with a wrong
+   password → **401** with no `Set-Cookie`; with the right password → **200 +
+   `Set-Cookie`** containing `HttpOnly`, `Secure`, `SameSite=Lax` and the
+   `__Host-` prefix. Then replay 2 and 3 with the cookie and require 200/302→200.
+8. **CSRF invariants.** A POST to `/api/kill` with `content-type: text/plain`
+   **and a valid session cookie** → **400, not 200**, proving the body was not
+   parsed; and no response carries `Access-Control-Allow-Origin`. *This is the
+   only mechanical enforcement of the primary CSRF control — if it is ever
+   dropped, the sibling-subdomain exposure becomes HIGH.*
+9. **Throttle.** After arming the throttle with distinct wrong passwords, a
+   correct login returns **200 after a delay and never 429**, and a login issued
+   while other delayed logins are pending also returns **200 after a delay**.
+   Replaying one wrong password does not advance the counter.
+10. **Cookie splitter.** Both orderings of a duplicate `__Host-cdash_sid`, a
+    malformed pair with no `=`, an empty value, and a trailing `;` — asserting
+    last-wins deterministically and no throw. The splitter is the one piece of
+    hand-rolled parsing on attacker-influenced input; it is exempt from "do not
+    hand-roll" not because the rule fails to apply but because it is small
+    enough for a test to discharge it.
+
 Under `CDASH_AUTH=none`, assert every route returns **anything other than 401 or
 403** — the invariant is that the guard refactor did not start rejecting the
 local default, not that every handler succeeds on an empty body (five routes
@@ -831,16 +1091,20 @@ Each step leaves the tree working and testable.
    `server.on('error')` → diagnosed stderr and exit 3.
    `const host = process.env.CDASH_BIND` **with no default**, which is
    byte-equivalent to today's `listen(port, cb)`. Pure refactor.
-4. **`lib/auth/`** — guard chain, registration order, **bind default
-   `127.0.0.1` lands here**, `/api/hostinfo`, `package.json` version field, and
-   the integration test.
+4. **`lib/auth/`** — guard chain (`none`, `bearer`, `cf-access`,
+   `trusted-proxy`, **`password`**), **`GET /login` + `POST /api/login` +
+   `POST /api/logout`**, **`public/login.html`**, **`npm run set-password`**,
+   the three-rule login throttle, registration order with its three enumerated
+   exceptions, **bind default `127.0.0.1` lands here**, `/api/hostinfo`,
+   `package.json` version field, and the integration test.
 5. Tauri client — Linux and macOS managed profile; `/api/health` readiness with
    spawn-result precedence. **Confirm the Tauri detection predicate here.**
 6. Windows and WSL profile — **measure the loopback relay first**;
    `CDASH_BIND=127.0.0.1 CDASH_AUTH=none`; copy-in; pidfile written after
    `listening` and deleted on exit; teardown by pid; fail loudly and stop if
    unreachable.
-7. VPS profile — auth UI and keychain; the client-side failure rows.
+7. VPS profile — auth UI and keychain, the `Password` profile variant and
+   Rule A's login-once-per-credential-generation; the client-side failure rows.
 8. Android.
 
 Steps 1–4 are independently valuable: they make the existing web app correct on
@@ -866,12 +1130,46 @@ macOS, safe on a VPS, **and operable on a VPS**, with or without any Tauri work.
 - **The untested surface is the newest surface.** Automated coverage reaches
   steps 1–4 well. Everything from step 5 on — spawn precedence, WSL lifecycle,
   the loopback measurement, keychain access — is manual-checklist-only.
+- **Every host under the registrable domain is inside the trust boundary.** A
+  compromised sibling subdomain is same-site, and only the content-type layer
+  stands between it and an authenticated POST.
+- **Denial of new logins remains achievable at volumetric scale** (~1024
+  concurrent connections, ~51 req/s). This process cannot defend that and does
+  not claim to; existing sessions are unaffected, but a 12-hour absolute
+  lifetime means a long enough attack eventually bites.
+- **A forgotten passphrase is unrecoverable** — no reset flow, by design, since
+  one needs an identity provider. Remedy is shell access to re-set the hash.
 - **Offline works from the second visit.** A service worker does not control the
   page load during which it installs, and precaching was removed.
 - **Every credential path terminates at the same blast radius.** Nothing here
   reduces what an authenticated caller can do — correctly, since confining
   `/api/browse` is out of scope. The design's safety is a perimeter argument with
   no defence in depth behind it.
+
+## Deployment topology and trust boundary
+
+Four facts that were implicit for most of this design's life and are stated here
+because two HIGH-severity defects came from reasoning about the origin in
+isolation when it is not isolated.
+
+1. **The origin is a public hostname with siblings.** Every host under the
+   registrable domain is same-site and inside the trust boundary. A sibling with
+   an XSS is a sibling with the session cookie's `SameSite` protection. Prefer a
+   domain with no untrusted siblings.
+2. **The origin has two classes of caller, one of them automated.** The desktop
+   client polls every 4 seconds — **21,600 times a day**. Any per-origin
+   counter, limiter, or lock is amplified by that factor. The checkable question
+   for any shared mechanism is: *what does this look like when the desktop
+   client does it 21,600 times a day?* Asking it of the login throttle would
+   have found the retry-loop defect without measuring it.
+3. **The blast radius behind every credential is identical** —
+   `--dangerously-skip-permissions` and unconfined `/api/browse`. Perimeter
+   only, no defence in depth, deliberately, at personal-tool scope.
+4. **Anything shared across callers is a coupling**, and **any bound shared
+   across callers must state what an unauthenticated caller must spend to
+   exhaust it.** The login throttle's pending-request bound is the only such
+   shared resource today; it took a HIGH-severity finding to notice it, and a
+   second one to notice that its overflow behaviour mattered more than its size.
 
 ## Out of scope
 

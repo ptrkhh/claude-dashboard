@@ -2,11 +2,12 @@
 
 Date: 2026-07-30
 Subject: `2026-07-30-tauri-multi-host-design.md`
-Format: turn-based Writer / Critic / Moderator debate, 4 rebuttal rounds plus an
-integration pass. Pass A defended the doc's existing decisions; Pass B proposed
-amendments.
-Outcome: **terminated on all criteria.** Zero open HIGH objections; every
-objection dispositioned; both roles independently confirmed internal consistency.
+Format: turn-based Writer / Critic / Moderator debate. Pass A defended the doc's
+existing decisions; Pass B proposed amendments; the integration round attacked
+the combined result; **Pass C** ran the external `ponytail` skill against the
+settled design; **Pass D** handled an amended requirement from the user.
+Outcome: **terminated on all criteria.** 31 objections raised, 30 sustained,
+1 withdrawn by the Critic, 0 struck by the Moderator.
 
 ---
 
@@ -65,6 +66,10 @@ E0 for Cloudflare, macOS, Windows/WSL, Termux or Android behaviour.
 ---
 
 ## Final ledger — Pass A
+
+*Note: several Pass A/B dispositions below were later superseded by Pass C's
+deletions. The rows record what was decided at the time; see Pass C for what
+survives.*
 
 | Change | Verdict | Objections (severity) | Disposition |
 |---|---|---|---|
@@ -180,3 +185,105 @@ shell-manifest test that passes green today were all settled by running code, no
 by reasoning about it. The findings that could not be checked — everything on
 macOS, Windows, WSL, Android and Cloudflare — are the ones marked E4, and they
 are where the remaining risk lives.
+
+
+---
+
+# PASS C — the ponytail challenge
+
+The user introduced the `ponytail` skill (efficiency ladder: *does this need to
+exist?* → existing code → stdlib → native → installed dep → one line → write
+minimal code) as **E2 evidence** and asked it be run against the settled design.
+Its own NEVER SIMPLIFY list — validation, error handling, security,
+accessibility, explicit requests — was ruled a hard frame constraint, protecting
+the guard chain, `jose`, the bind default, the rejection body and the
+auth-bypass test.
+
+Six deletions were proposed. The Writer carried the burden (whoever wants a
+change justifies it); the Critic attacked the deletions.
+
+| ID | Verdict | Result |
+|---|---|---|
+| **P1** WSL ephemeral credential and everything downstream | Adopted, narrowed | Token, second credential class, lifecycle rule, two-step readiness probe and reclamation protocol all deleted. All of it descended from declining to measure one boolean — whether WSL2 forwards localhost to a `127.0.0.1` listener — on a step that cannot be implemented without a Windows machine anyway. **Kept:** pidfile write-after-`listening` and `EADDRINUSE` → stderr + exit 3, which is error handling and independently justified. |
+| **P2** Four transport scripts → a branch inside `api()` | Adopted | Retires the load-order defect by deleting the loader rather than fixing it. |
+| **P3** Delete the precache manifest and its test | Adopted, narrowed | Runtime caching + stale-while-revalidate. Three of four cache-coherence findings become unreachable. **Narrowed:** `if (r.ok)` on every `cache.put` — `addAll` was fail-*closed*, `put` is fail-*open*. |
+| **P4** Delete absolute-path binary resolution | Adopted | One `process.env.PATH` assignment resolves all seven bare-name sites process-wide, including `server.js:63`. Surfaced a finding: known locations are the **probe-failure backstop**, a purpose the doc never stated. |
+| **P5** Delete `trusted-proxy` | **Rejected** | The user confirmed optional proxies are wanted. |
+| **P6** Delete copy-in garbage collection | Adopted | Uninstall documentation kept; destructive `rm -rf` in a filesystem the app does not own, dropped. |
+
+**Critic's own account of why the adopt rate was high:** every proposal targeted
+machinery the Writer authored *under its own adversarial pressure*. "My
+objections were correct about correctness and every remedy made the design
+larger. The thing I never did in five passes was ask whether anything needed to
+exist."
+
+**What ponytail missed**, found by the Critic: nobody asked whether `sw.js`
+needs to exist at all. It does — but as **PWA installability infrastructure for
+the Android delivery mode**, not as an offline cache. The document had it
+backwards.
+
+Result: standing rules 3→1, credential classes 2→1, new `public/` files 5→1,
+sequence 9→8 steps.
+
+---
+
+# PASS D — the amended requirement
+
+**User:** *"The website (e.g. claude.myweb.site) has to be accessible without a
+separate LAN app (no Tailscale, no Cloudflare Zero Trust, etc.) although if the
+user wishes to, they can."*
+
+This opened the **first HIGH-severity gap of the debate**: with CF Access
+demoted to optional, `bearer` unusable by a browser, `trusted-proxy` requiring
+the excluded proxy and `none` an unauthenticated RCE origin, a plain browser had
+no way to authenticate at all.
+
+**Proposal:** a fourth guard, `password` — scrypt-hashed single secret, opaque
+256-bit session id in a `Map`, `__Host-` cookie, 12-hour absolute lifetime.
+**Zero dependency delta.**
+
+| ID | Severity | Disposition |
+|---|---|---|
+| **OBJ-D-1** | **HIGH** | Stale passphrase + 4s poll + re-login-on-401 + **global** lockout = browser locked out from 60s onward, 100% of legitimate logins blocked, indefinitely. No attacker required — the trigger is changing your own password. Contradicts the design's own no-retry-on-auth-failure rule. **Closed by three rules** (see below). |
+| **OBJ-D-2** | MED | `SameSite` is scoped to the registrable domain, so every sibling of `claude.myweb.site` is same-site. The control designated *primary* carries nothing on the hostname the user named. Layering corrected; `__Host-` prefix added. |
+| **OBJ-D-3** | MED | `200 && !redirected` misses the third path — a fresh navigation to `/login` passes both tests. Closed by naming the key `/` and gating on `pathname === '/'`. |
+| **OBJ-D-4** | LOW | `scryptSync` blocks the event loop when `crypto.scrypt` is the same module at the same rung; the quoted 42 ms is a property of one machine. |
+| **OBJ-D-5** | LOW | Sibling subdomain can shadow the cookie; the hand-rolled splitter is last-wins. Fixed *structurally* by the `__Host-` prefix, plus a test. |
+| **OBJ-D-6** | LOW | `/login` naming the product tells a scanner a successful guess yields RCE. |
+| **OBJ-F-1** | **HIGH** | The fix's own overflow clause — "at most 4 concurrent, beyond that 429" — reintroduced rejecting at **0.2 req/s**, measured at 100% denial. The Writer's own diagnosis had been "the pin is inherent to rejecting," applied in one place and not the other. Also: 429 folded into the terminal-halt bucket is the wrong bucket — 401 is terminal, 429 is transient. |
+
+**The three throttle rules that closed OBJ-D-1:** (A) one login attempt per
+credential generation, then halt; (B) count **distinct credentials**, not
+attempts — a stale client repeats itself, a brute-forcer must vary; (C) the
+throttle **delays, never denies**. Rule B was measured to take the failure
+scenario from 100% blocked to 0% *with the broken client left in place*. Rule B
+is an optimisation; **Rule C carries the safety load**, because two devices with
+different stale credentials look exactly like a brute-forcer.
+
+**OBJ-F-1's resolution and the boundary it draws:** the pending-login bound goes
+from 4 to **1024**, sized by what a pending request actually costs, and overflow
+returns 503 rather than 429. Denial now requires ~1024 concurrent connections at
+~51 req/s — ordinary volumetric DoS, which the same load aimed at `GET /` would
+achieve, and which belongs to the reverse proxy. At 0.2 req/s it was a design
+defect; at 51 req/s it is a fact of the internet.
+
+**HTTP Basic** was evaluated and rejected, on a reason the proposal had not
+given: there is no `SameSite` for an `Authorization` header, so Basic makes the
+sibling-subdomain exposure fully cross-site.
+
+---
+
+# The pattern
+
+Five of the debate's most serious findings share one shape — **individually
+sound decisions that fail when composed**: OBJ-R2-3 (unauthenticated liveness
+probe used as a readiness signal), OBJ-PC-2 (`addAll` fail-closed replaced by
+`put` fail-open), OBJ-INT-2 (a recovery path whose only input was written by a
+process that may never have listened), OBJ-D-1 and OBJ-F-1.
+
+The last two share a second shape the Critic named at the end: **controls correct
+in isolation, defeated by the deployment topology the user actually described.**
+The design was reasoned about as an origin in isolation for five passes. It is a
+public hostname with siblings, polled 21,600 times a day by its own client. That
+is a different object, and §"Deployment topology and trust boundary" exists to
+stop the next reader making the same substitution.
