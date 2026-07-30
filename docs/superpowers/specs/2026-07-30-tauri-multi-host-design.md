@@ -114,35 +114,60 @@ before relying on them:
 
 If any of these differ, the `cf-access` guard changes but no other component does.
 
-**Rust-stack assumptions, added with the pivot and in the same category.** These
-are reasoned from prior knowledge, not tested, and each names what changes if it
-is wrong:
+### Rust-stack assumptions — now verified (2026-07-30)
 
-- **`axum`'s `Json<T>` extractor rejects a non-`application/json` content-type
-  with 415 before the handler runs.** If it instead returns 400, or admits some
-  other content-type, test 8's assertion changes — but if it does *not* reject
-  before the handler, the CSRF primary control reverts to "every handler
-  validates," which is the weaker Express guarantee, and the design must say so
-  rather than claim a structural property it does not have.
-- **`sysinfo` exposes pid, parent pid, CPU and RSS on both Linux and macOS.** If
-  macOS RSS requires `libproc` directly, step 2 grows a platform branch. This is
-  the pivot's stated replacement for parsing `ps`, so a gap here partly undoes
-  the "three defects deleted" claim.
-- **A statically linked `aarch64` build runs under Termux**, and an
-  `x86_64-unknown-linux-musl` build runs in an arbitrary WSL distro. Termux is
-  not glibc and its linker expectations are its own. If static linking does not
-  work there, Android setup regains a toolchain step and UX-4 gets worse, not
-  better.
-- **`keyring` covers macOS, Windows, and Linux Secret Service** with the
-  documented fallbacks. Already flagged for Android, where it does not.
+The four Rust-stack items added with the pivot were reasoned rather than tested.
+They have since been **run in a container** (cargo/rustc 1.94.1, Linux x86_64)
+and are recorded here as results, not assumptions. Three were confirmed with
+corrections; one is conditionally refuted.
 
-**The epistemic asymmetry is worth stating.** Claims about the *Node* agent in
-earlier revisions were verified against this repository — line numbers, the
-`sh()` dedupe-key collision, static-middleware position, `api()` discarding its
-status. Their Rust replacements are reasoned, not run. The pivot improved the
-architecture and simultaneously reduced how much of the document has been
-checked; the four items above are where that gap is concentrated, and they should
-be confirmed early in phase 1 rather than discovered in phase 3.
+- **`axum`'s `Json<T>` rejects a non-JSON content-type before the handler runs —
+  CONFIRMED (axum 0.8.9), with two corrections.** Measured with an `AtomicBool`
+  set as the handler's first statement: `text/plain`,
+  `application/x-www-form-urlencoded`, `multipart/form-data` and an **absent**
+  content-type all return **415** with the handler never entered. The structural
+  claim holds. But the status is **415, not the 400 test 8 asserted** — 400 is
+  what a *malformed body under a correct JSON content-type* returns, and a
+  schema mismatch returns 422. And the extractor admits any **`*/*+json` suffix
+  type** (`application/vnd.api+json` returned 200 with the handler running), so
+  "accepts `application/json` only" is inaccurate. Neither correction weakens the
+  CSRF control: suffix types are not CORS-simple either.
+- **`sysinfo` exposes pid, parent pid, CPU and RSS on Linux and macOS —
+  CONFIRMED, with a precondition the design missed.** `pid()`, `parent()`,
+  `cpu_usage()` and `memory()` carry **no `target_os` gates**; `memory()` is RSS
+  on both (measured against `VmRSS`; on macOS it is `pti_resident_size`). **No
+  macOS platform branch and no entitlements are required** — the `libproc` hedge
+  is deleted. The precondition: **`cpu_usage()` returns 0.0 unless the process
+  has been refreshed twice at least `MINIMUM_CPU_UPDATE_INTERVAL` (200 ms) apart**
+  — two back-to-back refreshes are not enough, and a refresh interval *shorter*
+  than 200 ms returns a silently deflated number rather than zero. See
+  [Disk and process stats](#host-layer--os-abstraction). Pin **`sysinfo = 0.38.4`**;
+  0.39.x requires Rust 1.95.
+- **Static builds — CONFIRMED for musl, CONDITIONALLY REFUTED for Termux.** An
+  `x86_64-unknown-linux-musl` build was built and **executed**: static-pie, `ldd`
+  reports "statically linked". `aarch64-unknown-linux-musl` cross-builds with
+  `-C linker=rust-lld` and produces **static non-PIE** where x86_64 produces
+  static-pie — pin this deliberately in CI. **No aarch64 binary was executed
+  anywhere, and no WSL was available**, so the WSL and Termux *runtime* claims
+  remain reasoned. The Termux claim is **not unconditional**: see
+  [the Android artifact fork](#android-the-artifact-fork).
+- **`keyring` covers macOS, Windows and Linux Secret Service — CONFIRMED; the
+  "documented fallbacks" clause is REFUTED.** `keyring = "4"` is the entire
+  required manifest: `default = ["v1"]` enables all three target-conditional
+  backends, so the dependency list was correct. But **there is no fallback
+  chain** — `v1` binds exactly one store per platform, and on a headless Linux
+  box `Entry::new()` itself fails with `PlatformFailure(Unavailable)` **before
+  any get or set**. The headless-Linux fallback this design specifies is
+  therefore work this design owes, not behaviour the crate provides. See
+  [Secret storage](#secret-storage).
+
+**The epistemic asymmetry, restated.** Claims about the *Node* agent in earlier
+revisions were verified against this repository. The Rust replacements were
+reasoned; the four above have now been run, and doing so refuted or corrected
+something in every one of them. What remains reasoned rather than tested is
+narrower and is named where it appears: **macOS, Windows, WSL, Android and
+Cloudflare runtime behaviour**, plus `statvfs`, none of which this container can
+execute.
 
 Nothing in this design was verified on macOS, Windows, WSL, Android, or against
 a live Cloudflare tenant. Every claim about those five is reasoned rather than
@@ -177,9 +202,11 @@ Three layers, split at the HTTP boundary that already exists.
 
 ### 1. Host agent — `crates/agent/`
 
-The only component that touches `tmux`, `ps`, `df`, `git`, and `~/.claude`.
-Always runs on the machine where Claude sessions live. Remains plain Node with
-no build step. Gains a `HostProfile` for OS-specific behavior and an auth guard
+The only component that touches `tmux`, `git`, and `~/.claude`, and the only one
+that reads process and disk state. Always runs on the machine where Claude
+sessions live. It is a **Rust crate** built as a library and a binary; `ps` and
+`df` are no longer invoked at all, having been replaced by `sysinfo` and
+`statvfs`. Gains a `HostProfile` for OS-specific behavior and an auth guard
 chain.
 
 ### 2. UI — `public/`
@@ -320,8 +347,12 @@ modes 2 and 3, not because Rust is the better language for the problem shape.
 
 **What it costs, stated plainly.**
 
-- **Roughly 800 lines of working, bug-fixed code get rewritten.** The volume is
-  small; the risk is not. `git log` records fixes for an atomic config write, sid
+- **Roughly 450 lines of working, bug-fixed code get rewritten.** Measured:
+  `server.js` plus `lib/` is **535 raw lines, 448 non-blank non-comment**, with a
+  further 230 lines of tests. (An earlier revision said "roughly 800", which was
+  only reachable by counting `public/app.js` — a file the pivot does not
+  rewrite.) The volume is smaller than previously stated; the risk is unchanged,
+  because it was never a function of volume. `git log` records fixes for an atomic config write, sid
   injection, unbounded transcript reads, a kill-confirm race, and a guard on the
   RC-link poll against post-kill meta resurrection. A rewrite discards that class
   of fix silently — the code looks correct precisely because the fix is absent.
@@ -458,10 +489,10 @@ format), and `claude` itself (spawned, never parsed). Each keeps the existing
 time-box and the log-once-per-failure behaviour, now keyed explicitly rather than
 by first argument.
 
-### `lib/auth/` — guard chain
+### `src/auth/` — guard chain
 
-`buildGuard(config)` returns one Express middleware composed of independent
-guards. **All** configured guards must pass.
+`guard(config)` returns one tower layer composed of independent guards. **All**
+configured guards must pass.
 
 - `none` — the local default.
 - `bearer` — constant-time compare against `CDASH_TOKEN`.
@@ -694,8 +725,8 @@ whole point:
 | 4 | 4 | **0.2 req/s** | A design defect — trivially cheap denial |
 | **1024** | **1024** | **51.2 req/s** | Ordinary volumetric DoS |
 
-Sustaining 1024 concurrent connections at ~51 req/s against a single-user Node
-process is not an attack on this throttle — the same load aimed at `GET /` is
+Sustaining 1024 concurrent connections at ~51 req/s against a single-user host
+agent is not an attack on this throttle — the same load aimed at `GET /` is
 just as effective, and defending it belongs to the reverse proxy that already
 terminates TLS. That is a fact of the internet, not a property of this
 mechanism. At 0.2 req/s it would have been the latter.
@@ -712,13 +743,22 @@ address.
 
 ### CSRF — the layering, stated correctly
 
-**The primary control is that the JSON body extractor accepts
-`application/json` only**, combined with the absence of CORS headers. A form POST
-carrying `text/plain`, `multipart/form-data`, or
-`application/x-www-form-urlencoded` — the three content-types a cross-site form
-can send without a preflight — is rejected before any handler runs; a
-cross-origin `fetch` carrying JSON triggers a preflight that fails. Verified for
-all four content-types **with a valid session cookie attached**.
+**The primary control is that the JSON body extractor accepts JSON content-types
+only**, combined with the absence of CORS headers. A form POST carrying
+`text/plain`, `multipart/form-data`, or `application/x-www-form-urlencoded` — the
+three content-types a cross-site form can send without a preflight — is rejected
+**with 415 before any handler runs**; so is a request with no content-type at
+all. A cross-origin `fetch` carrying JSON triggers a preflight that fails.
+**Measured on axum 0.8.9** with a handler instrumented to record whether it was
+entered: all three form content-types and the absent-header case returned 415
+with the handler never reached.
+
+Two measured details, neither of which weakens the control. The extractor admits
+any **`*/*+json` suffix type**, not `application/json` alone —
+`application/vnd.api+json` is accepted and the handler runs — but suffix types
+are not CORS-simple, so no cross-site form can send one. And the control depends
+on **CORS preflight not being loosened server-side**; nothing in this design adds
+`Access-Control-Allow-Origin`, and test 8 asserts its absence.
 
 The pivot strengthens this by default, though only by default. `express.json()`
 left a non-JSON body as `{}` and relied on each handler's validation to reject
@@ -728,10 +768,10 @@ entered**, moving the control from a convention into the type signature. The
 assertion in test 8 becomes *415, not 200*; what it proves is unchanged.
 
 Stated honestly: a three-line content-type check would have given Express the
-same property. This is a better default, not a capability Node lacked. It also
-[depends on an unverified claim](#items-to-confirm-during-implementation) about
-the extractor's behaviour — if that is wrong, the control reverts to the
-handler-validation guarantee and this paragraph is wrong with it.
+same property. This is a better default, not a capability Node lacked. It
+formerly rested on an unverified claim about the extractor; that claim has since
+been [measured and confirmed](#rust-stack-assumptions--now-verified-2026-07-30),
+so the structural property is established rather than assumed.
 
 **`SameSite=Lax` is defence in depth, not the primary control.** `SameSite` is
 scoped to the registrable domain, not the origin: for `claude.myweb.site` every
@@ -874,22 +914,27 @@ unauthenticated by design. It must never be used alone to gate UI load — see
 setup screen with the install command and a re-check button, rather than failing
 every launch with an opaque error.
 
-**Version.** `package.json` has no `version` field today; add `"version":
-"0.1.0"`. The host agent reads it at boot and reports it at `/api/hostinfo`.
-It is the cache key for the WSL copy-in path and the input to the version-skew
-banner.
+**Version.** The agent crate's `Cargo.toml` version, compiled in via
+`env!("CARGO_PKG_VERSION")` and reported at `/api/hostinfo`. It is the cache key
+for the WSL copy-in path and the input to the version-skew banner. Note this is
+strictly better than the Node arrangement it replaces, where the version was read
+from a `package.json` that had no `version` field at all: the value is now baked
+into the binary at compile time and cannot drift from the code it describes.
 
 The Tauri client carries its own version, independent of the host agent's. They
 are compared, never required to match: a mismatch produces a non-blocking banner
-and nothing else. Skew cannot arise on a Linux/macOS managed sidecar, which
-bundles that exact `server.js`. It can arise on any profile that contacts a
-server the client did not just start: VPS, Termux, and a managed WSL profile
-that reaches a previous-generation server holding the port.
+and nothing else. Skew **cannot arise at all on Linux and macOS**, where the
+agent is linked into the client rather than started as a separate process — the
+two versions are the same build by construction. It can arise on any profile that
+contacts a server the client did not just start: VPS, Termux, and a managed WSL
+profile that reaches a previous-generation server holding the port.
 
-Bumping the version is what invalidates the WSL copy-in cache. Forgetting to
-bump it after editing `lib/` leaves a stale server in the distro, and **no
-adopted mechanism detects that** — the versions match, so the skew banner cannot
-fire. It is on the Windows manual checklist.
+Bumping the version is what invalidates the WSL copy-in cache. Forgetting to bump
+it after editing the agent leaves a stale binary in the distro, and **no adopted
+mechanism detects that** — the versions match, so the skew banner cannot fire. It
+is on the Windows manual checklist. (The compile-time source removes the *other*
+half of this hazard: the version can no longer disagree with the binary, only
+with the developer's intent to publish a new one.)
 
 ## Tauri client
 
@@ -1352,9 +1397,8 @@ non-`none` auth mode assert:
 
 1. `GET /api/health` → 200 **unauthenticated**.
 2. **Every other route registered on the app** → 401 unauthenticated. The route
-   list is derived by enumerating the Express router at test time, not
-   hand-written, so a route added later without a guard fails the test on the day
-   it is added.
+   list is derived by enumerating the router at test time, not hand-written, so a
+   route added later without a guard fails the test on the day it is added.
 3. `GET /` and `GET /sw.js` → 401 unauthenticated. This pins the guard-placement
    decision; route enumeration alone cannot, because the static service and the
    guard are layers rather than routes.
@@ -1366,11 +1410,17 @@ Under `CDASH_AUTH=password`, additionally assert:
    password → **401** with no `Set-Cookie`; with the right password → **200 +
    `Set-Cookie`** containing `HttpOnly`, `Secure`, `SameSite=Lax` and the
    `__Host-` prefix. Then replay 2 and 3 with the cookie and require 200/302→200.
-8. **CSRF invariants.** A POST to `/api/kill` with `content-type: text/plain`
-   **and a valid session cookie** → **400, not 200**, proving the body was not
-   parsed; and no response carries `Access-Control-Allow-Origin`. *This is the
-   only mechanical enforcement of the primary CSRF control — if it is ever
-   dropped, the sibling-subdomain exposure becomes HIGH.*
+8. **CSRF invariants.** A POST to `/api/kill` **with a valid session cookie**
+   and `content-type: text/plain` → **415, not 200**, proving the body was never
+   parsed; likewise for `application/x-www-form-urlencoded`, `multipart/form-data`
+   and **a request carrying no content-type at all**. Assert the handler's own
+   side effect did not occur, not merely the status. Distinguish the three
+   outcomes, which are different codes and different proofs: **415** = wrong or
+   absent content-type (the CSRF property), **400** = malformed JSON under a
+   correct content-type, **422** = well-formed JSON that fails to deserialize.
+   And no response carries `Access-Control-Allow-Origin`. *This is the only
+   mechanical enforcement of the primary CSRF control — if it is ever dropped,
+   the sibling-subdomain exposure becomes HIGH.*
 9. **Throttle.** After arming the throttle with distinct wrong passwords, a
    correct login returns **200 after a delay and never 429**, and a login issued
    while other delayed logins are pending also returns **200 after a delay**.
@@ -1523,9 +1573,11 @@ of all of them.
   diff rather than implied by position.
 - **The version string is load-bearing in two places and bumped by hand.**
   `/api/hostinfo` and the WSL copy-in cache key both read it; nothing verifies
-  it, and no cheap check exists. Forgetting to bump it after editing `lib/`
-  leaves a stale server in the distro, undetected — the version-skew banner
-  cannot fire, because the versions match.
+  it, and no cheap check exists. Forgetting to bump it after editing the agent
+  leaves a stale binary in the distro, undetected — the version-skew banner
+  cannot fire, because the versions match. Narrowed by the pivot but not closed:
+  compiling the version in via `env!("CARGO_PKG_VERSION")` means it can no longer
+  disagree with the binary, only with the intent to ship a new one.
 - **An orphaned WSL server is diagnosed, not recovered.** Automatic reclamation
   was removed with the credential that made it necessary. A held port becomes a
   startup failure naming the port; a previous-generation orphan reached on
