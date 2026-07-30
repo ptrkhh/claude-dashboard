@@ -30,7 +30,7 @@ the user installs nothing and no third party is involved. That is what lets
 `CDASH_BIND=127.0.0.1` remain the recommended public posture, with TLS
 terminated in front of the host agent.
 
-This requirement is met by the [`password` guard](#browser-authentication), and
+This requirement is met by the [`password` guard](#browser-authentication--the-password-guard), and
 it is the reason that guard exists: without it, `cf-access` is optional,
 `bearer` cannot be attached by a browser, `trusted-proxy` needs the excluded
 proxy, and `none` is an unauthenticated RCE origin — leaving a browser no way
@@ -1012,7 +1012,9 @@ single-host local tool, not across four platforms and a network.
 | `tmux` or `claude` missing | `HostProfile` probe via `/api/hostinfo` | Setup screen naming the binary and install command |
 | Wrong WSL distro, or no Node in it | `wsl.exe` exit code and stderr | Settings error naming the distro |
 | Host unreachable | `api_request` transport error | "Cannot reach host" plus the URL tried |
-| Auth rejected | HTTP 401 or 403 | "Reached host, auth rejected" plus the profile's configured auth method and URL. The server body names no guard. |
+| Auth rejected | HTTP 401 or 403 | "Reached host, auth rejected" plus the profile's configured auth method and URL. The server body names no guard. Halts the poll |
+| Stored password out of date | 401 after the profile's one login attempt | "Reached host, credentials rejected — the stored password may be out of date" with an **Update password** action. Halts the poll; no further login attempt until the credential is edited |
+| Host throttling logins | HTTP 429, or 503 with `Retry-After` | Transient: back off and retry, honouring `Retry-After`. **Never halts** — a halt here would let an attacker who saturates the throttle stop a client whose credentials are valid |
 | CF JWT expired in browser | 403 from the `cf-access` guard | Full-page reload; the service worker passes navigations to the network, so the CF SSO redirect fires |
 | Server version differs from client | `/api/hostinfo` version | Non-blocking banner |
 
