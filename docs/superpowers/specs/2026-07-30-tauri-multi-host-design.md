@@ -103,6 +103,8 @@ a formality.
 | Service worker | Runtime caching, no precache manifest; exists for PWA installability |
 | VPS web browser auth | First-party `password` guard: scrypt hash + opaque session cookie. CF Access optional, not required |
 | Browser session storage | Opaque server-side session id in a `__Host-` cookie. No stateless token, so logout and restart both revoke |
+| Client session storage | The Tauri client persists the session id in the OS keychain across app restarts. Two credential classes, both stored the same way |
+| TLS under `password` | Boot refuses without an `https://` public URL unless `CDASH_ALLOW_INSECURE_COOKIE=1`, because a dropped `Secure` cookie is undiagnosable from its symptom |
 | Login throttling | Delay, never deny. Counts distinct credentials, not attempts |
 | Default bind address | `127.0.0.1` (breaking change), explicit opt-out to expose |
 | JWT verification | Add the `jose` dependency; do not hand-roll |
@@ -170,11 +172,18 @@ One Rust codebase, one binary per platform, driven by user-configured profiles:
 Profile {
   name, base_url,
   managed: None | Node { .. } | Wsl { distro, .. },   // does the client start the server?
-  auth:    None | Bearer | CfServiceToken | Both,
+  auth:    None | Password | Bearer | CfServiceToken | Bearer+CfServiceToken,
 }
 ```
 
 A single install can hold several profiles and switch between them.
+
+`Password` is the variant for the amended requirement: the client posts the
+stored passphrase to `POST /api/login` and thereafter presents the session it
+receives. It composes with `CfServiceToken` exactly as
+`CDASH_AUTH=password,cf-access` does on the server — the guard chain's
+AND-semantics are mirrored by the client attaching every credential the profile
+holds.
 
 ### Where the server runs, per platform
 
@@ -418,6 +427,29 @@ verbatim, which accumulates absolute paths) — a plaintext secret in its
 environment is one disclosure away from total compromise. Boot **refuses to
 start** if `CDASH_AUTH` includes `password` and the hash is unset or
 unparseable: a named stderr error, never a silent fall back to `none`.
+
+**Boot also refuses to start without TLS, and this is not belt-and-braces.**
+`__Host-` mandates `Secure`, so a browser reaching the origin over plain HTTP
+**discards the session cookie without any error**. `POST /api/login` returns 200
+with a `Set-Cookie` the browser drops on the floor; the next request has no
+cookie, the guard 401s, and non-`/api` paths redirect to `/login` — an endless
+loop in which the user never sees "Incorrect password" and every symptom points
+at the passphrase, which is fine. Nothing server-side detects this: the header is
+correctly formed and correctly sent. Test 8 asserts `Secure` is *present*, which
+is exactly the property that causes the failure.
+
+It will not appear in testing either. Browsers treat `http://localhost` as a
+secure context and honour the cookie, so this reproduces **only** on a first
+public deployment — the moment the design can least afford a misleading symptom.
+
+So: if `CDASH_AUTH` includes `password`, boot requires either `CDASH_PUBLIC_URL`
+with an `https://` scheme, or an explicit `CDASH_ALLOW_INSECURE_COOKIE=1`, which
+drops the `__Host-` prefix and the `Secure` attribute together (the prefix is
+refused without `Secure`, so keeping one without the other yields a cookie no
+browser will store) and logs a warning naming the session-theft exposure on a
+plain-HTTP origin. Same shape as the unset-hash rule above, for the same reason:
+a misconfiguration that cannot be diagnosed from its symptom must be refused at
+boot rather than debugged in production.
 
 Hashing uses **`crypto.scrypt` (async, libuv threadpool)**, not `scryptSync`.
 The parameters are `N=16384, r=8, p=1, 32-byte key`; the *cost* is
@@ -700,13 +732,26 @@ keystroke stream; an XSS at any later time reads nothing. This is weaker than
 Non-secret profile fields (name, URL, distro) go in `tauri-plugin-store` as
 plain JSON.
 
-There is **one** credential lifecycle: user-entered, persisted, long-lived. A CF
-service-token pair or a bearer token the user obtained elsewhere, typed once into
-a form, and expected to persist. Stored via the `keyring` crate: macOS Keychain,
-Windows Credential Manager, Linux Secret Service. The user can see that one
-exists (`has_secret`) and can replace or delete it. No credential in this design
-is machine-generated, and no managed server is spawned with one. Two fallbacks
-are designed in rather than discovered later:
+There are **two** credential classes. The `password` guard introduced the second:
+before it, every credential was user-entered and long-lived, and the design said
+so. A session id is neither.
+
+**Class 1 — user-entered, persisted, long-lived.** A CF service-token pair, a
+bearer token the user obtained elsewhere, or the `password` passphrase: typed
+once into a form and expected to persist. Replaced only by the user.
+
+**Class 2 — server-minted, persisted, short-lived.** The opaque session id from
+`POST /api/login`. Machine-generated, 12-hour absolute lifetime, and — by
+decision — **persisted across app restarts**, so relaunching the client does not
+re-prompt or re-run the KDF while a session is still valid.
+
+Both live in the `keyring` crate: macOS Keychain, Windows Credential Manager,
+Linux Secret Service. A class-2 entry is not weaker than a class-1 entry and must
+not be stored more cheaply — per the trust boundary, **a stolen session id is
+exactly as privileged as the passphrase that minted it**, differing only in
+expiring on its own. The user can see that a credential exists (`has_secret`) and
+can replace or delete it. No managed server is spawned with any credential. Two
+fallbacks are designed in rather than discovered later:
 
 - **Headless Linux** with no Secret Service running: fall back to a `0600` file
   in the app config directory, with a visible UI warning that the token is
@@ -715,7 +760,31 @@ are designed in rather than discovered later:
   the OS isolates per-app. This is the same protection Termux's own data has,
   and it is weaker than hardware-backed Keystore.
 
-### Managed-server readiness
+**Session transport.** `reqwest` is configured with **no cookie jar**. The client
+reads the sid out of `Set-Cookie` on login, stores it, and attaches it explicitly
+on each request. An implicit jar would put a class-2 credential in `reqwest`'s
+in-memory store with no persistence and no `has_secret` visibility, which is the
+opposite of the decision above. Explicit attachment also keeps one rule for all
+credentials: `api_request` adds what the profile holds, and nothing is added by a
+layer beneath it.
+
+**Restart, and the Rule A interaction.** On launch the client attaches its stored
+sid. If the server has restarted, or 12 hours have passed, that sid draws a 401 —
+which is the *expected* path, not a failure, and it must not surface as
+"credentials rejected." Rule A resolves it: `login_attempted` is **in-memory, per
+process**, so a fresh launch always carries exactly one login attempt. The 401
+discards the stored sid, spends that attempt, stores the new sid, and retries the
+request once.
+
+The bound still holds. A stale *passphrase* yields one attempt per app launch —
+user-initiated, not automatic — and under Rule B every one of those replays the
+same credential, so the throttle counter never advances past 1. Persisting the
+flag instead would be strictly worse: it would make "restart the app" fail to
+recover from a server-side session reset, which is the ordinary case.
+
+`POST /api/logout` deletes the stored sid on success **and on failure** — a
+logout that cannot reach the server must not leave a credential behind. Deleting
+a profile deletes both classes.
 
 Readiness is `GET /api/health` returning 200. Managed servers run with
 `CDASH_AUTH=none`, so there is no credential to mismatch and no authenticated
@@ -1049,6 +1118,13 @@ Under `CDASH_AUTH=password`, additionally assert:
     hand-rolled parsing on attacker-influenced input; it is exempt from "do not
     hand-roll" not because the rule fails to apply but because it is small
     enough for a test to discharge it.
+11. **Boot refusals.** `CDASH_AUTH=password` with the hash unset, with an
+    unparseable hash, and with neither an `https://` `CDASH_PUBLIC_URL` nor
+    `CDASH_ALLOW_INSECURE_COOKIE=1` each **exit non-zero with a named stderr
+    message and never listen**. With `CDASH_ALLOW_INSECURE_COOKIE=1`, boot
+    succeeds and the `Set-Cookie` carries **neither `Secure` nor the `__Host-`
+    prefix** — the two must move together, since either alone yields a cookie no
+    browser will store.
 
 Under `CDASH_AUTH=none`, assert every route returns **anything other than 401 or
 403** — the invariant is that the guard refactor did not start rejecting the
@@ -1137,6 +1213,12 @@ macOS, safe on a VPS, **and operable on a VPS**, with or without any Tauri work.
   concurrent connections, ~51 req/s). This process cannot defend that and does
   not claim to; existing sessions are unaffected, but a 12-hour absolute
   lifetime means a long enough attack eventually bites.
+- **Persisting the session id widens what a stolen keychain yields.** A class-2
+  entry read off a compromised client grants RCE for up to 12 hours *without the
+  passphrase*, and unlike the passphrase it cannot be changed to revoke — only
+  `POST /api/logout` or a server restart clears it. Accepted for the convenience
+  of not re-prompting on every launch; the entry sits behind the same OS keychain
+  as the passphrase, so the attacker who reads one reads both anyway.
 - **A forgotten passphrase is unrecoverable** — no reset flow, by design, since
   one needs an identity provider. Remedy is shell access to re-set the hash.
 - **Offline works from the second visit.** A service worker does not control the
