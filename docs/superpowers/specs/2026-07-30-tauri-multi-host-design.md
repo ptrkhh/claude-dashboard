@@ -114,9 +114,39 @@ before relying on them:
 
 If any of these differ, the `cf-access` guard changes but no other component does.
 
+**Rust-stack assumptions, added with the pivot and in the same category.** These
+are reasoned from prior knowledge, not tested, and each names what changes if it
+is wrong:
+
+- **`axum`'s `Json<T>` extractor rejects a non-`application/json` content-type
+  with 415 before the handler runs.** If it instead returns 400, or admits some
+  other content-type, test 8's assertion changes — but if it does *not* reject
+  before the handler, the CSRF primary control reverts to "every handler
+  validates," which is the weaker Express guarantee, and the design must say so
+  rather than claim a structural property it does not have.
+- **`sysinfo` exposes pid, parent pid, CPU and RSS on both Linux and macOS.** If
+  macOS RSS requires `libproc` directly, step 2 grows a platform branch. This is
+  the pivot's stated replacement for parsing `ps`, so a gap here partly undoes
+  the "three defects deleted" claim.
+- **A statically linked `aarch64` build runs under Termux**, and an
+  `x86_64-unknown-linux-musl` build runs in an arbitrary WSL distro. Termux is
+  not glibc and its linker expectations are its own. If static linking does not
+  work there, Android setup regains a toolchain step and UX-4 gets worse, not
+  better.
+- **`keyring` covers macOS, Windows, and Linux Secret Service** with the
+  documented fallbacks. Already flagged for Android, where it does not.
+
+**The epistemic asymmetry is worth stating.** Claims about the *Node* agent in
+earlier revisions were verified against this repository — line numbers, the
+`sh()` dedupe-key collision, static-middleware position, `api()` discarding its
+status. Their Rust replacements are reasoned, not run. The pivot improved the
+architecture and simultaneously reduced how much of the document has been
+checked; the four items above are where that gap is concentrated, and they should
+be confirmed early in phase 1 rather than discovered in phase 3.
+
 Nothing in this design was verified on macOS, Windows, WSL, Android, or against
 a live Cloudflare tenant. Every claim about those five is reasoned rather than
-tested. The first manual checklist run is the first real test of steps 5–8, not
+tested. The first manual checklist run is the first real test of steps 8–11, not
 a formality.
 
 ## Decisions
@@ -270,6 +300,23 @@ removes the runtime and, on Linux and macOS, the child process with it.
   one `aarch64` binary" instead of installing Node and running `npm install`.
   That is a direct improvement to UX-1 and UX-4 in the UX review.
 - **No npm supply chain**, and no `jose`.
+
+**What is *not* a reason, though it was nearly recorded as one.** Two
+improvements that arrived alongside the pivot belong to the review that
+accompanied it, not to the language: the [split router](#guard-placement) and
+[`/api/hostinfo` re-probing on demand](#host-layer--os-abstraction). Both were
+available in the Node design and were missed there. Counting them as Rust wins
+would overstate the case by roughly a third.
+
+**Greenfield, the answer depends on the delivery requirement.** For a web app
+served locally and from a VPS, Node is the better choice and it is not close: no
+bundling, no release matrix, no build step, and an agent that is ~800 lines of
+subprocess orchestration and JSON — scripting-shaped work where Rust's memory
+safety and concurrency guarantees are barely load-bearing at a 4-second poll.
+What reverses it is *this* project's requirement: a self-contained desktop app on
+three platforms plus a phone. That makes runtime bundling the dominant cost, and
+it is precisely where Rust is decisive. The pivot is right because of delivery
+modes 2 and 3, not because Rust is the better language for the problem shape.
 
 **What it costs, stated plainly.**
 
@@ -673,13 +720,18 @@ can send without a preflight — is rejected before any handler runs; a
 cross-origin `fetch` carrying JSON triggers a preflight that fails. Verified for
 all four content-types **with a valid session cookie attached**.
 
-The pivot strengthens this. `express.json()` left a non-JSON body as `{}` and
-relied on each handler's validation to reject it, so the guarantee was
-"every handler validates" — enforced by nothing. Axum's `Json<T>` extractor
-rejects a wrong content-type with **415 before the handler is entered**, so the
-control moves from a convention into the type signature. The assertion in test 8
-changes from *400, not 200* to *415, not 200*; what it is proving is the same and
-is now structural.
+The pivot strengthens this by default, though only by default. `express.json()`
+left a non-JSON body as `{}` and relied on each handler's validation to reject
+it, so the guarantee was "every handler validates" — enforced by nothing. Axum's
+`Json<T>` extractor rejects a wrong content-type with **415 before the handler is
+entered**, moving the control from a convention into the type signature. The
+assertion in test 8 becomes *415, not 200*; what it proves is unchanged.
+
+Stated honestly: a three-line content-type check would have given Express the
+same property. This is a better default, not a capability Node lacked. It also
+[depends on an unverified claim](#items-to-confirm-during-implementation) about
+the extractor's behaviour — if that is wrong, the control reverts to the
+handler-validation guarantee and this paragraph is wrong with it.
 
 **`SameSite=Lax` is defence in depth, not the primary control.** `SameSite` is
 scoped to the registrable domain, not the origin: for `claude.myweb.site` every
@@ -748,8 +800,15 @@ Consequence: `/api/health` is the only unauthenticated endpoint on the origin,
 and UI assets — including `sw.js` — require a credential. Under
 `CDASH_AUTH=none` the guard layer is a pass-through.
 
-**This is the pivot's clearest structural win, and it retires a stated tradeoff.**
-In Express the guarantee was a *line-ordering property of one file*: any future
+**This retires a stated tradeoff — but credit it to the review, not to Rust.**
+An Express router mounted with `app.use('/', guardedRouter)` achieves the same
+split. This is a design improvement that was available in the Node design and was
+missed there; it was found while porting, not granted by the language. Recording
+it as a pivot win would misattribute it and would suggest reverting the pivot
+costs it, which is false.
+
+Under the previous single-chain structure the guarantee was a *line-ordering
+property of one file*: any future
 edit registering a route above `app.use(guard)` was an unauthenticated reach of
 an origin that runs `--dangerously-skip-permissions`, and the only thing standing
 between a one-line reordering and a breach was a test. Splitting the router makes
@@ -1442,6 +1501,17 @@ of all of them.
 - **Cross-compilation is now ours.** Four or more targets, including musl static
   builds for VPS, WSL, and Termux. Shipping a `node` binary meant shipping
   someone else's build; nothing in the Node design had a release matrix.
+- **PATH handling got more ceremonious, not less.** One `process.env.PATH`
+  assignment reaching every call site is simpler than a command-builder helper.
+  The helper is a better guarantee, but it is more machinery for the same
+  outcome, and it exists because the simple approach is unsound in Rust rather
+  than because anyone wanted it. The pivot's only outright regression in the
+  agent's internals.
+- **The document is less verified than the one it replaced.** Earlier revisions'
+  claims about the Node agent were checked against this repository; their Rust
+  replacements are reasoned. See
+  [Items to confirm](#items-to-confirm-during-implementation) — the architecture
+  improved and the evidence base shrank in the same commit.
 - **The unauthenticated surface is three routes, and adding a fourth is a
   deliberate act.** *Retired by the pivot.* Under Express this was the design's
   worst tradeoff — the guarantee was a line-ordering property of one file, and a
