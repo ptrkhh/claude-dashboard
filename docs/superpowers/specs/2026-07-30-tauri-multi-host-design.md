@@ -344,7 +344,7 @@ would overstate the case by roughly a third.
 
 **Greenfield, the answer depends on the delivery requirement.** For a web app
 served locally and from a VPS, Node is the better choice and it is not close: no
-bundling, no release matrix, no build step, and an agent that is ~800 lines of
+bundling, no release matrix, no build step, and an agent that is ~450 lines of
 subprocess orchestration and JSON — scripting-shaped work where Rust's memory
 safety and concurrency guarantees are barely load-bearing at a 4-second poll.
 What reverses it is *this* project's requirement: a self-contained desktop app on
@@ -458,8 +458,8 @@ This is better than what it replaces, but **not** in the way an earlier revision
 claimed. It said the helper makes the guarantee "a type-level fact — there is no
 other way to build a command." That is false: `std::process::Command` and
 `tokio::process::Command` are public, and a bypass compiles and runs. The helper
-is a *convention* in exactly the sense `sh()` was — which would leave P6 relocating
-the defect it claims to delete.
+is a *convention* in exactly the sense `sh()` was — which would leave the helper
+relocating the defect it claims to delete rather than deleting it.
 
 What closes it is a lint, not a type: **`clippy.toml` with
 `disallowed-types = ["std::process::Command", "tokio::process::Command"]`, run as
@@ -528,9 +528,18 @@ a zero, because it is plausible.
 - Hold **one long-lived `System` in `Ctx`**, refreshed on request, never
   constructed per request. Measured cost of the refresh is ~4 ms for 112
   processes and the resident cost is under 600 KB, so this is not a tradeoff.
-- Serve CPU as **`null` when the sample is younger than 200 ms or older than a
-  60-second cap**, alongside a `cpuSampleAgeMs` field — never a number the server
-  knows to be wrong.
+- **Refresh only when `last_refresh.elapsed() >= 200 ms`; otherwise reuse the
+  previous sample unchanged.** Serve CPU as **`null` only when there is no prior
+  sample, or the prior sample is older than a 60-second cap**, alongside a
+  `cpuSampleAgeMs` field — never a number the server knows to be wrong.
+
+  Stated this way deliberately, because the shorter phrasing ("`null` when the
+  sample is younger than 200 ms") reads two ways, and one of them is wrong: a
+  sample taken at T is *valid*, and a request arriving at T+50 ms should be
+  served that sample rather than a `null`. Discarding it would make every
+  imperative `poll()` after kill, resume, purge and launch — the interactions
+  named above — render `—` in place of a good number taken moments earlier. The
+  200 ms threshold governs **when to re-sample**, not **what to serve**.
 - **The UI must render `null` as `—`.** It does not today: `app.js:162`
   interpolates `r.cpu` directly, so a `null` reaches the page as the string
   `cpu null%`. The one-line fix (`r.cpu ?? '—'`) is the **sole exception** to
@@ -1251,8 +1260,8 @@ earlier revision of this section did not name them:
 - **Silent detached-task death is the worst case here**, and it is strictly less
   diagnosable than the sidecar failure it replaces: there is no stderr to
   capture, no exit code, and no process table entry to miss. This is the price of
-  P3 and it is not fully mitigable — holding the handle bounds it, it does not
-  eliminate it for any task spawned later.
+  running in-process and it is not fully mitigable — holding the handle bounds
+  it, it does not eliminate it for any task spawned later.
 - **Mutex poisoning** is now reachable in a way it was not in Node. `ctx.meta`,
   `ctx.purged` and the git-status cache become shared state behind a lock; a
   panic while holding one poisons it, and every subsequent request fails. Treat a
@@ -1548,7 +1557,7 @@ Two behaviors are specified explicitly:
   interval reaches 30 seconds, so a server restarted after a long outage may
   take up to 30 seconds to be noticed if the tab has stayed in the foreground
   the whole time. Switching away and back forces an immediate poll. Symptom: the
-  "disconnected" indicator persists briefly after `npm start` returns.
+  "disconnected" indicator persists briefly after the agent restarts.
 
 - **Auth failures do not retry — but throttling is not an auth failure.** Only
   transport errors and transient throttling — HTTP 429 and 503, honouring
@@ -1883,8 +1892,8 @@ of all of them.
   provably complete.** The parity gate does not close it: a dropped bound, filter
   or validation agrees with Node on ordinary inputs and diverges only on the
   input the control existed for, which is exactly the input a parity run does not
-  contain. Neither the Writer nor the Critic could offer a mechanism, and none is
-  adopted. Not fully mitigable — only bounded.
+  contain. No mechanism to close it was found, and none is adopted. Not fully
+  mitigable — only bounded.
 - **The no-build-step property is gone at the author's end.** Editing the agent
   and restarting is now a compile cycle. Accepted knowingly; it is a real loss
   for a tool whose author hacks on it, and it is the one thing Node was
@@ -1952,6 +1961,17 @@ of all of them.
 - **The untested surface is the newest surface.** Automated coverage reaches
   steps 1–4 well. Everything from step 5 on — spawn precedence, WSL lifecycle,
   the loopback measurement, keychain access — is manual-checklist-only.
+- **The keychain fallback's safety rests on one unverified error variant.** The
+  [trigger](#secret-storage) falls back to an unencrypted file on
+  `NoDefaultStore`/`PlatformFailure` and refuses to on `NoStorageAccess`. That
+  split was read from `keyring-core`'s source, **not observed against a real
+  locked keyring** — no desktop session was available. If a locked
+  `gnome-keyring` reports `PlatformFailure` instead, the narrow trigger silently
+  becomes the broad one and **a merely locked keyring causes an RCE-granting
+  passphrase to be written to disk in plaintext.** This is the only HIGH-severity
+  failure mode in the design that is still gated on an unverified fact; it is
+  step 10's first task, and implementing the fallback before measuring it
+  re-opens the defect the trigger exists to prevent.
 - **Two ordering hazards are closed by sequencing alone, and would re-open if the
   sequence were rearranged.** The `cpu ?? '—'` render ships with step 3 rather
   than with the step 7 UI work, because a step 3 that emits `null` without it
