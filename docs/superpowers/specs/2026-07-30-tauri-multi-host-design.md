@@ -3,6 +3,11 @@
 Date: 2026-07-30
 Revised: 2026-07-30 (adversarial review; see
 `2026-07-30-tauri-multi-host-design-review.md` for the full ledger)
+Revised: 2026-07-30 (**Rust-pivot debate.** A second adversarial pass, scoped to
+the pivot delta, preceded by a verification pass that ran the four Rust-stack
+assumptions rather than reasoning about them. All nine pivot changes adopted,
+five with revisions; nothing withdrawn or rejected. Every claim below marked
+"measured" or "verified" was executed in a container.)
 Status: approved, pending implementation plan
 
 ## Rust pivot (2026-07-30)
@@ -150,7 +155,7 @@ corrections; one is conditionally refuted.
   static-pie — pin this deliberately in CI. **No aarch64 binary was executed
   anywhere, and no WSL was available**, so the WSL and Termux *runtime* claims
   remain reasoned. The Termux claim is **not unconditional**: see
-  [the Android artifact fork](#android-the-artifact-fork).
+  [the Android artifact fork](#android--the-artifact-fork).
 - **`keyring` covers macOS, Windows and Linux Secret Service — CONFIRMED; the
   "documented fallbacks" clause is REFUTED.** `keyring = "4"` is the entire
   required manifest: `default = ["v1"]` enables all three target-conditional
@@ -447,12 +452,25 @@ resolved PATH, the time-box, and the log-once key:
 fn cmd(program: &str) -> Command   // sets .env("PATH", resolved_path())
 ```
 
-This is strictly better than what it replaces: the Node version's guarantee was
-"nobody calls `child_process` directly," enforced by nothing. The helper makes it
-a type-level fact — there is no other way to build a command — and it is where
-the time-box and dedupe key live, so the three concerns that were spread across
-`sh()`, a module-global `Set`, and an implicit environment mutation collapse into
-one place.
+This is better than what it replaces, but **not** in the way an earlier revision
+claimed. It said the helper makes the guarantee "a type-level fact — there is no
+other way to build a command." That is false: `std::process::Command` and
+`tokio::process::Command` are public, and a bypass compiles and runs. The helper
+is a *convention* in exactly the sense `sh()` was — which would leave P6 relocating
+the defect it claims to delete.
+
+What closes it is a lint, not a type: **`clippy.toml` with
+`disallowed-types = ["std::process::Command", "tokio::process::Command"]`, run as
+`-D clippy::disallowed_types` in CI.** Verified to fail the build on a bypass.
+This is a **required** gate rather than advisory, because it is the only
+enforcement of the 5-second subprocess time-box — a control that exists because
+`git status` on a 9P mount once took over 60 seconds and stalled every 4-second
+poll, and one the ponytail never-simplify rule protects.
+
+With the lint in place the helper is where the resolved PATH, the time-box, and
+the log-once key live, so the three concerns that were spread across `sh()`, a
+module-global `Set`, and an implicit environment mutation collapse into one
+place — enforced by CI rather than by everyone remembering.
 
 **Missing-binary detection** stays a pure function over the resolved PATH,
 checking each of `tmux`, `claude`, and `git` for an executable file. No
@@ -1200,8 +1218,34 @@ process that owns it.
 
 Everything the sidecar design needed here is gone: no bundled runtime, no spawn,
 no readiness poll, no spawn-result-versus-health precedence, no teardown, no
-pidfile, no reclamation. The failure modes go with them — the only remaining one
-is a bind error, which is a `Result` on the startup path.
+pidfile, no reclamation.
+
+**The failure modes do not all go with them, and the ones that remain are the
+in-process design's own.** A bind error is a `Result` on the startup path, which
+is the easy one. The other three are specific to sharing an address space, and an
+earlier revision of this section did not name them:
+
+- **A panicking task does not take the process down** — verified: a panicking
+  tokio task leaves the process alive and the runtime healthy, and the panic
+  surfaces only as `is_panic` on the `JoinHandle`. So the sidecar's loudest
+  signal, *the child died and its exit code says so*, has no in-process
+  equivalent. `serve`'s handle is therefore **held and awaited, never detached**;
+  a panic becomes a named startup-screen failure rather than an agent that has
+  silently stopped answering while the window stays open.
+- **Silent detached-task death is the worst case here**, and it is strictly less
+  diagnosable than the sidecar failure it replaces: there is no stderr to
+  capture, no exit code, and no process table entry to miss. This is the price of
+  P3 and it is not fully mitigable — holding the handle bounds it, it does not
+  eliminate it for any task spawned later.
+- **Mutex poisoning** is now reachable in a way it was not in Node. `ctx.meta`,
+  `ctx.purged` and the git-status cache become shared state behind a lock; a
+  panic while holding one poisons it, and every subsequent request fails. Treat a
+  poisoned lock as a recoverable condition with a named error, not an `unwrap()`.
+
+`panic = "unwind"` is pinned deliberately: `abort` would make `is_panic`
+unreachable and convert every one of the above into an opaque process death. It
+costs **35.5 KB** of binary (measured, 7.4%) — which is 0.03–0.07% of the Node
+runtime the bundle-size argument is about, so it does not disturb that argument.
 
 Surface the bound address in the client UI, copyable, so a user who wants a real
 browser against the local agent can find it
@@ -1249,7 +1293,7 @@ required.
      before**. It contains `{pid, port, version, startedAt}`.
   2. It is deleted on clean exit.
   3. On `EADDRINUSE` the server exits 3 with a diagnosed stderr line and writes
-     **no pidfile** (see [Server structure](#server-structure)).
+     **no pidfile** (see [Agent structure](#agent-structure)).
 
   Rules 1 and 3 together mean the pidfile can only ever name a process that
   actually listened. Without them, a server that dies on a held port before
@@ -1279,10 +1323,44 @@ dependency that motivated it.
 Because the folder picker browses *the server's* filesystem, it naturally shows
 WSL paths. No `\\wsl$\` path translation is needed anywhere.
 
-**Android.** No managed server, by OS design. The app ships a default profile
-pointing at `http://localhost:8080` and expects Termux to run the agent itself
-via `termux-services`, or `termux-boot` to start on boot. Setup is now **one
-static `aarch64-linux-android` binary dropped into Termux** — no Node, no
+### Android — the artifact fork
+
+**"Static" and "the Android target" are two different binaries, and an earlier
+revision of this design specified both at once.** They are mutually exclusive:
+
+| | `aarch64-unknown-linux-musl` (static) | `aarch64-linux-android` (Bionic, dynamic) |
+|---|---|---|
+| Build needs | `rust-lld` only, no NDK | the Android NDK |
+| F-Droid Termux (`targetSdk` 28) | runs | runs |
+| Play-store Termux, `targetSdk` ≥ 29, Android 10+ | **fails** — `e_type: 2` | runs |
+
+The mechanism: a Termux built for `targetSdkVersion` ≥ 29 cannot `exec()` files
+in its own data directory under Android 10's W^X rule, so it runs binaries as
+`/system/bin/linker64 <path>` instead. A static ELF has no dynamic linker, and
+the system linker rejects it. **There is no path-based exemption** — `$PREFIX/bin`
+*is* the app data directory; what makes F-Droid Termux work is that it ships
+`targetSdkVersion 28` deliberately to retain the exemption. And **static linking
+against Bionic is not an NDK-supported configuration**, so "a static
+`aarch64-linux-android` binary" is not a buildable artifact at all.
+
+**Decision: ship static `aarch64-unknown-linux-musl`, and state the constraint —
+F-Droid Termux only.** It needs no NDK, matches the WSL artifact's build shape,
+and Android is deferred anyway (step 11). The NDK-built `aarch64-linux-android`
+binary is the documented fallback if Play-store Termux support is ever required;
+that is a build-system change, not a design change. *This rests on a runtime
+claim that could not be executed here — no aarch64 binary was run and no Android
+device was available — so it is the first thing step 11 must verify.*
+
+Also on Android, and unrelated to linkage: **`/proc` is mounted `hidepid=2`, so an
+unrooted app sees only its own processes.** `procTreeUsage` walks the agent's own
+descendants and is unaffected, but `externalSessions` — which enumerates *other*
+processes — cannot work on Android and must be absent rather than empty there,
+or the UI reports "no sessions" when it means "cannot see."
+
+**Android setup.** No managed server, by OS design. The app ships a default
+profile pointing at `http://localhost:8080` and expects Termux to run the agent
+itself via `termux-services`, or `termux-boot` to start on boot. Setup is **one
+static binary dropped into Termux** — no Node, no
 `npm install`, no toolchain on the phone. Termux also needs
 `termux-wake-lock` and a battery-optimisation exemption, without which Android
 kills the agent in the background and the localhost profile reads as
@@ -1614,19 +1692,82 @@ honest.
    *Replaces old step 1; the `df`, `ps`, and `sh()`-dedupe defects are deleted
    rather than fixed.*
 3. **Collect and orchestration.** Sessions, tmux panes, launch/resume/kill/purge,
-   the RC-link poll, `~/.claude` reads. **Ported against an explicit checklist of
-   the fixes in `git log`** — atomic config write, sid injection, bounded
-   transcript reads, kill-confirm race, post-kill meta resurrection — each with a
-   test it did not have in Node. This is where a silent regression is most likely
-   and hardest to notice.
+   the RC-link poll, `~/.claude` reads. This is where a silent regression is most
+   likely and hardest to notice, and it is ported against an explicit checklist —
+   **derived by reading the code, not by reading `git log`.**
+
+   *Why the derivation method changed.* An earlier revision listed five fixes
+   "recorded in `git log`". Checked: those five are **two commits**, and the
+   method that produced them is unsound, because a guard added inside a *feature*
+   commit has no fix-shaped subject line to find. Deriving from commit messages
+   provably missed the 5-second subprocess time-box and the background
+   git-status cache (`4551f39`), the `sdk-cli` observer filter (`ae2c46e`), an
+   `esc()` escaping fix (`268f6bc`), and — the ones that matter most — three
+   trust-boundary guards that no commit advertises: `assertPath` (`server.js:28`),
+   the `^cdash-[\w-]+$` check on the kill target (`server.js:60`), and
+   `MAX_ENTRIES = 1000` (`browse.js:7`). A longer list drawn the same way would
+   have the same hole.
+
+   **Derive the checklist by reading every file in `lib/` and `server.js` and
+   enumerating five categories:**
+
+   1. **Input validation at a trust boundary** — every regex, allowlist or
+      `assert*` applied to a value that reaches a subprocess, a path, or the
+      filesystem. (`assertValidSid`, `assertPath`, the kill-target pattern.)
+   2. **Bounds** — every cap on a read, a collection, or a loop.
+      (`readTail`'s 128 KiB, `MAX_ENTRIES`, the transcript memo cap of 200.)
+   3. **Time-boxes and their kill signals** — every subprocess deadline.
+      (The 5 s time-box with `killSignal: 'SIGKILL'`, the 2000 ms PATH probe.)
+   4. **Atomicity and ordering** — every write-then-rename, every guard against a
+      resurrected or stale entry. (The `.cdash.tmp` config write, the two
+      `ctx.meta.has(name)` guards in the RC-link poll.)
+   5. **Filters that exclude by design** — every predicate whose removal makes
+      the app *appear* to work while showing wrong data. (`entrypoint !== 'cli'`,
+      the git-status cache's staleness rule.)
+
+   Each item carries to Rust with a test it did not have in Node — including the
+   post-kill resurrection guard, which has **no test today**.
+
+   **Residual, stated plainly:** this is a human code-read. It is materially more
+   complete than commit-message derivation, but it is not provably complete, and
+   **no adopted mechanism detects a safety control dropped during the port.** The
+   parity gate does not close this — a dropped bound or filter agrees with Node
+   on ordinary inputs and diverges only on the input the guard existed for. This
+   is the largest carried risk in the port; see [Tradeoffs](#tradeoffs-carried).
 4. **HTTP layer.** `router(ctx)`, the existing routes, static serving, and
    `serve(cfg)` returning the bound address. *Replaces old step 3, which existed
    only to retrofit testability onto `server.js`.*
 5. **Parity gate.** Run the Node agent and the Rust agent against the same
-   `~/.claude` and diff `/api/sessions` and `/api/logs`. This is the step allowed
-   to declare the port finished; nothing after it may begin while responses
-   disagree. The Node tree stays on disk until this passes and is deleted
-   immediately after.
+   `~/.claude` and compare. This is the step allowed to declare the port
+   finished; nothing after it may begin while it fails. The Node tree stays on
+   disk until this passes and is deleted immediately after.
+
+   **`/api/sessions` — field-by-field equality**, with two declared exemptions:
+   `cpu` (a sampled quantity in Rust and a lifetime average under BSD `ps` — see
+   [the sampling rule](#host-layer--os-abstraction)), and any field whose
+   **type** may now be `null` where Node emitted a number. The exemption is on
+   type as well as value; asserting only on value would pass a `null` against a
+   `0`. Everything else, `dir` included, must match exactly — which is why the
+   tmux remedy above deliberately preserves Node's field semantics rather than
+   improving them.
+
+   **`/api/logs` — not compared for equality.** It cannot be: lines carry
+   `HH:MM:SS` (`collect.js:23`), the buffer is a 200-entry ring whose contents
+   depend on which commands happened to fail, the text is language-specific, and
+   the dedupe-key change deliberately alters which lines appear at all. Diffing
+   it deadlocks on run 1. Assert instead: **schema** (every entry has the
+   expected shape), **liveness** (a command induced to fail produces an entry),
+   and the **dedupe key's two-sided property** — because the one-sided version
+   passes on the bug it exists to catch:
+
+   - Two *different* directories failing `git status` → **two** log lines.
+     (Under the old key both collapse to `"git -C"`; a one-sided "same command
+     logs once" assertion passes on exactly that bug.)
+   - One directory failing repeatedly → **one** log line.
+
+   Narrowing `/api/logs` from equality to invariants is a real loss of coverage,
+   accepted because a gate that runs beats a wider one that gets disabled on its
+   first false failure.
 6. **Auth.** Guard chain (`none`, `bearer`, `cf-access`, `trusted-proxy`,
    `password`), `GET /login`, `POST /api/login` and `/api/logout`,
    `public/login.html`, the set-password tool, the three-rule throttle,
@@ -1655,9 +1796,22 @@ honest.
    loudly and stop if unreachable. *Old step 6, simpler — no Node in the distro.*
 10. **VPS profile.** Auth UI and keychain, the `Password` profile variant, Rule
     A's login-once-per-credential-generation, the client-side failure rows.
-    *Old step 7, unchanged.*
+
+    **First task, before the keychain fallback is written:** confirm against a
+    real locked keyring which error variant `Entry::new()` returns. The
+    [fallback trigger](#secret-storage) distinguishes `NoStorageAccess` (locked —
+    never fall back) from `PlatformFailure` (no store — fall back to a `0600`
+    file), and that distinction was read from `keyring-core`'s source, not
+    observed. If a locked `gnome-keyring` reports `PlatformFailure` instead, the
+    narrow trigger silently degrades to the unsafe broad one and a locked keyring
+    writes an RCE-granting passphrase to plaintext. *Implementing the fallback
+    before running this check re-opens the defect it exists to prevent.*
 11. **Android.** *Old step 8. Deferred pending evidence — see
-    [UX-3](2026-07-30-tauri-multi-host-ux-review.md).*
+    [UX-3](2026-07-30-tauri-multi-host-ux-review.md).* First tasks when it
+    resumes: execute an `aarch64` build under Termux at all (never done — see
+    [the artifact fork](#android--the-artifact-fork)), and confirm
+    `externalSessions` degrades to *absent* rather than *empty* under
+    `hidepid=2`.
 
 **Release engineering** is not a step but a standing obligation from step 5 on:
 `x86_64` and `aarch64` musl static builds for VPS, WSL, and Termux, plus the
@@ -1670,29 +1824,60 @@ of all of them.
 
 ## Tradeoffs carried
 
-- **The rewrite can silently drop fixes whose tests were never written.** Five
-  are enumerated against step 3 and get tests they lacked in Node, but the list
-  is drawn from commit messages, so it is only as complete as those were. The
-  parity gate catches disagreements in whole responses; it cannot catch a race
-  that reproduces once a week. This is the pivot's main risk and it is not fully
-  mitigable — only bounded.
-- **The no-build-step property is gone.** Editing `lib/` and restarting is now a
-  compile cycle. Accepted knowingly; it is a real loss for a tool whose author
-  hacks on it, and it is the one thing Node was straightforwardly better at.
+- **The rewrite can silently drop safety controls, and nothing detects it.** This
+  is the largest carried risk in the port. Step 3's checklist is derived by
+  reading the code across five categories rather than from commit messages — a
+  method change forced by finding that commit-message derivation provably missed
+  three trust-boundary guards — but it remains **a human code-read and is not
+  provably complete.** The parity gate does not close it: a dropped bound, filter
+  or validation agrees with Node on ordinary inputs and diverges only on the
+  input the control existed for, which is exactly the input a parity run does not
+  contain. Neither the Writer nor the Critic could offer a mechanism, and none is
+  adopted. Not fully mitigable — only bounded.
+- **The no-build-step property is gone at the author's end.** Editing the agent
+  and restarting is now a compile cycle. Accepted knowingly; it is a real loss
+  for a tool whose author hacks on it, and it is the one thing Node was
+  straightforwardly better at. Note the property the original constraint was
+  protecting — *no build step and no runtime **at the destination*** — survives
+  and is strengthened: a static musl binary needs nothing installed on a VPS, in
+  a WSL distro, or in Termux.
 - **Cross-compilation is now ours.** Four or more targets, including musl static
   builds for VPS, WSL, and Termux. Shipping a `node` binary meant shipping
   someone else's build; nothing in the Node design had a release matrix.
 - **PATH handling got more ceremonious, not less.** One `process.env.PATH`
-  assignment reaching every call site is simpler than a command-builder helper.
-  The helper is a better guarantee, but it is more machinery for the same
-  outcome, and it exists because the simple approach is unsound in Rust rather
-  than because anyone wanted it. The pivot's only outright regression in the
-  agent's internals.
-- **The document is less verified than the one it replaced.** Earlier revisions'
-  claims about the Node agent were checked against this repository; their Rust
-  replacements are reasoned. See
-  [Items to confirm](#items-to-confirm-during-implementation) — the architecture
-  improved and the evidence base shrank in the same commit.
+  assignment reaching every call site is simpler than a command-builder helper
+  plus a CI lint. The helper is a better guarantee, but it is more machinery for
+  the same outcome, and it exists because the simple approach is unsound in Rust
+  rather than because anyone wanted it. The pivot's only outright regression in
+  the agent's internals.
+- **CPU became a sampled quantity with a warm-up.** `ps` answered in one shot;
+  `sysinfo` requires two refreshes ≥200 ms apart, so the first reading after
+  startup is `null` rather than a number, and a shared `System` now lives in
+  `Ctx`. The UI renders `—` where it used to render a value. Strictly more
+  correct — a sub-interval sample is *deflated*, not absent, and the old code
+  could not have known — but it is new machinery and a visible behaviour change.
+- **The tmux delimiter residue is unchanged, not fixed.** A pane path containing
+  a tab or newline still reads back with `_`, and `$` reads back escaped, because
+  tmux substitutes them before the agent sees them. The bounded split makes field
+  *alignment* unbreakable, which is the corruption that mattered; it cannot
+  recover bytes tmux never emitted. This is identical to current Node behaviour,
+  so it is invisible to the parity gate and is not a regression — but the
+  "parsing text meant for humans" class is *reduced*, not eliminated, for as long
+  as tmux remains a subprocess.
+- **`/api/logs` parity narrowed from equality to invariants.** Timestamps, a
+  failure-dependent ring buffer, and the deliberate dedupe-key change make
+  equality undefined. Schema, liveness and the two-sided dedupe property are
+  asserted instead. A real loss of coverage, accepted because a gate that runs
+  beats a wider one disabled on its first false failure.
+- **The evidence base shrank with the pivot and has since been partly rebuilt.**
+  Earlier revisions' claims about the Node agent were checked against this
+  repository; their Rust replacements were reasoned. The four Rust-stack items
+  have now been [run](#rust-stack-assumptions--now-verified-2026-07-30), and
+  doing so corrected or refuted something in **every one of them** — which is the
+  argument for running the rest. What is still reasoned rather than tested is
+  narrower and named where it appears: macOS, Windows/WSL, Android and Cloudflare
+  runtime behaviour, and `statvfs`. Those are gated at steps 9, 10 and 11 rather
+  than carried as hopes.
 - **The unauthenticated surface is three routes, and adding a fourth is a
   deliberate act.** *Retired by the pivot.* Under Express this was the design's
   worst tradeoff — the guarantee was a line-ordering property of one file, and a
