@@ -5,6 +5,21 @@ Revised: 2026-07-30 (adversarial review; see
 `2026-07-30-tauri-multi-host-design-review.md` for the full ledger)
 Status: approved, pending implementation plan
 
+## Rust pivot (2026-07-30)
+
+**The host agent is being rewritten from Node to Rust.** One crate, two build
+targets: a standalone binary (VPS, WSL, Termux) and a library linked into the
+Tauri app (Linux and macOS desktop). The reasoning is recorded in
+[Why Rust](#why-rust); the consequence is that several sections below describe
+mechanisms that no longer exist.
+
+What is unaffected, and it is most of the hard thinking: the **entire auth
+design** — guard chain, AND-semantics, the `password` guard, scrypt parameters,
+the opaque-session argument, the three throttle rules, `__Host-`, CSRF layering,
+guard placement, the loopback exemption — is language-agnostic and ports
+unchanged. So does the **UI**, which stays JavaScript, and the whole
+[UX review](2026-07-30-tauri-multi-host-ux-review.md).
+
 ## Problem
 
 `claude-dashboard` is a local-only web app. It launches, monitors, resumes, and
@@ -38,11 +53,23 @@ in at all.
 
 ## Constraints that shape the design
 
-**The backend cannot move into the client.** `lib/collect.js` shells out to
-`tmux`, `ps`, `df`, and `git`, and reads `~/.claude/projects` and
-`~/.claude/history.jsonl`. All of that must execute on the machine where Claude
-sessions run. A Tauri app is therefore always a *client* onto a host-side
-server, never a replacement for it.
+**The backend must run where the sessions run — but it can live *inside* the
+client.** The agent drives `tmux`, reads process and disk state, runs `git`, and
+reads `~/.claude/projects` and `~/.claude/history.jsonl`. All of that executes on
+the machine hosting the Claude sessions. What it does *not* require is a separate
+process: **the agent is a Rust crate**, linked directly into the Tauri binary
+when the target is the local machine, and built as a standalone binary when it is
+not.
+
+This is a revision. Until the Rust pivot the agent was Node, so a desktop app
+could only ever be a client onto a separate server process, and much of this
+design existed to manage that process — bundling a `node` runtime, choosing a
+port, spawning, probing readiness, reconciling a spawn result against a health
+check, tearing a child down, handling orphans. On Linux and macOS **none of that
+survives**: there is no second process to manage.
+
+It survives everywhere the agent genuinely cannot share the client's address
+space, and those cases are unchanged: a VPS, a WSL distro, and Termux.
 
 **The UI has one API chokepoint.** Every API call goes through `api()` at
 `public/app.js:112`, using relative paths — verified as the only `fetch` in the
@@ -96,6 +123,9 @@ a formality.
 
 | Decision | Choice |
 |---|---|
+| Host agent language | **Rust.** One crate, two targets: a standalone binary, and a library linked into the Tauri app |
+| Local desktop topology | **In-process** on Linux and macOS — a tokio task, not a child process. Separate process only where address spaces genuinely differ: WSL, Termux, VPS |
+| In-process transport | **Still HTTP over loopback.** Direct Tauri commands rejected — they would fork the UI into two transports |
 | Number of Tauri builds | One codebase; "local" and "VPS" are runtime profiles, not builds |
 | Client transport | All API calls proxied through Rust, not webview `fetch` |
 | macOS missing `tmux` | Detect and guide the user to `brew install tmux`; do not bundle |
@@ -108,14 +138,14 @@ a formality.
 | Termux server auth | `password`, not `none`. Android does not isolate loopback between apps, so a loopback bind is not a perimeter there |
 | Login throttling | Delay, never deny. Counts distinct credentials, not attempts |
 | Default bind address | `127.0.0.1` (breaking change), explicit opt-out to expose |
-| JWT verification | Add the `jose` dependency; do not hand-roll |
+| JWT verification | Use a vetted crate; do not hand-roll signature verification |
 | UI module system | Classic scripts only; transport branch inside `api()`; no build step, no bundler |
 
 ## Architecture
 
 Three layers, split at the HTTP boundary that already exists.
 
-### 1. Host agent — `server.js` + `lib/`
+### 1. Host agent — `crates/agent/`
 
 The only component that touches `tmux`, `ps`, `df`, `git`, and `~/.claude`.
 Always runs on the machine where Claude sessions live. Remains plain Node with
@@ -190,8 +220,8 @@ holds.
 
 | Platform | Server location | Client starts it? |
 |---|---|---|
-| Linux desktop | native | yes — Node sidecar |
-| macOS | native | yes — Node sidecar |
+| Linux desktop | native, **in-process** | n/a — same process |
+| macOS | native, **in-process** | n/a — same process |
 | Windows | inside WSL | yes — via `wsl.exe -d <distro>` |
 | Android | inside Termux | no — thin client to loopback |
 | VPS (any client) | remote | no — thin client with auth |
@@ -201,114 +231,185 @@ holds.
 ### Repository layout
 
 ```
-server.js        lib/  public/  test/    existing, plus lib/host/ and lib/auth/
-public/transport/                        new, small
-src-tauri/                               new
-docs/superpowers/specs/                  new
+crates/agent/            the host agent: lib + bin targets
+  src/parse/             pure parsers — ported first, with their tests
+  src/host/              PATH, binary probe, command helper, sysinfo/statvfs
+  src/collect/           sessions, tmux, git, ~/.claude
+  src/http/              router, routes, static serving
+  src/auth/              guard chain, password guard, throttle
+crates/tauri-app/        the client; depends on agent as a library
+public/                  the UI — unchanged, still JavaScript, still no build step
+docs/superpowers/specs/
 ```
 
-Nothing is relocated. (Middleware *registration order* inside `server.js` does
-change — see [Guard placement](#guard-placement).)
+`server.js`, `lib/`, and `test/` are replaced by `crates/agent/`. `public/` is
+carried over as-is. The Node tree stays in git history and, during the port,
+stays on disk as the parity reference — see
+[the parity gate](#sequencing).
+
+## Why Rust
+
+The agent was Node. Making the desktop app self-contained meant bundling a
+`node` runtime and managing it as a child process. Rewriting the agent in Rust
+removes the runtime and, on Linux and macOS, the child process with it.
+
+**What it buys.**
+
+- **The sidecar disappears on Linux and macOS.** No bundled `node`, no free-port
+  selection, no spawn, no readiness probe, no spawn-result-versus-health
+  precedence, no teardown, no orphan reclamation. These were among the design's
+  most intricate passages and they are *deleted*, not solved.
+- **Bundle size.** A per-arch `node` binary is 50–110 MB; a static agent is
+  single-digit MB. Across three desktop platforms and two architectures that is
+  the difference between an ordinary download and a suspicious one.
+- **Two OS-portability problems stop existing.** `df` column layout and `ps`
+  output parsing are replaced by `statvfs` and `sysinfo`. The GNU-versus-BSD
+  branch, the mount-name-with-a-space bug, and the `sh()` dedupe-key collision
+  were all artifacts of parsing text meant for humans.
+- **WSL stops depending on the distro's Node**, and Termux setup becomes "drop in
+  one `aarch64` binary" instead of installing Node and running `npm install`.
+  That is a direct improvement to UX-1 and UX-4 in the UX review.
+- **No npm supply chain**, and no `jose`.
+
+**What it costs, stated plainly.**
+
+- **Roughly 800 lines of working, bug-fixed code get rewritten.** The volume is
+  small; the risk is not. `git log` records fixes for an atomic config write, sid
+  injection, unbounded transcript reads, a kill-confirm race, and a guard on the
+  RC-link poll against post-kill meta resurrection. A rewrite discards that class
+  of fix silently — the code looks correct precisely because the fix is absent.
+  This is why steps 1, 3, and 5 of the sequence exist in the shape they do.
+- **The no-build-step property is gone.** Editing `lib/` and restarting is
+  replaced by a compile cycle. This is a real loss for a tool the author hacks on,
+  and it is accepted deliberately.
+- **It is not "one language."** The UI stays JavaScript.
+- **Cross-compilation is new work.** Shipping a `node` binary meant shipping
+  someone else's build. Now the release matrix is ours: `x86_64` and `aarch64`
+  musl static for VPS/WSL/Termux, plus macOS and Windows for the client.
+
+**Rejected alternative: keep Node on the VPS, Rust in the client.** That is the
+only genuinely bad option — two implementations of one API, both needing tests,
+diverging on the first bug fixed in one and not the other.
+
+## The agent as a crate
+
+One crate, two targets, and the difference is only how it is started:
+
+```
+agent::serve(Config) -> impl Future        // library: a tokio task in the Tauri process
+cdash-agent  (bin)                         // standalone: VPS, WSL, Termux
+```
+
+**The HTTP boundary is kept even in-process.** When the agent runs as a task
+inside the Tauri app, it still binds loopback and still speaks HTTP, and the
+webview still calls it over HTTP. Bypassing it with direct Tauri commands was
+rejected: it would fork the UI into an HTTP path for web and VPS and a command
+path for local desktop, doubling the surface the transport branch exists to
+avoid, and it would break pointing a real browser at the local agent
+([UX-6](2026-07-30-tauri-multi-host-ux-review.md)). The gain from in-process is
+bundle size and lifecycle, not deleting a boundary that already worked.
+
+The in-process listener still uses a free port, but nothing has to *discover* it:
+the caller holds the bound address directly, so readiness is a resolved future
+rather than a poll. `/api/health` remains for the cases where a probe is genuinely
+needed — WSL, Termux, and any VPS.
 
 ## Host agent changes
 
-### `lib/host/` — OS abstraction
+### Host layer — OS abstraction
 
 **PATH resolution.** At boot, probe the user's real PATH via
-`$SHELL -l -c 'echo $PATH'` and prepend it to `process.env.PATH`. GUI-launched
+`$SHELL -l -c 'echo $PATH'` and prepend it to the PATH given to children.
+GUI-launched
 applications on macOS and Linux inherit a minimal PATH that excludes
 `/opt/homebrew/bin` and `~/.local/bin`, so `claude`, `tmux`, and `git` all
 appear missing even though they work in a terminal. This mechanism exists for
 **inherited child environment** — the `claude` process spawned into tmux, and
 anything it spawns in turn, must see the user's real PATH.
 
-The probe is time-boxed at **2000 ms with `killSignal: 'SIGKILL'`**. The value
-is arbitrary: a login shell echoing `$PATH` completes in tens of milliseconds,
-so this is two orders of magnitude of headroom, and it is half the existing
-`sh()` default (`collect.js:12`) because this call runs *before* the server
-listens while every other time-boxed call runs after. **On timeout or non-zero
-exit, boot continues with the inherited PATH — the probe never gates `listen`.**
-The failure is written to `logBuffer` *and to stderr* as
+The probe is time-boxed at **2000 ms, killed hard on expiry**. The value is
+arbitrary: a login shell echoing `$PATH` completes in tens of milliseconds, so
+this is two orders of magnitude of headroom, and it is half the default applied
+to ordinary subprocesses because this call runs *before* the agent binds while
+every other time-boxed call runs after. **On timeout or non-zero exit, startup
+continues with the inherited PATH — the probe never gates `bind`.** The failure is
+written to the log buffer *and* to stderr as
 `PATH probe failed (<reason>); using inherited PATH`. Binaries that cannot then
 be found are reported via `/api/hostinfo`'s `missing: [...]`, producing the setup
-screen rather than a hang. Without the timeout, a login shell that prompts or a
-`.zprofile` under `set -u` hangs the agent before it listens, and the startup
-screen shows the sidecar's captured stderr — which is empty, because the process
-hung rather than failed.
+screen rather than a hang.
 
-Known locations are folded into the same assignment rather than being a
-resolution tier:
+The timeout matters more in-process than it did as a sidecar. A login shell that
+prompts, or a `.zprofile` under `set -u`, would hang the agent before it binds —
+and in-process that is the **Tauri app's own startup** hanging with no window and
+no captured stderr to show, because nothing failed. As a sidecar the symptom was
+an empty startup screen; embedded, it is an application that never appears.
 
-```js
-process.env.PATH = dedupe([probedPath, '/opt/homebrew/bin', '/usr/local/bin',
-                           inheritedPath]).join(path.delimiter);
-```
+Known locations are folded into the same value rather than being a resolution
+tier: `dedupe([probed, "/opt/homebrew/bin", "/usr/local/bin", inherited])`.
 
 `/opt/homebrew/bin` and `/usr/local/bin` are **the backstop for a failed probe**,
-not a step toward bundling. If the probe times out, boot continues with the
+not a step toward bundling. If the probe times out, the agent continues with the
 inherited PATH — which on a macOS GUI launch is exactly the minimal PATH the
 probe existed to fix, so without these entries the fallback fixes nothing. The
 probed login-shell PATH still comes first, so a user's own ordering wins.
 
-**No absolute-path binary resolution, and no call-site changes.** All seven
-invocations (`lib/collect.js:41,135,141,221,222,223` and `server.js:63`) pass
-bare names, and one `process.env.PATH` assignment resolves all of them — the
-effect is process-global and reaches a spawn issued from any module, including
-`server.js:63`. Verified.
+**The delivery mechanism changes with the language, and this is a real
+consequence of the pivot.** The Node design set `process.env.PATH` once and
+relied on the assignment being process-global, reaching all seven call sites
+with no edits. That trick is not available in Rust: mutating the environment of
+a running multi-threaded process is unsound, and `std::env::set_var` is `unsafe`
+as of edition 2024 for exactly this reason. The agent is multi-threaded by
+construction — it is a tokio runtime — so the Node approach is not merely
+discouraged, it is wrong.
 
-A bundled-resource → PATH → known-locations lookup chain returning absolute
-paths was rejected: it would change seven call sites to achieve what one
-assignment achieves, and its only stated purpose is enabling a bundled `tmux`,
-which §Out of scope says will not happen. If that is ever reversed, the seven
-call-site edits are one mechanical commit — which is what "a later configuration
-change rather than a rewrite" always meant.
+Instead every subprocess is constructed through **one helper** that applies the
+resolved PATH, the time-box, and the log-once key:
 
-**Missing-binary detection** is a pure function, not a side effect of
-resolution: `fs.accessSync(…, X_OK)` over `PATH.split(path.delimiter)` for each
-of `tmux`, `claude`, `git`, `ps`, `df`. No subprocess, unit-testable, and it is
-what feeds `/api/hostinfo`'s `missing: [...]`.
-
-**The `df` fix.** `lib/collect.js:223` uses `df -k --output=target,avail,size`,
-which is GNU coreutils only and fails on macOS, where BSD `df` has no
-`--output` and a different column order. Instead of branching the parser on
-column order, change the contract: query one mount at a time and label the
-result with the path that was requested, so no mount-name parsing is needed.
-
-- Linux and Termux: `df -k --output=avail,size <path>` → avail at index 0, size at index 1
-- macOS: `df -k <path>` → avail at index 3, size at index 1
-
-This also removes a latent bug: a mount path containing a space currently yields
-`freeKb: NaN` and silently shifts `totalKb` to the wrong column.
-
-This change is bounded but **not contained to one function**. It touches
-`parseDf`'s signature (`lib/stats.js:25`), its caller (`collect.js:277`), the
-`Promise.all` at `collect.js:220`, its existing tests (`test/stats.test.js`),
-and `sh()` — see below.
-
-**`sh()` gains an explicit dedupe key.** `collect.js:15` builds its
-log-once-per-failure key as `` `${cmd} ${args[0] || ''}` ``, which for every
-`df` variant is the constant string `"df -k"`. Harmless with one `df` call;
-after the per-mount split, the first mount to fail burns the key for the
-process lifetime and every later per-mount failure is silenced, naming no mount.
-
-```js
-const sh = async (cmd, args, { timeout = 5000, key } = {}) => {
-  try { return (await run(cmd, args, { timeout, killSignal: 'SIGKILL' })).stdout; }
-  catch (e) {
-    const k = key || `${cmd} ${args[0] || ''}`;   // explicit key wins; default unchanged
-    if (!shFailed.has(k)) { shFailed.add(k); log(`sh failed: ${k}: ${e.message}`); }
-    return '';
-  }
-};
+```rust
+fn cmd(program: &str) -> Command   // sets .env("PATH", resolved_path())
 ```
 
-Per-mount calls pass `{ key: `df ${mountPath}` }`. The default branch is
-unchanged, so the other three `sh()` sites are unaffected — except
-`collect.js:41`, which passes a positional timeout and becomes
-`{ timeout: 20_000 }`.
+This is strictly better than what it replaces: the Node version's guarantee was
+"nobody calls `child_process` directly," enforced by nothing. The helper makes it
+a type-level fact — there is no other way to build a command — and it is where
+the time-box and dedupe key live, so the three concerns that were spread across
+`sh()`, a module-global `Set`, and an implicit environment mutation collapse into
+one place.
 
-`ps -eo pid=,ppid=,%cpu=,rss=` (`lib/collect.js:222`) works unchanged on macOS,
-Linux, and Termux.
+**Missing-binary detection** stays a pure function over the resolved PATH,
+checking each of `tmux`, `claude`, and `git` for an executable file. No
+subprocess, unit-testable, and it feeds `/api/hostinfo`'s `missing: [...]`.
+`ps` and `df` leave the list: they are no longer invoked.
+
+**The probe re-runs on demand.** `/api/hostinfo` re-runs both the PATH probe and
+the missing-binary check rather than returning boot-time values. A user who
+installs `tmux` while the app is running and presses the setup screen's re-check
+must get the new answer; a cached one makes the screen appear broken at the exact
+moment it exists to help ([UX-5](2026-07-30-tauri-multi-host-ux-review.md)).
+
+**Disk and process stats stop being parsing problems.** The Node design shelled
+out to `df` and `ps` and parsed their columns, which produced three defects: a
+GNU-only `--output` flag that fails on macOS, a mount path containing a space
+yielding `freeKb: NaN`, and an `sh()` dedupe key that collapsed every `df` call
+to the constant `"df -k"` and silenced all but the first failure.
+
+None of them survive the port, because none of them are addressed — the text
+being parsed is no longer produced:
+
+- **Disk** — `statvfs` per mount path. The caller names the mount, so there is no
+  mount column to parse and no space-in-path bug to have.
+- **Process tree** — the `sysinfo` crate, which covers Linux and macOS and
+  exposes pid, parent pid, CPU and RSS as typed values. The `procTreeUsage`
+  walk survives as logic; only its input changes from a string to a struct.
+
+This is the clearest single argument for the pivot: three OS-portability defects
+and their tests are deleted rather than fixed.
+
+**Subprocesses that remain** are the ones whose output is genuinely an interface:
+`tmux` (session control), `git status --porcelain=v1 -b` (a stable machine
+format), and `claude` itself (spawned, never parsed). Each keeps the existing
+time-box and the log-once-per-failure behaviour, now keyed explicitly rather than
+by first argument.
 
 ### `lib/auth/` — guard chain
 
@@ -356,24 +457,29 @@ client already holds — the active profile's configured auth method and base UR
 — not from the server's response. Naming your own configuration requires no
 disclosure.
 
-**Dependencies.** The **host agent** goes from one runtime dependency to two:
-`express`, plus `jose` for JWT verification. Hand-rolling signature verification
-invites algorithm-confusion and `alg: none` bugs. That property — a Node host
-agent with two dependencies and no build step — is what makes the agent
-bundleable as a Tauri resource and runnable inside a WSL distro from a copied
-directory.
+**Dependencies.** The "one npm dependency to two" framing is obsolete with the
+pivot, and so is `jose`. The agent's crate graph is roughly `tokio`, `axum`,
+`serde`, `sysinfo`, `scrypt`, `subtle` (constant-time compare), and a JWT crate
+for `cf-access`. The rule behind `jose` is unchanged and still binds: **do not
+hand-roll verification of an attacker-supplied signature.** It now points at a
+Rust crate instead of an npm package.
 
-The **Tauri client** is a separate budget and is not small: `tauri`, `reqwest`,
-`keyring`, `tauri-plugin-store`, `serde`, and their transitive graph. This is
-the real cost of delivery modes 2 and 3, and it is accepted. It is stated so
-that "one dependency to two" is not read as the project's total.
+What the old framing was really protecting was the property that made the agent
+*deployable* — small, self-contained, no build step at the destination. The pivot
+serves that property better than Node did: a statically linked musl binary needs
+no runtime at all on the VPS, in a WSL distro, or in Termux, where Node needed an
+interpreter and an `npm install`.
+
+The **Tauri client** adds `tauri`, `reqwest`, `keyring`, `tauri-plugin-store`,
+and their transitive graph. This is the real cost of delivery modes 2 and 3, and
+it is accepted.
 
 
 ### Browser authentication — the `password` guard
 
 The guard that satisfies the amended requirement. A single-secret, first-party,
 cookie-session login served by the origin itself. **Dependency delta: zero** —
-`node:crypto` plus express's existing `res.cookie`.
+no crate beyond what the agent already links.
 
 ```
 CDASH_AUTH=password
@@ -388,16 +494,15 @@ CDASH_PASSWORD_HASH=scrypt$16384$8$1$<salt>$<dk>     # set once, never plaintext
   unexpired → `next()`. Otherwise `/api/*` → `401 {error:"unauthorized"}`,
   anything else → `302 → /login`.
 
-**Why an opaque session id and not a signed token, given `jose` is already
-installed.** A stateless token must be signed, must carry an expiry the server
+**Why an opaque session id and not a signed token, given a JWT crate is already
+linked for `cf-access`.** A stateless token must be signed, must carry an expiry the server
 re-checks, must pin its algorithm, and **cannot be revoked**. An opaque id in a
 `Map` has none of those properties to get wrong: no algorithm field to
 influence, expiry is a number the server owns, `sessions.delete(sid)` is a
-working logout, and a restart is a working panic button. Reaching for the
-installed dependency here would have been the more fashionable and less safe
-choice. The "do not hand-roll" rule still binds and is not violated — it targets
-signature verification of attacker-supplied tokens, which is `cf-access`'s job
-and stays with `jose`. There is no signature here.
+working logout, and a restart is a working panic button. Reaching for the already-linked dependency here would have been the more
+fashionable and less safe choice. The "do not hand-roll" rule still binds and is not violated — it targets
+signature verification of attacker-supplied tokens, which is `cf-access`'s job.
+There is no signature here.
 
 **Why not HTTP Basic.** Basic satisfies the requirement on its face — plain
 browser, no agent, no third party, no login page, no cookie, no session store —
@@ -420,8 +525,8 @@ which `/api/logs` returns verbatim; magic links need a mail provider, i.e. a
 mandatory third party; IP allowlisting fails the "from anywhere" premise.
 
 **Credential storage.** One secret, hashed, in an environment variable. No user
-database, and none is possible. Set with `npm run set-password` (~15 lines,
-`node:readline` with echo suppressed), which requires **≥12 characters**, never
+database, and none is possible. Set with `cdash-agent set-password` (a subcommand,
+reading from the terminal with echo suppressed), which requires **≥12 characters**, never
 writes a file, and never echoes. Plaintext was rejected because *this* process
 serves `/api/browse` (enumerates from `/`) and `/api/logs` (returns `logBuffer`
 verbatim, which accumulates absolute paths) — a plaintext secret in its
@@ -468,13 +573,13 @@ password on a loopback bind is the recommended posture rather than an unusual
 one, and it is also how anyone runs a password-guarded server on their own
 machine.
 
-Hashing uses **`crypto.scrypt` (async, libuv threadpool)**, not `scryptSync`.
-The parameters are `N=16384, r=8, p=1, 32-byte key`; the *cost* is
+Hashing runs **off the async runtime's worker threads**, never inline on the
+reactor. The parameters are `N=16384, r=8, p=1, 32-byte key`; the *cost* is
 machine-dependent (42 ms and 93.5 ms measured on two boxes, likely slower on a
 modest VPS) and is deliberately not quoted as a design constant. A slower box
 strengthens brute-force resistance and, because the throttle delays rather than
-denies, costs no availability. `timingSafeEqual` throws on length mismatch and
-is wrapped to return `false`.
+denies, costs no availability. Comparison is constant-time via `subtle`, which is
+length-safe by construction rather than by a wrapper.
 
 **Session lifetime, and what a stolen session gets.** Stated plainly: a stolen
 session cookie **is** remote code execution as the running user. Every
@@ -560,11 +665,21 @@ address.
 
 ### CSRF — the layering, stated correctly
 
-**The primary control is that `express.json()` parses `application/json` only**,
-combined with the absence of CORS headers. A form POST arrives with
-`req.body = {}` and every handler rejects at validation; a cross-origin `fetch`
-carrying JSON triggers a preflight that fails. Verified for all four
-content-types **with a valid session cookie attached**.
+**The primary control is that the JSON body extractor accepts
+`application/json` only**, combined with the absence of CORS headers. A form POST
+carrying `text/plain`, `multipart/form-data`, or
+`application/x-www-form-urlencoded` — the three content-types a cross-site form
+can send without a preflight — is rejected before any handler runs; a
+cross-origin `fetch` carrying JSON triggers a preflight that fails. Verified for
+all four content-types **with a valid session cookie attached**.
+
+The pivot strengthens this. `express.json()` left a non-JSON body as `{}` and
+relied on each handler's validation to reject it, so the guarantee was
+"every handler validates" — enforced by nothing. Axum's `Json<T>` extractor
+rejects a wrong content-type with **415 before the handler is entered**, so the
+control moves from a convention into the type signature. The assertion in test 8
+changes from *400, not 200* to *415, not 200*; what it is proving is the same and
+is now structural.
 
 **`SameSite=Lax` is defence in depth, not the primary control.** `SameSite` is
 scoped to the registrable domain, not the origin: for `claude.myweb.site` every
@@ -606,35 +721,42 @@ at three; a logo would silently add a fourth.
 
 ### Guard placement
 
-`buildGuard` is registered in `server.js` **after** `express.json()` and the
-`/api/health` route, and **before** `express.static(public)` and every other
-`/api` route:
+The router is built in two halves: an **unauthenticated** router carrying exactly
+three routes, and a **guarded** router carrying everything else — the static
+file service included — with the guard applied as a layer over the second before
+the two are merged.
 
 ```
-express.json()
-GET  /api/health     ← exception 1: liveness, {ok:true}, nothing more
-GET  /login          ← exception 2: static HTML, no host data
-POST /api/login      ← exception 3: throttled, no host data
-buildGuard(config)
-express.static(public)
-… every other /api route
+Router::new()
+  .route("/api/health", get(health))    ← exception 1: liveness, {ok:true}, nothing more
+  .route("/login",      get(login))     ← exception 2: static HTML, no host data
+  .route("/api/login",  post(login))    ← exception 3: throttled, no host data
+  .merge(
+     Router::new()
+       .nest_service("/", static_files) ← UI assets, sw.js included
+       … every other /api route
+       .layer(guard(config))            ← applies to this half only
+  )
 ```
 
 The three exceptions are enumerated, not implied, and they are complete:
-`GET /login` is an explicit route registered before the guard, so
-`public/login.html` stays behind `express.static` and `/login.html` itself
-correctly redirects. A browser's automatic `/favicon.ico` request redirects
-harmlessly.
+`GET /login` is an explicit route, so `public/login.html` stays inside the
+guarded static service and `/login.html` itself correctly redirects. A browser's
+automatic `/favicon.ico` request redirects harmlessly.
 
 Consequence: `/api/health` is the only unauthenticated endpoint on the origin,
 and UI assets — including `sw.js` — require a credential. Under
-`CDASH_AUTH=none` the guard is a pass-through and behaviour is identical to
-today.
+`CDASH_AUTH=none` the guard layer is a pass-through.
 
-This ordering is not forced by the current file layout; it is chosen.
-`express.static` currently sits at `server.js:15`, above every route, and moving
-it below the guard is what makes the two requirements — unauthenticated health,
-guarded assets — simultaneously satisfiable. Verified.
+**This is the pivot's clearest structural win, and it retires a stated tradeoff.**
+In Express the guarantee was a *line-ordering property of one file*: any future
+edit registering a route above `app.use(guard)` was an unauthenticated reach of
+an origin that runs `--dangerously-skip-permissions`, and the only thing standing
+between a one-line reordering and a breach was a test. Splitting the router makes
+"unauthenticated" an explicit, countable list of three, and a route added to the
+guarded half **cannot** escape the layer regardless of where it is written. The
+integration test's router enumeration stays, but it now guards a much narrower
+mistake.
 
 A `bearer`-only origin therefore cannot serve the web UI at all. That is
 correct: per the table above, such an origin exists to serve Tauri clients,
@@ -642,7 +764,7 @@ which ship their UI locally and never fetch `public/`.
 
 ### Bind address — breaking change
 
-`server.js:71` currently calls `app.listen(port, cb)`, binding all interfaces.
+The Node agent bound all interfaces by default.
 The new default is `127.0.0.1`, overridable with `CDASH_BIND=0.0.0.0`, which
 logs a warning naming the RCE risk when `CDASH_AUTH=none`.
 
@@ -650,32 +772,30 @@ This breaks existing LAN access until users set `CDASH_BIND` explicitly. That
 is intended — the dangerous topology should require a deliberate act — and the
 README must document it.
 
-### Server structure
+### Agent structure
 
-`server.js` gains an export, because the integration test cannot otherwise be
-written: the file currently exports nothing and `app.listen(port, cb)` discards
-the returned `Server`, while the startup log prints the `port` *variable* rather
-than the bound port (so `PORT=0` logs `http://localhost:0`).
+The Node design needed a refactor here — `server.js` exported nothing, discarded
+the returned `Server`, and logged the `port` variable rather than the bound port
+— so the integration test could not be written at all. In Rust the shape is the
+starting point rather than a repair:
 
-```js
-export function createApp(ctx) { /* app construction, all routes, guard */ return app; }
-
-const port = process.env.PORT || 8080;
-const host = process.env.CDASH_BIND || '127.0.0.1';
-const server = createApp(ctx).listen(port, host, () =>
-  console.log(`claude-dashboard on http://${host}:${server.address().port}`));
-server.on('error', e => { /* see EADDRINUSE handling below */ });
+```rust
+pub fn router(ctx: Ctx) -> Router                  // construction, all routes, guard
+pub async fn serve(cfg: Config) -> Result<Bound>   // binds, returns the bound address
 ```
 
-Taking `ctx` as a parameter also means the integration test constructs an app
-with a test `ctx` rather than depending on the developer's real `~/.claude`.
-Logging the **bound** port is what the managed sidecar needs when it picks a
-free port.
+`router(ctx)` taking its context as a parameter is what lets the integration
+suite build an agent over a temporary `~/.claude` instead of the developer's real
+one. `serve` **returning the bound address** is what the in-process caller uses:
+no log to scrape, no port to guess, and readiness is the resolved future rather
+than a health poll.
 
-**`EADDRINUSE` is a diagnosed condition, not an uncaught exception.** Without an
-`error` listener, `listen` on a held port kills the process with an uncaught
-throw — verified. The server instead writes `port <p> already in use` to
-**stderr**, exits with code **3**, and writes **no pidfile**.
+**A held port is a diagnosed condition.** The standalone binary writes
+`port <p> already in use` to **stderr**, exits **3**, and writes no pidfile. In
+the in-process case the bind error propagates to the Tauri startup path and
+becomes the startup screen directly — there is no stderr to capture and no child
+to have exited, which is why `serve` returns a `Result` rather than logging and
+aborting.
 
 ### Health endpoints
 
@@ -812,40 +932,60 @@ a logout that cannot reach the server must not leave one live in the process.
 
 ### Managed-server readiness
 
-Readiness is `GET /api/health` returning 200. Managed servers run with
-`CDASH_AUTH=none`, so there is no credential to mismatch and no authenticated
-second step.
+**Only WSL still needs a readiness protocol.** In-process agents have none: the
+caller awaits `serve`, which resolves with the bound address or an error. There
+is no window in which the agent might not be up, so there is nothing to poll and
+no two signals to reconcile. This deletes the entire spawn-result-precedence
+problem on Linux and macOS.
 
-**Precedence, which must be stated because the two signals can disagree.** The
-client spawns a server *and* polls health, and when an orphan holds the port
-those return contradictory answers: the spawned child exits 3 with
-`port <p> already in use` on stderr while `/api/health` returns 200 from the
-orphan. **The spawn result wins.** A client whose child exited non-zero does not
-proceed on a successful health poll; it reports the startup failure with the
-child's stderr and stops. Otherwise the client silently binds its session to a
-server it did not start, of a previous generation, with only a non-blocking
+For **WSL**, readiness is `GET /api/health` returning 200, and the precedence
+rule still applies because the two signals can still disagree. The client spawns
+a process *and* polls health, and when an orphan holds the port they contradict:
+the child exits 3 with `port <p> already in use` on stderr while `/api/health`
+returns 200 from the orphan. **The spawn result wins.** A client whose child
+exited non-zero does not proceed on a successful health poll; it reports the
+startup failure with the child's stderr and stops. Otherwise it silently binds
+its session to an agent it did not start, of a previous generation, with only a
 banner to say so.
 
 A previous-generation orphan that *does* answer successfully — because the
 client's own spawn was never attempted, or succeeded on another port — is caught
 by the version-skew banner, which is the design's only detector for that case.
 
+Managed servers run with `CDASH_AUTH=none`, so there is no credential to mismatch
+and no authenticated second step.
+
 ### Managed server, per platform
 
-**Linux and macOS.** Tauri sidecar. Bundle a per-arch `node` binary plus
-`server.js` and `lib/` as resources. On launch: pick a free port, spawn
-`node server.js` with `CDASH_BIND=127.0.0.1` and `CDASH_AUTH=none`, run the
-readiness probe, then load the UI. No-auth is correct here precisely
-because the socket is loopback-only **on the same kernel**, with no relay in
-between, and free-port selection means a new client never contacts an orphan.
-Tear the child down explicitly on exit.
+**Linux and macOS — no managed server, because there is no second process.** The
+client calls `agent::serve(Config { bind: 127.0.0.1, port: 0, auth: none })` on a
+tokio task, awaits the returned bound address, and loads the UI against it.
+No-auth is correct here precisely because the socket is loopback-only **on the
+same kernel**, with no relay in between, and an ephemeral port means a new client
+never contacts an orphan — there are no orphans, since the listener dies with the
+process that owns it.
+
+Everything the sidecar design needed here is gone: no bundled runtime, no spawn,
+no readiness poll, no spawn-result-versus-health precedence, no teardown, no
+pidfile, no reclamation. The failure modes go with them — the only remaining one
+is a bind error, which is a `Result` on the startup path.
+
+Surface the bound address in the client UI, copyable, so a user who wants a real
+browser against the local agent can find it
+([UX-6](2026-07-30-tauri-multi-host-ux-review.md)).
 
 **Windows.** Spawn through `wsl.exe -d <distro> -- bash -lc "..."`.
 
+Windows is now the **only desktop platform with a managed child process**, because
+it is the only one where the agent must execute in a different kernel from the
+client. Everything below survives the pivot unchanged in purpose; what changes is
+that a static `x86_64-unknown-linux-musl` binary is copied in, so **the distro no
+longer needs Node installed** — removing the detect-and-guide path the Node design
+required.
+
 - **Spawn contract:** `CDASH_BIND=127.0.0.1` and `CDASH_AUTH=none` inside the
-  distro — identical to the Linux/macOS sidecar. The exposure is "any local
-  process on the Windows box," which is the same exposure the sidecar's
-  same-kernel loopback argument already accepts on two other platforms.
+  distro. The exposure is "any local process on the Windows box," which is the
+  same exposure the same-kernel loopback argument accepts on Linux and macOS.
 - **Measure the relay before building around it.** Whether WSL2's localhost
   forwarding reaches a `127.0.0.1` listener inside the distro is unverified, and
   step 6 cannot be implemented without a Windows machine anyway — at which point
@@ -865,9 +1005,11 @@ Tear the child down explicitly on exit.
   assertion: `CDASH_BIND=0.0.0.0` remains permitted generally, because the bind
   decision deliberately allows it behind a warning. Nothing mechanically
   prevents a future edit from adding the fallback.
-- **Copy the server into the distro** at `~/.cdash/<version>/` on first run and
-  on version change, rather than executing from `/mnt/c/...`. Running Node
-  across the 9p filesystem boundary is slow and occasionally unreliable.
+- **Copy the agent binary into the distro** at `~/.cdash/<version>/` on first run
+  and on version change, rather than executing from `/mnt/c/...`. Executing
+  across the 9p filesystem boundary is slow and occasionally unreliable. One
+  static binary is a smaller copy-in than a `node` runtime plus a source tree,
+  and it has no `npm install` step to fail.
 - **Pidfile rules.** Shutdown depends on the pidfile, so its semantics are
   specified rather than assumed:
   1. The pidfile is written **only after the `listening` event fires — never
@@ -903,8 +1045,14 @@ Because the folder picker browses *the server's* filesystem, it naturally shows
 WSL paths. No `\\wsl$\` path translation is needed anywhere.
 
 **Android.** No managed server, by OS design. The app ships a default profile
-pointing at `http://localhost:8080` and expects Termux to run the server itself
-via `termux-services`, or `termux-boot` to start on boot. This requires an
+pointing at `http://localhost:8080` and expects Termux to run the agent itself
+via `termux-services`, or `termux-boot` to start on boot. Setup is now **one
+static `aarch64-linux-android` binary dropped into Termux** — no Node, no
+`npm install`, no toolchain on the phone. Termux also needs
+`termux-wake-lock` and a battery-optimisation exemption, without which Android
+kills the agent in the background and the localhost profile reads as
+permanently disconnected
+([UX-4](2026-07-30-tauri-multi-host-ux-review.md)). This requires an
 INTERNET permission and a cleartext-traffic exemption for the `http://` loopback
 URL. Optionally, an opt-in button fires a single `com.termux.RUN_COMMAND` intent
 and then runs the readiness probe; because that channel returns no exit code or
@@ -1091,22 +1239,37 @@ neither of which it does today. The decision logic lives in
 ## Testing
 
 The existing suite is pure-function `node --test` against parsers, with no
-mocking framework. Follow that pattern; do not introduce one.
+mocking framework. **That pattern carries to `cargo test` unchanged** — pure
+functions, real fixtures, no mocks — and the existing Node cases are ported
+alongside the code they cover, as the correctness harness for the rewrite.
+
+**The rewrite's own test obligation, which is not the same as the design's.**
+Porting tests case-for-case proves the new parsers agree with the old ones on
+inputs somebody already thought of. It does not prove the port preserved fixes
+whose tests were never written — and `git log` shows several: an atomic config
+write, sid injection, unbounded transcript reads, a kill-confirm race, the
+RC-link poll guarded against post-kill meta resurrection. Each of those is
+enumerated as an explicit checklist item against the porting step, and each gets
+a test it did not have in Node. The [parity gate](#sequencing) covers the rest by
+comparing whole responses rather than units.
 
 **Pure-function tests with real fixtures:**
 
-- `parseDf` — captured real GNU and BSD `df -k` output, including a mount path
-  containing a space
-- `HostProfile` binary resolution — lookup chain order and missing-binary reporting
+- Transcript, history, tmux and git-status parsers — the existing Node fixtures,
+  ported verbatim
+- `procTreeUsage` — the tree walk, now over structs rather than parsed `ps` text
+- Binary resolution and missing-binary detection — PATH walk against a temporary
+  directory with and without an executable present
 - `bearer` guard — constant-time compare
 - `cf-access` guard — against a locally generated RSA keypair and stub JWKS,
   covering a valid user token, a valid service token (`common_name`), wrong
   `aud`, expired, tampered signature, and `alg: none`. The last is the specific
-  class of bug `jose` exists to prevent and gets an explicit test.
+  class of bug the do-not-hand-roll rule exists to prevent and gets an explicit
+  test, whichever crate provides verification.
 - Guard composition — `bearer,cf-access` requires both
 - `backoff` — the ladder, reset-on-success, and the 401-halt rule
-- **Missing-binary detection** — the `fs.accessSync` PATH walk, against a
-  temporary directory with and without an executable present
+- **Missing-binary detection** — the PATH walk for an executable file, against a
+  temporary directory with and without one present
 
 No shell-consistency test: with the precache manifest deleted there is no
 manifest to be inconsistent with. That test existed to police a coupling that no
@@ -1124,8 +1287,9 @@ The `(function (g) { … })(globalThis)` form is load-bearing, not stylistic: to
 `this` is `undefined` in a module and `globalThis` in a classic script, so
 `this.X = …` works in the browser and fails under `node --test`.
 
-**Integration, Node only, no Tauri required.** Boot the real server on an
-ephemeral port via `createApp(ctx)`. Under each non-`none` auth mode assert:
+**Integration, agent only, no Tauri required.** Boot the real agent on an
+ephemeral port via `router(ctx)` over a temporary `~/.claude`. Under each
+non-`none` auth mode assert:
 
 1. `GET /api/health` → 200 **unauthenticated**.
 2. **Every other route registered on the app** → 401 unauthenticated. The route
@@ -1133,8 +1297,8 @@ ephemeral port via `createApp(ctx)`. Under each non-`none` auth mode assert:
    hand-written, so a route added later without a guard fails the test on the day
    it is added.
 3. `GET /` and `GET /sw.js` → 401 unauthenticated. This pins the guard-placement
-   decision; router enumeration alone cannot, because `express.static` and the
-   guard are non-route layers invisible to enumeration.
+   decision; route enumeration alone cannot, because the static service and the
+   guard are layers rather than routes.
 4. With a valid credential, `/api/sessions` → 200.
 
 Under `CDASH_AUTH=password`, additionally assert:
@@ -1195,50 +1359,98 @@ Nothing detects a stale-but-same-version WSL copy-in.
 
 ## Sequencing
 
-Each step leaves the tree working and testable.
+Eleven steps in three phases. The Node sequence had eight; the pivot dissolves
+three of them, shrinks one, and adds four that exist purely to keep the rewrite
+honest.
 
-1. **`lib/host/`** — PATH prepend (probed + known locations + inherited,
-   deduped) with its 2000 ms timeout and inherited-PATH fallback, the pure
-   `missing` probe, `df` contract change, `sh()` explicit dedupe key. **No
-   call-site changes.**
-2. **UI** — `backoff.js` + its test (one script tag); `api()` propagates status
-   **and** gains the transport branch; `poll()` applies `next()`; `sw.js`
-   navigations network-first and cache-populating, sub-resources
-   stale-while-revalidate, precache deleted; service-worker registration gated
-   to web mode on the same predicate. Ships before any auth exists, so 401 is
-   unreachable and the only user-visible change is reconnect latency after a
-   sustained outage.
-3. **`server.js` restructure** — `export createApp(ctx)`, log the bound port,
-   `server.on('error')` → diagnosed stderr and exit 3.
-   `const host = process.env.CDASH_BIND` **with no default**, which is
-   byte-equivalent to today's `listen(port, cb)`. Pure refactor.
-4. **`lib/auth/`** — guard chain (`none`, `bearer`, `cf-access`,
-   `trusted-proxy`, **`password`**), **`GET /login` + `POST /api/login` +
-   `POST /api/logout`**, **`public/login.html`**, **`npm run set-password`**,
-   the three-rule login throttle, registration order with its three enumerated
-   exceptions, **bind default `127.0.0.1` lands here**, `/api/hostinfo`,
-   `package.json` version field, and the integration test.
-5. Tauri client — Linux and macOS managed profile; `/api/health` readiness with
-   spawn-result precedence. **Confirm the Tauri detection predicate here.**
-6. Windows and WSL profile — **measure the loopback relay first**;
-   `CDASH_BIND=127.0.0.1 CDASH_AUTH=none`; copy-in; pidfile written after
-   `listening` and deleted on exit; teardown by pid; fail loudly and stop if
-   unreachable.
-7. VPS profile — auth UI and keychain, the `Password` profile variant and
-   Rule A's login-once-per-credential-generation; the client-side failure rows.
-8. Android.
+### Phase 1 — port the agent
 
-Steps 1–4 are independently valuable: they make the existing web app correct on
-macOS, safe on a VPS, **and operable on a VPS**, with or without any Tauri work.
+1. **Parsers and their tests.** Transcript, history, tmux, git-status parsing and
+   the process-tree walk, as pure functions, with the existing `node --test`
+   cases ported to `cargo test`. No I/O. This is the correctness harness that
+   every later step leans on, so it comes first even though it ships nothing.
+2. **Host layer.** PATH probe with its 2000 ms time-box and inherited fallback,
+   the command helper that applies it, binary probe, `sysinfo` and `statvfs`.
+   *Replaces old step 1; the `df`, `ps`, and `sh()`-dedupe defects are deleted
+   rather than fixed.*
+3. **Collect and orchestration.** Sessions, tmux panes, launch/resume/kill/purge,
+   the RC-link poll, `~/.claude` reads. **Ported against an explicit checklist of
+   the fixes in `git log`** — atomic config write, sid injection, bounded
+   transcript reads, kill-confirm race, post-kill meta resurrection — each with a
+   test it did not have in Node. This is where a silent regression is most likely
+   and hardest to notice.
+4. **HTTP layer.** `router(ctx)`, the existing routes, static serving, and
+   `serve(cfg)` returning the bound address. *Replaces old step 3, which existed
+   only to retrofit testability onto `server.js`.*
+5. **Parity gate.** Run the Node agent and the Rust agent against the same
+   `~/.claude` and diff `/api/sessions` and `/api/logs`. This is the step allowed
+   to declare the port finished; nothing after it may begin while responses
+   disagree. The Node tree stays on disk until this passes and is deleted
+   immediately after.
+6. **Auth.** Guard chain (`none`, `bearer`, `cf-access`, `trusted-proxy`,
+   `password`), `GET /login`, `POST /api/login` and `/api/logout`,
+   `public/login.html`, the set-password tool, the three-rule throttle,
+   registration order with its three enumerated exceptions, bind default
+   `127.0.0.1`, `/api/hostinfo`, version string, and the integration suite.
+   *Old step 4, ported; the design is unchanged, only the language.*
+
+### Phase 2 — UI
+
+7. **UI.** `backoff.js` with its test; `api()` propagates status and gains the
+   transport branch; `poll()` applies `next()`; `sw.js` navigations network-first
+   and cache-populating, sub-resources stale-while-revalidate; service-worker
+   registration gated to web mode. *Old step 2, unchanged — it is JavaScript
+   against an API whose shape does not change, so it is **independent of phase 1**
+   and can run in parallel or slot in wherever convenient.*
+
+### Phase 3 — clients
+
+8. **Tauri Linux and macOS.** Link the agent as a library, `serve` on a tokio
+   task, profile store, the bound-address surface. **Confirm the Tauri detection
+   predicate here.** *Old step 5, much smaller: no bundled runtime, no spawn, no
+   readiness poll, no teardown.*
+9. **Windows and WSL.** **Measure the loopback relay first**; static
+   `x86_64-unknown-linux-musl` copy-in; `CDASH_BIND=127.0.0.1 CDASH_AUTH=none`;
+   pidfile written after binding and deleted on exit; teardown by pid; fail
+   loudly and stop if unreachable. *Old step 6, simpler — no Node in the distro.*
+10. **VPS profile.** Auth UI and keychain, the `Password` profile variant, Rule
+    A's login-once-per-credential-generation, the client-side failure rows.
+    *Old step 7, unchanged.*
+11. **Android.** *Old step 8. Deferred pending evidence — see
+    [UX-3](2026-07-30-tauri-multi-host-ux-review.md).*
+
+**Release engineering** is not a step but a standing obligation from step 5 on:
+`x86_64` and `aarch64` musl static builds for VPS, WSL, and Termux, plus the
+desktop targets. It is new work the Node design never carried, because shipping a
+`node` binary meant shipping someone else's build.
+
+Steps 1–6 are independently valuable: they make the agent correct on macOS, safe
+on a VPS, and operable on a VPS, with no Tauri work at all. Step 7 is independent
+of all of them.
 
 ## Tradeoffs carried
 
-- **The entire safety guarantee is a line-ordering property of one file,
-  defended by one test file.** Any future edit that registers a route above the
-  guard in `server.js` is an unauthenticated reach of an origin that runs
-  `--dangerously-skip-permissions` and enumerates from `/`. The integration
-  test's router enumeration plus the explicit `/` and `/sw.js` assertions is the
-  only mechanism standing between a one-line reordering and a breach.
+- **The rewrite can silently drop fixes whose tests were never written.** Five
+  are enumerated against step 3 and get tests they lacked in Node, but the list
+  is drawn from commit messages, so it is only as complete as those were. The
+  parity gate catches disagreements in whole responses; it cannot catch a race
+  that reproduces once a week. This is the pivot's main risk and it is not fully
+  mitigable — only bounded.
+- **The no-build-step property is gone.** Editing `lib/` and restarting is now a
+  compile cycle. Accepted knowingly; it is a real loss for a tool whose author
+  hacks on it, and it is the one thing Node was straightforwardly better at.
+- **Cross-compilation is now ours.** Four or more targets, including musl static
+  builds for VPS, WSL, and Termux. Shipping a `node` binary meant shipping
+  someone else's build; nothing in the Node design had a release matrix.
+- **The unauthenticated surface is three routes, and adding a fourth is a
+  deliberate act.** *Retired by the pivot.* Under Express this was the design's
+  worst tradeoff — the guarantee was a line-ordering property of one file, and a
+  route registered above `app.use(guard)` was an unauthenticated reach of an
+  origin running `--dangerously-skip-permissions`. The split router makes the
+  exception list explicit and closed; a route added to the guarded half cannot
+  escape the layer wherever it is written. The residual risk is now only that
+  someone adds a route to the *unauthenticated* half, which is visible in the
+  diff rather than implied by position.
 - **The version string is load-bearing in two places and bumped by hand.**
   `/api/hostinfo` and the WSL copy-in cache key both read it; nothing verifies
   it, and no cheap check exists. Forgetting to bump it after editing `lib/`
