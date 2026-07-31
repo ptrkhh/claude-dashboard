@@ -1700,18 +1700,19 @@ non-`none` auth mode assert:
    decision; route enumeration alone cannot, because the static service and the
    guard are layers rather than routes.
 4. With a valid credential, `/api/sessions` → 200.
-5. **The composition is AND, not OR.** Boot with `CDASH_AUTH=bearer,password` and
-   assert `/api/sessions` returns **401 with a valid bearer token alone**, **401
-   with a valid session cookie alone**, and **200 only with both**. AND-semantics
-   is stated four times in this document and would otherwise be tested nowhere:
-   every other assertion here runs a single guard, so an operator built or
-   refactored as OR passes all of them. If that happened, every composed row in
-   the [`CDASH_AUTH` table](#srcauth--guard-chain) would silently become
-   single-credential — `password,cf-access`, chosen for defence in depth on an
-   origin where any authenticated caller gets RCE, would admit either credential
-   alone. `bearer,password` is the deliberate pair: both legs are exercisable
-   locally, so the operator is pinned **without mocking the carried Cloudflare
-   assumptions**, which would only assert this design's beliefs back at it.
+5. **A composed `CDASH_AUTH` mounts every leg it names.** Boot with
+   `CDASH_AUTH=bearer,password` and assert `/api/sessions` returns **401 with a
+   valid bearer token alone**, **401 with a valid session cookie alone**, and
+   **200 only with both**.
+
+   This is not a second AND-semantics test — the composer is already covered as a
+   unit above. It covers the step *upstream* of it: parsing the comma-separated
+   `CDASH_AUTH` string into the guard list. A parse that silently drops a leg
+   leaves the composer correct and every other assertion here passing, because
+   they all run a single guard and a dropped leg is indistinguishable from a
+   working one-guard chain. The consequence is the same as a broken AND —
+   `password,cf-access`, chosen for defence in depth on an origin where any
+   authenticated caller gets RCE, would admit either credential alone.
 
 Under `CDASH_AUTH=password`, additionally assert:
 
