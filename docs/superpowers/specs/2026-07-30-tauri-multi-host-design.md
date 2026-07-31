@@ -194,8 +194,9 @@ corrections; one is conditionally refuted.
   backends, so the dependency list was correct. But **there is no fallback
   chain** — `v1` binds exactly one store per platform, and on a headless Linux
   box `Entry::new()` itself fails with `PlatformFailure(Unavailable)` **before
-  any get or set**. The headless-Linux fallback this design specifies is
-  therefore work this design owes, not behaviour the crate provides. See
+  any get or set**. Any fallback is therefore work this design would owe, not
+  behaviour the crate provides — which is why it now specifies **no automatic
+  fallback at all**: a failed `Entry::new()` prompts and holds in memory. See
   [Secret storage](#secret-storage).
 
 **The epistemic asymmetry, restated.** Claims about the *Node* agent in earlier
@@ -1174,32 +1175,48 @@ Linux box with no Secret Service running, `Entry::new()` fails with
 construction, not at first use. (v4 API notes: `Entry::new` returns `Result`;
 `delete_password` is now `delete_credential`.)
 
-- **Headless Linux**, no Secret Service: fall back to a `0600` file in the app
-  config directory, with a visible UI warning that the credential is stored
-  unencrypted. **The trigger is the error variant, never "an error".**
+- **No usable keychain** (headless Linux, a minimal WM with no Secret Service
+  daemon, a locked store, a transient D-Bus fault — the design does not
+  distinguish them for *safety* purposes): **the client never writes the
+  credential to disk.** It prompts for the passphrase, holds it in memory for the
+  life of the process, and logs in with it. The next launch prompts again.
 
-  This distinction is load-bearing, because the credential is a passphrase that
-  grants RCE. Falling back on *any* `Entry::new` failure means a transient D-Bus
-  hiccup — or a keyring that is merely **locked** — silently writes that
-  passphrase to plaintext on disk, and nothing ever moves it back.
+  **There is no automatic plaintext fallback.** An earlier revision specified one,
+  triggered on the `NoDefaultStore`/`PlatformFailure` error variants but not on
+  `NoStorageAccess`, so that a merely *locked* keyring would block rather than
+  degrade. That trigger was correct only if the variant mapping was correct, and
+  the mapping was read from `keyring-core`'s `error.rs` rather than observed
+  against a real locked keyring. Rather than verify a fact in order to keep a
+  code path that writes an RCE-granting passphrase to plaintext, the code path is
+  **not built**. Prompting costs the user one passphrase entry per launch on
+  machines with no keychain; it costs nothing at all on macOS, Windows, GNOME or
+  KDE, where the keychain works and the credential persists exactly as before.
 
-  | `keyring-core` error | Meaning | Action |
-  |---|---|---|
-  | `NoDefaultStore`, `PlatformFailure` | No usable store exists on this box | **Fall back** to the `0600` file, warn |
-  | `NoStorageAccess` | A store exists but is locked or inaccessible | **Never fall back.** Surface *"keyring is locked — unlock it and retry"*; write nothing to disk |
+  The error variant still selects the *message*, best-effort:
 
-  **Precedence:** the keychain is attempted **first on every launch**; the file
-  may never shadow a working store. **Migration back:** on the first launch where
-  the keychain succeeds, the credential is written to it and **the file is
-  deleted** — the degraded state is exited automatically, not left to the user.
-  **UI:** while the file store is in use, a persistent non-dismissible banner
-  names the exposure; it clears on migration.
+  | `keyring-core` error | Message |
+  |---|---|
+  | `NoStorageAccess` | "Your keychain is locked — unlock it and retry, or enter the passphrase for this session only" |
+  | `NoDefaultStore`, `PlatformFailure` | "No keychain available on this machine — enter the passphrase for this session" |
 
-  *Carried risk (E4):* that a locked `gnome-keyring` reports `NoStorageAccess`
-  rather than `PlatformFailure` was read from `keyring-core`'s `error.rs`, not
-  observed — no desktop session was available. If it reports `PlatformFailure`
-  instead, the narrow trigger degrades to the unsafe broad one, so **step 10
-  verifies this against a real locked keyring before the fallback ships.**
+  Misclassifying a row now costs a confusing sentence, not a secret on disk.
+  **This is the point of the change**: the unverified fact stops being
+  load-bearing.
+
+  **Opt-in persistence.** A user who genuinely wants persistence on a
+  keychain-less machine sets `allow_unencrypted_credential_store: true` in the
+  `tauri-plugin-store` JSON — **by hand; there is no UI toggle**, because a
+  checkbox is something a user clicks past and a hand-edited key is something
+  they decide. With it set, and only then, a failed `Entry::new()` writes the
+  credential to a `0600` file in the app config directory. The safety property is
+  that no one reaches the plaintext store without having chosen it, and a human
+  choice needs no error-variant verification to be sound.
+
+  **Precedence** is unchanged: the keychain is attempted **first on every
+  launch**, and the file may never shadow a working store. **Migration back:** on
+  the first launch where the keychain succeeds, the credential is written to it
+  and **the file is deleted**. **UI:** while the file store is in use, a
+  persistent non-dismissible banner names the exposure; it clears on migration.
 
 - **Android**, which `keyring` does not cover: use app-private storage, which
   the OS isolates per-app. This is the same protection Termux's own data has,
@@ -1222,13 +1239,15 @@ login flow at all:
 | Every app launch after that | **Nothing.** The client reads the passphrase from the keychain and logs in for itself — one request, no UI |
 | Session expiring mid-use (12 h) | **Nothing.** The next 401 spends the launch's login attempt, and the request is retried |
 | Passphrase changed on the server | Types the new one **once**, via the **Update password** action that the terminal 401 surfaces |
-| **Keychain locked at launch** | **Unlocks the keychain** and retries. The credential is not readable and is deliberately *not* re-prompted for — re-prompting would train the user to retype an RCE-granting passphrase whenever a dialog appears, and writing it elsewhere is what the [fallback trigger](#secret-storage) exists to prevent |
-| **Running on the unencrypted file fallback** | **Nothing**, but a persistent banner names the exposure until a working keychain is found and the credential migrates back automatically |
+| **Keychain locked at launch** | **Unlocks the keychain** and retries — the recommended action, since it restores persistence. Typing the passphrase for this session only is offered as a second option and stores nothing |
+| **No keychain on this machine** | Types the passphrase **once per launch**. It is held in memory and never written to disk, unless they have hand-set `allow_unencrypted_credential_store` |
+| **Opted in to the unencrypted file store** | **Nothing**, but a persistent banner names the exposure until a working keychain is found and the credential migrates back automatically |
 | In a browser | Signs in at `/login` when the cookie expires or the server restarts — a browser has no keychain to log in from |
 
-The two keychain rows are the only launches that are not "nothing", and neither
-is a re-prompt. This is the cost of the narrow fallback trigger: a locked store
-blocks rather than silently degrading to plaintext.
+The keychain rows are the only launches that are not "nothing". This is the cost
+of having no automatic plaintext fallback, and it is bounded: it falls on
+machines with no working keychain, and nowhere else. On macOS, Windows, GNOME and
+KDE the "types it once, ever" story is unchanged.
 
 **Rule A makes the automatic path work.** `login_attempted` is **in-memory, per
 process**, so a fresh launch always carries exactly one login attempt. The client
@@ -1577,8 +1596,8 @@ single-host local tool, not across four platforms and a network.
 | Host unreachable | `api_request` transport error | "Cannot reach host" plus the URL tried |
 | Auth rejected | HTTP 401 or 403 | "Reached host, auth rejected" plus the profile's configured auth method and URL. The server body names no guard. Halts the poll |
 | Stored password out of date | 401 after the profile's one login attempt | "Reached host, credentials rejected — the stored password may be out of date" with an **Update password** action. Halts the poll; no further login attempt until the credential is edited |
-| Keychain locked or inaccessible | `NoStorageAccess` from `Entry::new()` | "The keychain is locked — unlock it and retry." Blocks the launch; **nothing is written to disk** and no re-prompt is offered. Retry is the only action |
-| No keychain on this machine | `NoDefaultStore` / `PlatformFailure` from `Entry::new()` | Falls back to the `0600` file with a persistent banner naming the exposure. Non-blocking; clears automatically when a keychain appears and the credential migrates back |
+| Keychain locked or inaccessible | `NoStorageAccess` from `Entry::new()` | "Your keychain is locked — unlock it and retry." Offers a session-only passphrase entry as a second option. **Nothing is written to disk** |
+| No keychain on this machine | `NoDefaultStore` / `PlatformFailure` from `Entry::new()` | "No keychain available — enter the passphrase for this session." Held in memory, **not written to disk**; re-prompts next launch. Only `allow_unencrypted_credential_store` changes this, and only if hand-set |
 | Host throttling logins | HTTP 429, or 503 with `Retry-After` | Transient: back off and retry, honouring `Retry-After`. **Never halts** — a halt here would let an attacker who saturates the throttle stop a client whose credentials are valid |
 | CF JWT expired in browser | 403 from the `cf-access` guard | Full-page reload; the service worker passes navigations to the network, so the CF SSO redirect fires |
 | Server version differs from client | `/api/hostinfo` version | Non-blocking banner |
@@ -1884,15 +1903,14 @@ honest.
 10. **VPS profile.** Auth UI and keychain, the `Password` profile variant, Rule
     A's login-once-per-credential-generation, the client-side failure rows.
 
-    **First task, before the keychain fallback is written:** confirm against a
-    real locked keyring which error variant `Entry::new()` returns. The
-    [fallback trigger](#secret-storage) distinguishes `NoStorageAccess` (locked —
-    never fall back) from `PlatformFailure` (no store — fall back to a `0600`
-    file), and that distinction was read from `keyring-core`'s source, not
-    observed. If a locked `gnome-keyring` reports `PlatformFailure` instead, the
-    narrow trigger silently degrades to the unsafe broad one and a locked keyring
-    writes an RCE-granting passphrase to plaintext. *Implementing the fallback
-    before running this check re-opens the defect it exists to prevent.*
+    **No verification gate.** An earlier revision gated this step on confirming
+    which error variant a real locked keyring returns, because an automatic
+    plaintext fallback keyed off that variant. [Secret
+    storage](#secret-storage) no longer has one: every `Entry::new()` failure
+    prompts and holds in memory, and the only path to a `0600` plaintext file is
+    a hand-set `allow_unencrypted_credential_store`. The variant now selects a
+    message, so getting it wrong costs a confusing sentence. The check is worth
+    running when a desktop session is available, but nothing is gated on it.
 11. **Android.** *Old step 8. Deferred pending evidence — see
     [UX-3](2026-07-30-tauri-multi-host-ux-review.md).* First tasks when it
     resumes: execute an `aarch64` build under Termux at all (never done — see
@@ -2003,17 +2021,20 @@ of all of them.
 - **The untested surface is the newest surface.** Automated coverage reaches
   steps 1–4 well. Everything from step 5 on — spawn precedence, WSL lifecycle,
   the loopback measurement, keychain access — is manual-checklist-only.
-- **The keychain fallback's safety rests on one unverified error variant.** The
-  [trigger](#secret-storage) falls back to an unencrypted file on
-  `NoDefaultStore`/`PlatformFailure` and refuses to on `NoStorageAccess`. That
-  split was read from `keyring-core`'s source, **not observed against a real
-  locked keyring** — no desktop session was available. If a locked
-  `gnome-keyring` reports `PlatformFailure` instead, the narrow trigger silently
-  becomes the broad one and **a merely locked keyring causes an RCE-granting
-  passphrase to be written to disk in plaintext.** This is the only HIGH-severity
-  failure mode in the design that is still gated on an unverified fact; it is
-  step 10's first task, and implementing the fallback before measuring it
-  re-opens the defect the trigger exists to prevent.
+- **Machines with no working keychain re-prompt for the passphrase every launch.**
+  [Secret storage](#secret-storage) has no automatic plaintext fallback: any
+  `Entry::new()` failure prompts and holds the credential in memory. This is a
+  deliberate trade. The earlier design fell back to a `0600` file on
+  `NoDefaultStore`/`PlatformFailure` but not on `NoStorageAccess`, a split read
+  from `keyring-core`'s source and **never observed against a real locked
+  keyring** — and if a locked `gnome-keyring` reports `PlatformFailure` instead,
+  that trigger writes an RCE-granting passphrase to plaintext precisely when the
+  user has locked their keychain. Deleting the code path closes the failure mode
+  without observing anything, which is why it was preferred over verifying the
+  variant: the HIGH-severity risk is gone rather than measured. The residual cost
+  is UX, bounded to keychain-less machines, and escapable by hand-setting
+  `allow_unencrypted_credential_store` — an explicit human choice, which needs no
+  verification to be sound.
 - **Two ordering hazards are closed by sequencing alone, and would re-open if the
   sequence were rearranged.** The `cpu ?? '—'` render ships with step 3 rather
   than with the step 7 UI work, because a step 3 that emits `null` without it
