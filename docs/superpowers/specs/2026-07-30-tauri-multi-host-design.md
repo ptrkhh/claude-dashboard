@@ -106,18 +106,50 @@ user. Cloudflare Access protects a hostname, not a socket: any path that reaches
 the origin directly — an open port, an accidentally published container port,
 another tenant on the box — bypasses it entirely.
 
-### Items to confirm during implementation
+### Cloudflare Access — verified against the documentation (2026-07-30)
 
-The Cloudflare MCP connector was not authorized in the design session, so the
-following were taken from prior knowledge rather than verified live. Confirm
-before relying on them:
+These four were carried as assumptions across three reviews because no
+Cloudflare connector was authorized. It has since been authorized and all four
+are **confirmed** — but checking them turned up three details the design had
+wrong or missing, which is the usual result and the reason for checking.
 
-- CF Access injects `Cf-Access-Jwt-Assertion` on proxied requests.
-- The JWKS endpoint is `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`.
-- Service-token requests carry a JWT with a `common_name` claim in place of `email`.
-- Using a service token requires a Service Auth policy on the CF Access application.
+- **CF Access injects `Cf-Access-Jwt-Assertion` on proxied requests — CONFIRMED.**
+  Signed RS256; the `kid` selects the key.
+- **The JWKS endpoint is `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`
+  — CONFIRMED**, where the team domain is also the token's `iss`.
+- **Service-token requests carry `common_name` in place of `email` — CONFIRMED.**
+  The documented service-token payload is
+  `{type, aud, exp, iss, common_name, iat, sub: ""}` — no `email`, and `sub` is
+  the **empty string** rather than absent.
+- **A service token requires a Service Auth policy — CONFIRMED.** The Service
+  Token and Any Access Service Token selectors both require the `non_identity`
+  decision. A service token presented against an identity-only policy does not
+  authenticate.
 
-If any of these differ, the `cf-access` guard changes but no other component does.
+**Three corrections this check produced.**
+
+1. **`aud` is a JSON array, not a string** — `"aud": ["32eafc76…"]`. A guard
+   comparing it directly against the configured Application Audience tag fails
+   for every valid token. Check membership.
+2. **Validate `iss` as well as `aud`.** Cloudflare's own example verifies both,
+   against `https://<team>.cloudflareaccess.com`. Fetching JWKS from the team
+   domain already binds the signature to that team, so this is defence in depth
+   rather than a hole — but it is one line and it is their documented practice.
+3. **`common_name` does not by itself mean "service token", and the guard must
+   not treat it as though it does.** The same claim carries **the common name on
+   an mTLS client certificate**. On an application that also has an mTLS policy,
+   a certificate-authenticated caller would satisfy a `common_name` test and be
+   admitted as if it were the Tauri client. The discriminator that actually means
+   service token is **`service_token_status: true`** (with `service_token_id`
+   naming which token). Given that every authenticated caller here reaches an
+   RCE-equivalent origin, the guard tests `service_token_status`, and treats
+   `common_name` as an identifier to log rather than as evidence of a token.
+
+One scoping note from the same documentation: an origin connected to Access
+**through Cloudflare Tunnel** is not required to validate the token itself.
+This design validates regardless, because [the origin must assume it is directly
+reachable](#deployment-topology-and-trust-boundary) — which is the whole reason
+`cf-access` is a guard on the origin and not a deployment instruction.
 
 ### Rust-stack assumptions — now verified (2026-07-30)
 
@@ -632,11 +664,18 @@ configured guards must pass.
 - `none` — the local default.
 - `bearer` — constant-time compare against `CDASH_TOKEN`.
 - `cf-access` — verify the `Cf-Access-Jwt-Assertion` header (RS256) against
-  `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`, checking `aud`
-  against the configured Application Audience tag. Accepts either a user
-  identity (`email`) or a service token (`common_name`); this is what allows one
-  guard to serve both browser SSO and the Tauri client. JWKS is cached with
-  periodic refresh.
+  `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`, checking that the
+  configured Application Audience tag is **a member of the `aud` array** (it is an
+  array, not a string) and that `iss` equals the team domain. Accepts either a
+  user identity (`email` present) or a service token
+  (**`service_token_status: true`**); this is what allows one guard to serve both
+  browser SSO and the Tauri client. JWKS is cached with periodic refresh.
+
+  **Not `common_name`.** That claim also carries the common name of an **mTLS
+  client certificate**, so on an application that also has an mTLS policy it
+  would admit a certificate-authenticated caller as though it were the Tauri
+  client — into an origin where every authenticated caller gets RCE.
+  `common_name` is logged, never trusted as the discriminator.
 - `trusted-proxy` — accept an identity header such as `X-Forwarded-Email`, but
   only from a configured upstream IP allowlist. Off by default and documented as
   unsafe unless the origin is unreachable. This is the escape hatch for
@@ -649,7 +688,7 @@ the value must match what the origin's clients can actually present:
 |---|---|---|
 | Local only, loopback bind | `none` | The socket is unreachable off-box |
 | **Public VPS, browsers and Tauri, no third party** | **`password`** | **The default for the amended requirement. One guard serves the browser via cookie and the Tauri client via `api_request` login.** |
-| VPS, browsers **and** Tauri clients, CF Access in front | `cf-access` | One guard; `email` for browser SSO, `common_name` for the service token |
+| VPS, browsers **and** Tauri clients, CF Access in front | `cf-access` | One guard; `email` for browser SSO, `service_token_status` for the service token |
 | Public VPS, defence in depth | `password,cf-access` | Both required; the optional-CF case |
 | VPS, Tauri clients only, defence in depth | `bearer,cf-access` | **Locks browsers out by design** — no browser can attach a bearer header |
 | Behind Authelia/oauth2-proxy/Tailscale, origin unreachable | `trusted-proxy` | Escape hatch; unsafe if the origin is reachable |
@@ -1602,8 +1641,11 @@ comparing whole responses rather than units.
   directory with and without an executable present
 - `bearer` guard — constant-time compare
 - `cf-access` guard — against a locally generated RSA keypair and stub JWKS,
-  covering a valid user token, a valid service token (`common_name`), wrong
-  `aud`, expired, tampered signature, and `alg: none`. The last is the specific
+  covering a valid user token; a valid service token (`service_token_status`);
+  **a token carrying `common_name` but not `service_token_status`** — an mTLS
+  identity, which must be **rejected**, and is the case the documentation check
+  added; an `aud` **array** that does not contain the configured tag; a wrong
+  `iss`; expired; tampered signature; and `alg: none`. The last is the specific
   class of bug the do-not-hand-roll rule exists to prevent and gets an explicit
   test, whichever crate provides verification.
 - Guard composition — `bearer,cf-access` requires both
