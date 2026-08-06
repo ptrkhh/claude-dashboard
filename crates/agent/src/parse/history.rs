@@ -23,7 +23,7 @@ pub fn usable_prompts(displays: &[String]) -> Vec<String> {
 pub struct HistoryGroup {
     pub sid: String,
     pub cwd: Option<String>,
-    pub ts: i64,
+    pub ts: f64,
     pub prompts: Vec<String>,
 }
 
@@ -40,7 +40,7 @@ pub fn group_history(jsonl: &str) -> Vec<HistoryGroup> {
     struct Acc {
         sid: String,
         cwd: Option<String>,
-        ts: i64,
+        ts: f64,
         displays: Vec<String>,
     }
 
@@ -58,19 +58,24 @@ pub fn group_history(jsonl: &str) -> Vec<HistoryGroup> {
         // never a reason to drop the whole line (unlike a strict struct
         // deserialize, which would fail the entry entirely).
         let project = e.get("project").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let timestamp = e.get("timestamp").and_then(|v| v.as_i64());
+        // Extract timestamp leniently: accept JSON numbers (both int and float),
+        // or strings that parse as f64. Anything else contributes 0.0.
+        let timestamp = e.get("timestamp")
+            .and_then(|v| v.as_f64())
+            .or_else(|| e.get("timestamp").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()))
+            .unwrap_or(0.0);
         let display = e.get("display").and_then(|v| v.as_str()).map(|s| s.to_string());
 
         let acc = by_sid.entry(sid.clone()).or_insert_with(|| {
             order.push(sid.clone());
-            Acc { sid: sid.clone(), cwd: None, ts: 0, displays: Vec::new() }
+            Acc { sid: sid.clone(), cwd: None, ts: 0.0, displays: Vec::new() }
         });
         // Node: `g.cwd = e.project ?? g.cwd` — only replaces when present.
         // Note "" is a valid project/cwd value, distinct from absent.
         if project.is_some() {
             acc.cwd = project;
         }
-        acc.ts = acc.ts.max(timestamp.unwrap_or(0));
+        acc.ts = f64::max(acc.ts, timestamp);
         if let Some(d) = display {
             acc.displays.push(d);
         }
@@ -86,7 +91,7 @@ pub fn group_history(jsonl: &str) -> Vec<HistoryGroup> {
         })
         .collect();
 
-    groups.sort_by(|a, b| b.ts.cmp(&a.ts));
+    groups.sort_by(|a, b| b.ts.partial_cmp(&a.ts).unwrap_or(std::cmp::Ordering::Equal));
     groups.truncate(60);
     groups
 }
@@ -120,7 +125,7 @@ mod tests {
         let g = group_history(&jsonl);
         assert_eq!(g[0].sid, "b");
         assert_eq!(g[1].sid, "a");
-        assert_eq!(g[1].ts, 260);
+        assert_eq!(g[1].ts, 260.0);
         assert_eq!(g[1].cwd.as_deref(), Some("/x"));
         assert_eq!(g[1].prompts, s(&["p2", "p3", "p4"]));
     }
@@ -140,20 +145,20 @@ mod tests {
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].sid, "a");
         assert_eq!(g[0].cwd.as_deref(), Some("/x"));
-        assert_eq!(g[0].ts, 9);
+        assert_eq!(g[0].ts, 9.0);
         assert!(g[0].prompts.is_empty());
     }
 
     #[test]
     fn group_history_skips_empty_string_session_id() {
-        let jsonl = r#"{"sessionId":"","project":"/x","timestamp":9,"display":"hi"}"#;
+        let jsonl = r#"{"sessionId":"","project":"/x","timestamp":9.0,"display":"hi"}"#;
         assert!(group_history(jsonl).is_empty());
     }
 
     #[test]
     fn group_history_keeps_empty_string_project_as_cwd() {
         // "" is a legitimate cwd value, distinct from an absent project.
-        let jsonl = r#"{"sessionId":"a","project":"","timestamp":9,"display":"hi"}"#;
+        let jsonl = r#"{"sessionId":"a","project":"","timestamp":9.0,"display":"hi"}"#;
         let g = group_history(jsonl);
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].cwd.as_deref(), Some(""));
@@ -162,13 +167,31 @@ mod tests {
     #[test]
     fn group_history_stable_sorts_equal_timestamps() {
         let jsonl = [
-            r#"{"sessionId":"first","project":"/x","timestamp":5,"display":"a"}"#,
-            r#"{"sessionId":"second","project":"/y","timestamp":5,"display":"b"}"#,
+            r#"{"sessionId":"first","project":"/x","timestamp":5.0,"display":"a"}"#,
+            r#"{"sessionId":"second","project":"/y","timestamp":5.0,"display":"b"}"#,
         ]
         .join("\n");
 
         let g = group_history(&jsonl);
         assert_eq!(g[0].sid, "first");
         assert_eq!(g[1].sid, "second");
+    }
+
+    #[test]
+    fn group_history_accepts_float_timestamp() {
+        // JSON floats like 100.5 must be honored as 100.5, not truncated to 0.
+        let jsonl = r#"{"sessionId":"a","project":"/x","timestamp":100.5,"display":"test"}"#;
+        let g = group_history(jsonl);
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].ts, 100.5);
+    }
+
+    #[test]
+    fn group_history_accepts_numeric_string_timestamp() {
+        // Numeric strings like "12345" must be parsed and honored as 12345.0.
+        let jsonl = r#"{"sessionId":"a","project":"/x","timestamp":"12345","display":"test"}"#;
+        let g = group_history(jsonl);
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].ts, 12345.0);
     }
 }
