@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use serde_json::Value;
 use std::collections::HashMap;
 
 const STOPWORDS: &[&str] = &[
@@ -26,18 +27,9 @@ pub struct HistoryGroup {
     pub prompts: Vec<String>,
 }
 
-#[derive(Deserialize)]
-struct HistoryEntry {
-    #[serde(rename = "sessionId")]
-    session_id: Option<String>,
-    project: Option<String>,
-    timestamp: Option<i64>,
-    display: Option<String>,
-}
-
 /// Parse newline-delimited JSON, silently skipping malformed lines.
 /// Mirrors `parseLines` in `lib/sessions.js:10-17`.
-fn parse_lines<T: for<'de> Deserialize<'de>>(text: &str) -> Vec<T> {
+pub(crate) fn parse_lines<T: for<'de> Deserialize<'de>>(text: &str) -> Vec<T> {
     text.lines()
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str::<T>(l).ok())
@@ -55,18 +47,31 @@ pub fn group_history(jsonl: &str) -> Vec<HistoryGroup> {
     let mut by_sid: HashMap<String, Acc> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
 
-    for e in parse_lines::<HistoryEntry>(jsonl) {
-        let Some(sid) = e.session_id else { continue };
+    for e in parse_lines::<Value>(jsonl) {
+        // Mirrors Node's `if (!e.sessionId) continue` — missing, null, and
+        // empty-string session ids are all treated as falsy and skipped.
+        let sid = match e.get("sessionId").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => continue,
+        };
+        // Wrong-typed fields are treated as absent for that field only —
+        // never a reason to drop the whole line (unlike a strict struct
+        // deserialize, which would fail the entry entirely).
+        let project = e.get("project").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let timestamp = e.get("timestamp").and_then(|v| v.as_i64());
+        let display = e.get("display").and_then(|v| v.as_str()).map(|s| s.to_string());
+
         let acc = by_sid.entry(sid.clone()).or_insert_with(|| {
             order.push(sid.clone());
             Acc { sid: sid.clone(), cwd: None, ts: 0, displays: Vec::new() }
         });
         // Node: `g.cwd = e.project ?? g.cwd` — only replaces when present.
-        if e.project.is_some() {
-            acc.cwd = e.project;
+        // Note "" is a valid project/cwd value, distinct from absent.
+        if project.is_some() {
+            acc.cwd = project;
         }
-        acc.ts = acc.ts.max(e.timestamp.unwrap_or(0));
-        if let Some(d) = e.display {
+        acc.ts = acc.ts.max(timestamp.unwrap_or(0));
+        if let Some(d) = display {
             acc.displays.push(d);
         }
     }
@@ -124,5 +129,46 @@ mod tests {
     fn group_history_skips_entries_without_a_session_id() {
         let jsonl = r#"{"project":"/x","timestamp":100,"display":"orphan"}"#;
         assert!(group_history(jsonl).is_empty());
+    }
+
+    #[test]
+    fn group_history_tolerates_wrongly_typed_display() {
+        // display:5 is not a string; the entry must still be grouped, and
+        // cwd/ts still applied — only the display itself is dropped.
+        let jsonl = r#"{"sessionId":"a","project":"/x","timestamp":9,"display":5}"#;
+        let g = group_history(jsonl);
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].sid, "a");
+        assert_eq!(g[0].cwd.as_deref(), Some("/x"));
+        assert_eq!(g[0].ts, 9);
+        assert!(g[0].prompts.is_empty());
+    }
+
+    #[test]
+    fn group_history_skips_empty_string_session_id() {
+        let jsonl = r#"{"sessionId":"","project":"/x","timestamp":9,"display":"hi"}"#;
+        assert!(group_history(jsonl).is_empty());
+    }
+
+    #[test]
+    fn group_history_keeps_empty_string_project_as_cwd() {
+        // "" is a legitimate cwd value, distinct from an absent project.
+        let jsonl = r#"{"sessionId":"a","project":"","timestamp":9,"display":"hi"}"#;
+        let g = group_history(jsonl);
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].cwd.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn group_history_stable_sorts_equal_timestamps() {
+        let jsonl = [
+            r#"{"sessionId":"first","project":"/x","timestamp":5,"display":"a"}"#,
+            r#"{"sessionId":"second","project":"/y","timestamp":5,"display":"b"}"#,
+        ]
+        .join("\n");
+
+        let g = group_history(&jsonl);
+        assert_eq!(g[0].sid, "first");
+        assert_eq!(g[1].sid, "second");
     }
 }
