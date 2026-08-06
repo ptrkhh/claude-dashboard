@@ -1,10 +1,11 @@
 node_modules/
 .superpowers/
 
-# Local planning docs stay out of the repo, but reviewed specs are tracked.
-# Written as "exclude contents, re-include a path" because git cannot
+# Local planning docs stay out of the repo, but reviewed specs and plans are
+# tracked. Written as "exclude contents, re-include a path" because git cannot
 # re-include anything under an excluded parent directory.
 docs/*
 !docs/superpowers/
 docs/superpowers/*
 !docs/superpowers/specs/
+!docs/superpowers/plans/
