@@ -691,13 +691,20 @@ the value must match what the origin's clients can actually present:
 | **Public VPS, browsers and Tauri, no third party** | **`password`** | **The default for the amended requirement. One guard serves the browser via cookie and the Tauri client via `api_request` login.** |
 | VPS, browsers **and** Tauri clients, CF Access in front | `cf-access` | One guard; `email` for browser SSO, `service_token_status` for the service token |
 | Public VPS, defence in depth | `password,cf-access` | Both required; the optional-CF case |
-| VPS, Tauri clients only, defence in depth | `bearer,cf-access` | **Locks browsers out by design** — no browser can attach a bearer header |
 | Behind Authelia/oauth2-proxy/Tailscale, origin unreachable | `trusted-proxy` | Escape hatch; unsafe if the origin is reachable |
 
-A browser cannot attach `Authorization: Bearer` — there is no UI to configure
-one, and keeping secrets out of the webview forbids creating one. So
-`bearer,cf-access` is not a general-purpose recommendation; it is the
-Tauri-only configuration.
+**`bearer` is available but not recommended, and has no row above.** A browser
+cannot attach `Authorization: Bearer` — there is no UI to configure one, and
+keeping secrets out of the webview forbids creating one — so any chain
+containing it locks browsers out. An earlier revision recommended
+`bearer,cf-access` for a Tauri-only origin. That row is deleted: the
+[amended requirement](#problem) is that the site be
+reachable from a plain browser, and `password,cf-access` dominates the row it
+replaced — equally two-factor, equally able to serve the Tauri client, and
+additionally able to serve a browser. Recommending a browser-hostile posture in
+a design amended to admit browsers was the defect; the guard itself is a
+constant-time compare against an env var and stays, composable by anyone who
+wants it deliberately — a scripted or headless caller has no cheaper credential.
 
 **Rejection body.** A rejected request returns `{ "error": "unauthorized" }` and
 nothing else — no guard name, no chain composition, no hint about which leg
@@ -1033,8 +1040,8 @@ integration test's router enumeration stays, but it now guards a much narrower
 mistake.
 
 A `bearer`-only origin therefore cannot serve the web UI at all. That is
-correct: per the table above, such an origin exists to serve Tauri clients,
-which ship their UI locally and never fetch `public/`.
+correct rather than a limitation — a Tauri client ships its UI locally and never
+fetches `public/` — but it is also why no configuration row recommends one.
 
 ### Bind address — breaking change
 
@@ -1667,7 +1674,9 @@ comparing whole responses rather than units.
   `iss`; expired; tampered signature; and `alg: none`. The last is the specific
   class of bug the do-not-hand-roll rule exists to prevent and gets an explicit
   test, whichever crate provides verification.
-- Guard composition — `bearer,cf-access` requires both
+- Guard composition — `bearer,password` requires both. Same pair as the
+  integration assertion below, so the composer and the `CDASH_AUTH` parse that
+  feeds it are pinned against one configuration rather than two
 - `backoff` — the ladder, reset-on-success, and the 401-halt rule
 - **Missing-binary detection** — the PATH walk for an executable file, against a
   temporary directory with and without one present
