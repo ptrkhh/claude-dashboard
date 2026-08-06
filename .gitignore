@@ -1,5 +1,6 @@
 node_modules/
 .superpowers/
+target/
 
 # Local planning docs stay out of the repo, but reviewed specs and plans are
 # tracked. Written as "exclude contents, re-include a path" because git cannot
