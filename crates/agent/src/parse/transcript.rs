@@ -63,12 +63,24 @@ pub fn parse_transcript(jsonl: &str) -> Transcript {
 
 /// Parse an `.rc` file's JSON body, extracting the bridge session id.
 /// Mirrors `parseRcFile` in `lib/sessions.js:49-51`.
+///
+/// JS is `JSON.parse(jsonText).bridgeSessionId ?? null`: `??` only
+/// substitutes for `null`/`undefined`, so any other JSON scalar (a number,
+/// a bool) survives as a real value. That value later gets template-
+/// interpolated into a URL by `rcLinkFor` (`lib/collect.js:87-91`), and JS
+/// template interpolation stringifies whatever it's given. So we mirror
+/// that stringification here rather than requiring a JSON string — do not
+/// "simplify" this back to `.as_str()`, that would silently drop non-string
+/// ids and break the "Open in Claude" link for them.
 pub fn parse_rc_file(json: &str) -> Option<String> {
-    serde_json::from_str::<Value>(json)
-        .ok()?
-        .get("bridgeSessionId")?
-        .as_str()
-        .map(|s| s.to_string())
+    let v = serde_json::from_str::<Value>(json).ok()?.get("bridgeSessionId")?.clone();
+    match v {
+        Value::Null => None,
+        Value::String(s) => Some(s),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        Value::Array(_) | Value::Object(_) => None,
+    }
 }
 
 #[cfg(test)]
@@ -120,5 +132,61 @@ mod tests {
         );
         assert_eq!(parse_rc_file("garbage"), None);
         assert_eq!(parse_rc_file(r#"{"other":1}"#), None);
+    }
+
+    #[test]
+    fn rc_file_bridge_session_id_type_variants() {
+        assert_eq!(
+            parse_rc_file(r#"{"bridgeSessionId":"abc"}"#).as_deref(),
+            Some("abc")
+        );
+        assert_eq!(parse_rc_file(r#"{"bridgeSessionId":null}"#), None);
+        assert_eq!(parse_rc_file(r#"{"other":1}"#), None);
+        assert_eq!(
+            parse_rc_file(r#"{"bridgeSessionId":123}"#).as_deref(),
+            Some("123")
+        );
+        assert_eq!(parse_rc_file("not json"), None);
+    }
+
+    #[test]
+    fn empty_string_branch_and_title_are_skipped_in_favor_of_later_entries() {
+        let jsonl = [
+            r#"{"type":"user","gitBranch":""}"#,
+            r#"{"type":"ai-title","aiTitle":""}"#,
+            r#"{"type":"user","gitBranch":"feature/x"}"#,
+            r#"{"type":"ai-title","aiTitle":"Real Title"}"#,
+        ]
+        .join("\n");
+
+        let t = parse_transcript(&jsonl);
+        assert_eq!(t.branch.as_deref(), Some("feature/x"));
+        assert_eq!(t.title.as_deref(), Some("Real Title"));
+    }
+
+    #[test]
+    fn assistant_entry_with_non_object_message_or_non_array_content_still_counts() {
+        let jsonl = [
+            r#"{"type":"assistant","message":"not an object"}"#,
+            r#"{"type":"assistant","message":{"content":"not an array"}}"#,
+        ]
+        .join("\n");
+
+        let t = parse_transcript(&jsonl);
+        assert_eq!(t.assistant_count, 2);
+        assert_eq!(t.last_assistant_text, None);
+    }
+
+    #[test]
+    fn assistant_text_item_with_non_string_value_is_not_captured_and_does_not_clear() {
+        let jsonl = [
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"kept"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":42}]}}"#,
+        ]
+        .join("\n");
+
+        let t = parse_transcript(&jsonl);
+        assert_eq!(t.assistant_count, 2);
+        assert_eq!(t.last_assistant_text.as_deref(), Some("kept"));
     }
 }
