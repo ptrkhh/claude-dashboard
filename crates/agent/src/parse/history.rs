@@ -1,0 +1,128 @@
+use serde::Deserialize;
+use std::collections::HashMap;
+
+const STOPWORDS: &[&str] = &[
+    "continue", "resume", "exit", "usage", "ok", "yes", "no", "quit", "y", "n",
+];
+
+pub fn usable_prompts(displays: &[String]) -> Vec<String> {
+    displays
+        .iter()
+        .filter(|d| {
+            let t = d.trim();
+            !t.is_empty()
+                && !t.starts_with('/')
+                && !STOPWORDS.contains(&t.to_lowercase().as_str())
+        })
+        .cloned()
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryGroup {
+    pub sid: String,
+    pub cwd: Option<String>,
+    pub ts: i64,
+    pub prompts: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct HistoryEntry {
+    #[serde(rename = "sessionId")]
+    session_id: Option<String>,
+    project: Option<String>,
+    timestamp: Option<i64>,
+    display: Option<String>,
+}
+
+/// Parse newline-delimited JSON, silently skipping malformed lines.
+/// Mirrors `parseLines` in `lib/sessions.js:10-17`.
+fn parse_lines<T: for<'de> Deserialize<'de>>(text: &str) -> Vec<T> {
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<T>(l).ok())
+        .collect()
+}
+
+pub fn group_history(jsonl: &str) -> Vec<HistoryGroup> {
+    struct Acc {
+        sid: String,
+        cwd: Option<String>,
+        ts: i64,
+        displays: Vec<String>,
+    }
+
+    let mut by_sid: HashMap<String, Acc> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+
+    for e in parse_lines::<HistoryEntry>(jsonl) {
+        let Some(sid) = e.session_id else { continue };
+        let acc = by_sid.entry(sid.clone()).or_insert_with(|| {
+            order.push(sid.clone());
+            Acc { sid: sid.clone(), cwd: None, ts: 0, displays: Vec::new() }
+        });
+        // Node: `g.cwd = e.project ?? g.cwd` — only replaces when present.
+        if e.project.is_some() {
+            acc.cwd = e.project;
+        }
+        acc.ts = acc.ts.max(e.timestamp.unwrap_or(0));
+        if let Some(d) = e.display {
+            acc.displays.push(d);
+        }
+    }
+
+    let mut groups: Vec<HistoryGroup> = order
+        .into_iter()
+        .filter_map(|sid| by_sid.remove(&sid))
+        .map(|a| {
+            let usable = usable_prompts(&a.displays);
+            let start = usable.len().saturating_sub(3);
+            HistoryGroup { sid: a.sid, cwd: a.cwd, ts: a.ts, prompts: usable[start..].to_vec() }
+        })
+        .collect();
+
+    groups.sort_by(|a, b| b.ts.cmp(&a.ts));
+    groups.truncate(60);
+    groups
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn usable_prompts_filters_junk() {
+        let input = s(&["/model", "", "ok", "YES", "fix the auth bug", "continue", "add tests"]);
+        assert_eq!(usable_prompts(&input), s(&["fix the auth bug", "add tests"]));
+    }
+
+    #[test]
+    fn group_history_groups_sorts_and_keeps_last_three() {
+        let jsonl = [
+            r#"{"sessionId":"a","project":"/x","timestamp":100,"display":"first prompt"}"#,
+            r#"{"sessionId":"b","project":"/y","timestamp":300,"display":"other session"}"#,
+            r#"{"sessionId":"a","project":"/x","timestamp":200,"display":"p2"}"#,
+            r#"{"sessionId":"a","project":"/x","timestamp":250,"display":"p3"}"#,
+            r#"{"sessionId":"a","project":"/x","timestamp":260,"display":"p4"}"#,
+            "not json — must be skipped",
+        ]
+        .join("\n");
+
+        let g = group_history(&jsonl);
+        assert_eq!(g[0].sid, "b");
+        assert_eq!(g[1].sid, "a");
+        assert_eq!(g[1].ts, 260);
+        assert_eq!(g[1].cwd.as_deref(), Some("/x"));
+        assert_eq!(g[1].prompts, s(&["p2", "p3", "p4"]));
+    }
+
+    #[test]
+    fn group_history_skips_entries_without_a_session_id() {
+        let jsonl = r#"{"project":"/x","timestamp":100,"display":"orphan"}"#;
+        assert!(group_history(jsonl).is_empty());
+    }
+}
