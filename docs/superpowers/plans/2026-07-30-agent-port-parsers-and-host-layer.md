@@ -14,7 +14,7 @@ Copied verbatim from `docs/superpowers/specs/2026-07-30-tauri-multi-host-design.
 
 - **`sysinfo` is pinned to `0.38.4`.** Version `0.39.x` requires Rust 1.95; do not upgrade.
 - **`-D clippy::disallowed_types` is a REQUIRED build gate, not advisory.** A green build with this lint disabled is not a valid build. It is the only enforcement of the subprocess time-box.
-- **No direct use of `std::process::Command` or `tokio::process::Command`** anywhere except the one helper in `host/cmd.rs`, which carries an explicit `#[allow]`.
+- **No direct use of `std::process::Command` or `tokio::process::Command`** except at exactly **two** sanctioned sites, each carrying an explicit `#[allow(clippy::disallowed_types)]` and a comment saying why: `host/cmd.rs` (the helper itself) and `host/path.rs` (the PATH probe, which must run before `Runner` exists because `Runner::new` takes the resolved PATH as an argument). A third site is a defect.
 - **Default subprocess time-box is 5 seconds**, killed hard on expiry. The PATH probe alone uses 2000 ms.
 - **The PATH probe never gates startup.** On timeout or non-zero exit, continue with the inherited PATH.
 - **Field semantics must match Node exactly** for every value that reaches `/api/sessions`. A later parity gate compares them field-by-field. Do not "improve" a field's shape, name, or rounding — an improvement is indistinguishable from a regression at that gate.
