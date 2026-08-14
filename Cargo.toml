@@ -1,3 +1,15 @@
 [workspace]
 members = ["crates/agent"]
 resolver = "2"
+
+# The KDF is unusably slow unoptimised — 1.08s per verify, measured — which
+# would make the throttle tests crawl. This optimises the KDF only; it does not
+# change N, r or p.
+[profile.dev.package.scrypt]
+opt-level = 3
+[profile.dev.package.salsa20]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.pbkdf2]
+opt-level = 3

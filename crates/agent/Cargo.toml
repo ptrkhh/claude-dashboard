@@ -23,3 +23,8 @@ time = { version = "0.3", features = ["formatting", "local-offset"] }
 axum = "0.8.9"
 tower-http = { version = "0.7.0", features = ["fs"] }
 subtle = "2.6.1"
+scrypt = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+getrandom = "0.4"
+base64 = "0.22"
