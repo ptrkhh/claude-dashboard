@@ -1,7 +1,7 @@
 use super::routes;
 use crate::collect::ctx::Ctx;
 use crate::host;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -55,6 +55,11 @@ pub fn router(ctx: Arc<Ctx>, public_dir: &Path) -> Router {
         .route("/api/logs", get(routes::get_logs))
         .route("/api/places", get(routes::get_places))
         .route("/api/browse", get(routes::get_browse))
+        .route("/api/favorites", post(routes::post_favorites))
+        .route("/api/launch", post(routes::post_launch))
+        .route("/api/resume", post(routes::post_resume))
+        .route("/api/kill", post(routes::post_kill))
+        .route("/api/purge", post(routes::post_purge))
         .fallback_service(tower_http::services::ServeDir::new(public_dir))
         .with_state(ctx)
 }

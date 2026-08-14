@@ -59,11 +59,113 @@ pub async fn get_browse(Query(q): Query<HashMap<String, String>>) -> Result<Resp
     Ok(Json(list_dirs(&target, hidden).await?).into_response())
 }
 
+use crate::collect::places::{add_recent, toggle_favorite};
+use crate::collect::spawn::{kill_session, launch_session, purge_session, resume_session};
+use crate::collect::validate::assert_path;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+pub struct PathBody {
+    #[serde(default)]
+    pub path: String,
+}
+
+#[derive(Deserialize)]
+pub struct LaunchBody {
+    #[serde(default)]
+    pub dir: String,
+    #[serde(default = "default_model")]
+    pub model: String,
+    #[serde(default = "default_effort")]
+    pub effort: String,
+}
+
+// Node destructured `{ dir, model = 'sonnet', effort = 'medium' }`
+// (`lib/collect.js:159`); an absent field must not become a rejected request.
+fn default_model() -> String {
+    "sonnet".to_string()
+}
+fn default_effort() -> String {
+    "medium".to_string()
+}
+
+#[derive(Deserialize)]
+pub struct SidBody {
+    #[serde(default)]
+    pub sid: String,
+}
+
+#[derive(Deserialize)]
+pub struct NameBody {
+    #[serde(default)]
+    pub name: String,
+}
+
+pub async fn post_favorites(
+    State(ctx): State<Arc<Ctx>>,
+    Json(body): Json<PathBody>,
+) -> Result<Response, ApiError> {
+    assert_path(&body.path)?;
+    let places = toggle_favorite(&ctx.places_file, &body.path).await.map_err(|e| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: e.to_string(),
+    })?;
+    Ok(Json(places).into_response())
+}
+
+pub async fn post_launch(
+    State(ctx): State<Arc<Ctx>>,
+    Json(body): Json<LaunchBody>,
+) -> Result<Response, ApiError> {
+    let name = launch_session(&ctx, &body.dir, &body.model, &body.effort).await?;
+
+    // Fire-and-forget, exactly as `server.js:56`: a failed recents write logs
+    // and does not fail the launch. The route resolves the directory before
+    // recording it; `launch_session` received the raw value.
+    let places_file = ctx.places_file.clone();
+    let resolved = std::path::absolute(&body.dir)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&body.dir))
+        .to_string_lossy()
+        .into_owned();
+    let log = Arc::clone(&ctx.host.log);
+    tokio::spawn(async move {
+        if let Err(e) = add_recent(&places_file, &resolved).await {
+            log.push(format!("recent write failed: {e}"));
+        }
+    });
+
+    Ok(Json(serde_json::json!({ "name": name })).into_response())
+}
+
+pub async fn post_resume(
+    State(ctx): State<Arc<Ctx>>,
+    Json(body): Json<SidBody>,
+) -> Result<Response, ApiError> {
+    let name = resume_session(&ctx, &body.sid).await?;
+    Ok(Json(serde_json::json!({ "name": name })).into_response())
+}
+
+pub async fn post_kill(
+    State(ctx): State<Arc<Ctx>>,
+    Json(body): Json<NameBody>,
+) -> Result<Response, ApiError> {
+    kill_session(&ctx, &body.name).await?;
+    Ok(Json(serde_json::json!({ "ok": true })).into_response())
+}
+
+pub async fn post_purge(
+    State(ctx): State<Arc<Ctx>>,
+    Json(body): Json<SidBody>,
+) -> Result<Response, ApiError> {
+    purge_session(&ctx, &body.sid)?;
+    Ok(Json(serde_json::json!({ "ok": true })).into_response())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::http::serve::serve;
-    use crate::http::serve::tests::{cfg_for, http_get, reqwest_get};
+    use crate::http::serve::tests::{cfg_for, http_get, http_post, reqwest_get};
 
     fn tempdir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("cdash-routes-{tag}-{}", std::process::id()));
@@ -138,5 +240,104 @@ mod tests {
             http_get(&format!("http://{}/api/browse?path=/no/such/cdash-dir", b.addr)).await;
         assert_eq!(status, 400);
         assert_eq!(body, "{\"error\":\"No such folder\"}");
+    }
+
+    #[tokio::test]
+    async fn favorites_rejects_a_relative_path_before_writing_anything() {
+        // A1 reaching the route. The validator has its own test; this proves
+        // the route calls it.
+        let d = tempdir("fav-guard");
+        let b = serve(cfg_for(d.clone())).await.unwrap();
+        let (status, body) = http_post(
+            &format!("http://{}/api/favorites", b.addr),
+            "{\"path\":\"relative/x\"}",
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert!(body.contains("bad path"));
+        assert!(!d.join("cdash-places.json").exists(), "nothing may be written");
+    }
+
+    #[tokio::test]
+    async fn favorites_toggles_and_persists() {
+        let d = tempdir("fav-ok");
+        let b = serve(cfg_for(d.clone())).await.unwrap();
+        let url = format!("http://{}/api/favorites", b.addr);
+        let (status, body) = http_post(&url, "{\"path\":\"/home/x/proj\"}").await;
+        assert_eq!(status, 200);
+        assert!(body.contains("/home/x/proj"));
+
+        let (_, body) = http_post(&url, "{\"path\":\"/home/x/proj\"}").await;
+        assert_eq!(body, "{\"recents\":[],\"favorites\":[]}", "second call toggles off");
+    }
+
+    #[tokio::test]
+    async fn launch_rejects_a_model_outside_the_allowlist() {
+        let b = serve(cfg_for(tempdir("launch-guard"))).await.unwrap();
+        let (status, body) = http_post(
+            &format!("http://{}/api/launch", b.addr),
+            "{\"dir\":\"/tmp\",\"model\":\"gpt-4\"}",
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert!(body.contains("bad model"));
+    }
+
+    #[tokio::test]
+    async fn launch_rejects_a_directory_that_is_not_one() {
+        let b = serve(cfg_for(tempdir("launch-dir"))).await.unwrap();
+        let (status, body) = http_post(
+            &format!("http://{}/api/launch", b.addr),
+            "{\"dir\":\"/no/such/cdash-dir\"}",
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert!(body.contains("not a directory"));
+    }
+
+    #[tokio::test]
+    async fn resume_rejects_a_sid_that_is_not_a_uuid() {
+        let b = serve(cfg_for(tempdir("resume-guard"))).await.unwrap();
+        let (status, body) = http_post(
+            &format!("http://{}/api/resume", b.addr),
+            "{\"sid\":\"not-a-uuid; rm -rf /\"}",
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert!(body.contains("bad sid"));
+    }
+
+    #[tokio::test]
+    async fn kill_rejects_a_name_that_is_not_a_cdash_session() {
+        let b = serve(cfg_for(tempdir("kill-guard"))).await.unwrap();
+        let (status, body) = http_post(
+            &format!("http://{}/api/kill", b.addr),
+            "{\"name\":\"other; rm -rf /\"}",
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert!(body.contains("bad name"));
+    }
+
+    #[tokio::test]
+    async fn purge_guards_the_sid_and_then_hides_it() {
+        let b = serve(cfg_for(tempdir("purge"))).await.unwrap();
+        let url = format!("http://{}/api/purge", b.addr);
+
+        let (status, _) = http_post(&url, "{\"sid\":\"../../etc/passwd\"}").await;
+        assert_eq!(status, 400);
+
+        let sid = "2f8a1c94-3b7e-4d51-9a02-6c5f8e1b7d34";
+        let (status, body) = http_post(&url, &format!("{{\"sid\":\"{sid}\"}}")).await;
+        assert_eq!(status, 200);
+        assert_eq!(body, "{\"ok\":true}");
+        assert!(b.ctx.purged.lock().unwrap().contains(sid));
+    }
+
+    #[tokio::test]
+    async fn a_missing_body_field_is_rejected_rather_than_defaulted_into_a_subprocess() {
+        let b = serve(cfg_for(tempdir("missing"))).await.unwrap();
+        let (status, _) = http_post(&format!("http://{}/api/kill", b.addr), "{}").await;
+        assert_eq!(status, 400, "an absent name must not become an empty tmux target");
     }
 }
