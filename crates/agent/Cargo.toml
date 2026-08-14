@@ -19,3 +19,4 @@ sysinfo = "=0.38.4"
 regex = "1"
 rustix = { version = "1", features = ["fs"] }
 tokio = { version = "1", features = ["process", "time", "rt", "macros"] }
+time = { version = "0.3", features = ["formatting", "local-offset"] }
