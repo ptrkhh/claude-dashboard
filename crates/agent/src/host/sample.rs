@@ -1,6 +1,17 @@
 use super::proc::{proc_tree_usage, ProcRow};
+use serde::Serialize;
 use std::time::{Duration, Instant};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MachineStats {
+    #[serde(rename = "cpuPct")]
+    pub cpu_pct: u32,
+    #[serde(rename = "ramUsedKb")]
+    pub ram_used_kb: u64,
+    #[serde(rename = "ramTotalKb")]
+    pub ram_total_kb: u64,
+}
 
 /// `sysinfo::MINIMUM_CPU_UPDATE_INTERVAL`. Two refreshes closer together than
 /// this return a deflated CPU number, not an error and not a zero.
@@ -71,6 +82,26 @@ impl Sampler {
             .collect()
     }
 
+    /// Ports `machineStats` (`lib/stats.js:32-35`). `available_parallelism` is
+    /// the logical-CPU count `os.cpus().length` reported, and needs no
+    /// `System` refresh. Byte-to-KiB conversion rounds rather than truncating,
+    /// because Node's `Math.round` did.
+    pub fn machine_stats(&mut self) -> MachineStats {
+        self.sys.refresh_memory();
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1) as f64;
+        let load = System::load_average().one;
+        let pct = ((load / cores) * 100.0).round();
+        let to_kb = |bytes: u64| (bytes as f64 / 1024.0).round() as u64;
+        let total = self.sys.total_memory();
+        MachineStats {
+            cpu_pct: pct.clamp(0.0, 100.0) as u32,
+            ram_used_kb: to_kb(total.saturating_sub(self.sys.free_memory())),
+            ram_total_kb: to_kb(total),
+        }
+    }
+
     pub fn tree_usage(&mut self, root_pid: i32) -> SampledUsage {
         let rows = self.sample();
         let usage = proc_tree_usage(&rows, root_pid);
@@ -127,5 +158,25 @@ mod tests {
         let mut s = Sampler::new();
         let u = s.tree_usage(-1);
         assert_eq!(u.rss_kb, 0);
+    }
+
+    #[test]
+    fn machine_stats_reports_plausible_ram_and_a_clamped_cpu() {
+        let mut s = Sampler::new();
+        let m = s.machine_stats();
+        assert!(m.ram_total_kb > 0);
+        assert!(m.ram_used_kb <= m.ram_total_kb);
+        // Node: Math.min(100, ...) — a load average above core count must not
+        // render a 340% CPU bar.
+        assert!(m.cpu_pct <= 100);
+    }
+
+    #[test]
+    fn machine_stats_serializes_with_nodes_field_names() {
+        let m = MachineStats { cpu_pct: 12, ram_used_kb: 3, ram_total_kb: 4 };
+        let j = serde_json::to_string(&m).unwrap();
+        assert!(j.contains("\"cpuPct\":12"));
+        assert!(j.contains("\"ramUsedKb\":3"));
+        assert!(j.contains("\"ramTotalKb\":4"));
     }
 }
