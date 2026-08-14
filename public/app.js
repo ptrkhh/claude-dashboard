@@ -159,7 +159,7 @@ function runningCard(r) {
         <span class="status ${r.working ? 'on' : 'off'}"><span class="dot"></span>${r.working ? 'Working' : 'Waiting'}</span>
       </div>
       <div class="session-meta">
-        ${chipHtml}<span>cpu ${r.cpu}%</span><span class="sep">·</span><span>${fmtKb(r.rssKb)}</span>
+        ${chipHtml}<span>cpu ${r.cpu ?? '—'}%</span><span class="sep">·</span><span>${fmtKb(r.rssKb)}</span>
         <span class="time">${fmtUp(r.uptimeSec)}</span>
       </div>
       ${peek}

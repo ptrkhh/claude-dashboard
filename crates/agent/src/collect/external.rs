@@ -7,7 +7,7 @@ use crate::parse::paths::project_dir_name;
 use crate::parse::transcript::parse_transcript;
 use serde::Serialize;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 /// One entry of `/api/sessions` `running[]`. Field names and shapes are the
@@ -147,6 +147,7 @@ pub async fn external_sessions(
 mod tests {
     use super::*;
     use crate::host::log::LogBuffer;
+    use std::path::PathBuf;
 
     fn tempdir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("cdash-ext-{tag}-{}", std::process::id()));

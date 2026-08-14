@@ -8,3 +8,4 @@ pub mod browse;
 pub mod validate;
 pub mod spawn;
 pub mod external;
+pub mod sessions;
