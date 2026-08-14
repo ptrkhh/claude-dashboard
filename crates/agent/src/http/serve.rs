@@ -1,3 +1,4 @@
+use super::routes;
 use crate::collect::ctx::Ctx;
 use crate::host;
 use axum::routing::get;
@@ -50,6 +51,10 @@ pub struct Bound {
 pub fn router(ctx: Arc<Ctx>, public_dir: &Path) -> Router {
     Router::new()
         .route("/api/health", get(|| async { Json(serde_json::json!({ "ok": true })) }))
+        .route("/api/sessions", get(routes::get_sessions))
+        .route("/api/logs", get(routes::get_logs))
+        .route("/api/places", get(routes::get_places))
+        .route("/api/browse", get(routes::get_browse))
         .fallback_service(tower_http::services::ServeDir::new(public_dir))
         .with_state(ctx)
 }
