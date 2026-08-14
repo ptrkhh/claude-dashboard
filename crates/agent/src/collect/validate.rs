@@ -1,0 +1,123 @@
+use regex::Regex;
+use std::sync::OnceLock;
+
+/// A rejected request. The HTTP layer renders this as a 400 with the message
+/// as the `error` field, matching `server.js:41`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BadRequest(pub String);
+
+/// Mirrors `MODELS` (`lib/collect.js:108`).
+pub const MODELS: &[&str] = &["sonnet", "opus", "haiku", "fable"];
+/// Mirrors `EFFORTS` (`lib/collect.js:109`).
+pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+/// Mirrors `assertPath` (`server.js:28-30`).
+pub fn assert_path(p: &str) -> Result<(), BadRequest> {
+    if std::path::Path::new(p).is_absolute() {
+        Ok(())
+    } else {
+        Err(BadRequest(format!("bad path: {p}")))
+    }
+}
+
+fn kill_name_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^cdash-[\w-]+$").unwrap())
+}
+
+fn sid_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^(?i)[0-9a-f-]{36}$").unwrap())
+}
+
+/// Mirrors the inline guard at `server.js:62`. The value reaches
+/// `tmux kill-session -t`, so nothing outside this shape may pass.
+pub fn assert_kill_name(name: &str) -> Result<(), BadRequest> {
+    if kill_name_re().is_match(name) {
+        Ok(())
+    } else {
+        Err(BadRequest("bad name".to_string()))
+    }
+}
+
+/// Mirrors `assertValidSid` (`lib/collect.js:168-170`). Rust's `regex` has no
+/// implicit multiline anchors, so `^…$` cannot be escaped by a newline.
+pub fn assert_valid_sid(sid: &str) -> Result<(), BadRequest> {
+    if sid_re().is_match(sid) {
+        Ok(())
+    } else {
+        Err(BadRequest(format!("bad sid: {sid}")))
+    }
+}
+
+pub fn assert_model(model: &str) -> Result<(), BadRequest> {
+    if MODELS.contains(&model) {
+        Ok(())
+    } else {
+        Err(BadRequest(format!("bad model: {model}")))
+    }
+}
+
+pub fn assert_effort(effort: &str) -> Result<(), BadRequest> {
+    if EFFORTS.contains(&effort) {
+        Ok(())
+    } else {
+        Err(BadRequest(format!("bad effort: {effort}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assert_path_requires_an_absolute_path() {
+        assert!(assert_path("/home/x").is_ok());
+        assert!(assert_path("relative/x").is_err());
+        assert!(assert_path("").is_err());
+    }
+
+    #[test]
+    fn assert_kill_name_admits_only_cdash_session_names() {
+        // A2: this value is handed to `tmux kill-session -t`.
+        assert!(assert_kill_name("cdash-backend-1531-a9f").is_ok());
+        assert!(assert_kill_name("cdash-a_b-1").is_ok());
+        assert!(assert_kill_name("other").is_err());
+        assert!(assert_kill_name("cdash-").is_err(), "the suffix is required");
+        assert!(assert_kill_name("cdash-x; rm -rf /").is_err());
+        assert!(assert_kill_name("").is_err());
+    }
+
+    #[test]
+    fn assert_valid_sid_admits_only_a_36_char_uuid_shape() {
+        // A3: this value reaches `claude --resume <sid>` and a path join.
+        assert!(assert_valid_sid("2f8a1c94-3b7e-4d51-9a02-6c5f8e1b7d34").is_ok());
+        assert!(assert_valid_sid("2F8A1C94-3B7E-4D51-9A02-6C5F8E1B7D34").is_ok(), "case-insensitive");
+        assert!(assert_valid_sid("not-a-uuid; rm -rf /").is_err());
+        assert!(assert_valid_sid("../../etc/passwd").is_err());
+        assert!(assert_valid_sid("").is_err());
+    }
+
+    #[test]
+    fn a_newline_cannot_smuggle_a_valid_line_past_the_anchors() {
+        // JS `^…$` without the `m` flag behaves the same, but Rust's `regex`
+        // makes it structural rather than a flag nobody set.
+        assert!(assert_valid_sid("2f8a1c94-3b7e-4d51-9a02-6c5f8e1b7d34\nrm -rf /").is_err());
+        assert!(assert_kill_name("cdash-ok\nrm -rf /").is_err());
+    }
+
+    #[test]
+    fn model_and_effort_are_allowlists_not_denylists() {
+        assert!(assert_model("sonnet").is_ok());
+        assert!(assert_model("gpt-4").is_err());
+        assert!(assert_model("").is_err());
+        assert!(assert_effort("xhigh").is_ok());
+        assert!(assert_effort("ludicrous").is_err());
+    }
+
+    #[test]
+    fn the_rejection_message_names_the_offending_value() {
+        let e = assert_model("gpt-4").unwrap_err();
+        assert!(e.0.contains("gpt-4"));
+    }
+}

@@ -5,3 +5,4 @@ pub mod ctx;
 pub mod lookup;
 pub mod places;
 pub mod browse;
+pub mod validate;
