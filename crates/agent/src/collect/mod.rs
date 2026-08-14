@@ -6,3 +6,4 @@ pub mod lookup;
 pub mod places;
 pub mod browse;
 pub mod validate;
+pub mod spawn;

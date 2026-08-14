@@ -1,6 +1,6 @@
 use super::fsio::{read_if, write_atomic};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Mirrors `MAX_RECENTS` (`lib/places.js:7`).
 pub const MAX_RECENTS: usize = 12;
@@ -62,6 +62,7 @@ pub async fn toggle_favorite(file: &Path, p: &str) -> std::io::Result<Places> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
