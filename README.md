@@ -10,8 +10,12 @@ The launcher has a touch-friendly folder picker (the folder button in the direct
 npm install && npm start
 ```
 
-## Environment variables
+## Configuration
 
-- `PORT` — port to listen on (default `8080`).
-- `CLAUDE_DIR` — path to the Claude config/projects directory (default `~/.claude`).
-- `DISK_EXTRA` — optional second mount path to include in disk stats (e.g. `/mnt/d`).
+| Variable | Default | Meaning |
+|---|---|---|
+| `PORT` | `8080` | Port to listen on. `0` picks any free port. |
+| `CDASH_BIND` | `127.0.0.1` | Address to bind. **Breaking change:** the Node agent bound every interface. LAN access now requires setting `CDASH_BIND=0.0.0.0` explicitly. |
+| `CLAUDE_DIR` | `~/.claude` | Path to the Claude config/projects directory. |
+| `DISK_EXTRA` | — | Optional second mount to report alongside `/`, e.g. `/mnt/d`. |
+| `CDASH_PUBLIC` | `public` | Directory served as static files. |

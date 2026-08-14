@@ -163,7 +163,6 @@ pub async fn post_purge(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::http::serve::serve;
     use crate::http::serve::tests::{cfg_for, http_get, http_post, reqwest_get};
 
@@ -332,6 +331,38 @@ mod tests {
         assert_eq!(status, 200);
         assert_eq!(body, "{\"ok\":true}");
         assert!(b.ctx.purged.lock().unwrap().contains(sid));
+    }
+
+    #[tokio::test]
+    async fn static_files_are_served_from_the_configured_directory() {
+        let d = tempdir("static");
+        let pubdir = d.join("pub");
+        std::fs::create_dir_all(&pubdir).unwrap();
+        std::fs::write(pubdir.join("index.html"), "<h1>cdash</h1>").unwrap();
+
+        let mut cfg = cfg_for(d.clone());
+        cfg.public_dir = pubdir;
+        let b = serve(cfg).await.unwrap();
+
+        let body = reqwest_get(&format!("http://{}/index.html", b.addr)).await;
+        assert_eq!(body, "<h1>cdash</h1>");
+    }
+
+    #[tokio::test]
+    async fn an_api_route_is_not_shadowed_by_a_static_file_of_the_same_name() {
+        // Express mounted static FIRST, so this file would have won there. The
+        // route winning is the safer order; asserted so the change is deliberate.
+        let d = tempdir("shadow");
+        let pubdir = d.join("pub");
+        std::fs::create_dir_all(pubdir.join("api")).unwrap();
+        std::fs::write(pubdir.join("api/health"), "STATIC").unwrap();
+
+        let mut cfg = cfg_for(d.clone());
+        cfg.public_dir = pubdir;
+        let b = serve(cfg).await.unwrap();
+
+        let body = reqwest_get(&format!("http://{}/api/health", b.addr)).await;
+        assert_eq!(body, "{\"ok\":true}");
     }
 
     #[tokio::test]
