@@ -40,6 +40,7 @@ pub struct AuthConfig {
     pub token: Option<String>,
     pub proxy_header: String,
     pub proxy_allow: Vec<IpAddr>,
+    pub cf: Option<crate::auth::cfaccess::CfConfig>,
 }
 
 impl AuthConfig {
@@ -51,6 +52,16 @@ impl AuthConfig {
         proxy_header: String,
         proxy_allow: Vec<IpAddr>,
     ) -> Result<Self, String> {
+        Self::build_with_cf(guards, token, proxy_header, proxy_allow, None)
+    }
+
+    pub fn build_with_cf(
+        guards: Vec<GuardKind>,
+        token: Option<String>,
+        proxy_header: String,
+        proxy_allow: Vec<IpAddr>,
+        cf: Option<crate::auth::cfaccess::CfConfig>,
+    ) -> Result<Self, String> {
         if guards.contains(&GuardKind::Bearer) && token.as_deref().unwrap_or("").is_empty() {
             return Err("CDASH_AUTH includes 'bearer' but CDASH_TOKEN is unset".to_string());
         }
@@ -60,7 +71,14 @@ impl AuthConfig {
                     .to_string(),
             );
         }
-        Ok(Self { guards, token, proxy_header, proxy_allow })
+        if guards.contains(&GuardKind::CfAccess) && cf.is_none() {
+            return Err(
+                "CDASH_AUTH includes 'cf-access' but CDASH_CF_TEAM_DOMAIN and CDASH_CF_AUD \
+                 are not both set"
+                    .to_string(),
+            );
+        }
+        Ok(Self { guards, token, proxy_header, proxy_allow, cf })
     }
 
     pub fn is_open(&self) -> bool {
@@ -77,11 +95,21 @@ pub fn config_from_env() -> Result<AuthConfig, String> {
         .filter(|s| !s.is_empty())
         .map(|s| s.parse::<IpAddr>().map_err(|_| format!("CDASH_PROXY_ALLOW: bad IP: {s}")))
         .collect::<Result<Vec<_>, _>>()?;
-    AuthConfig::build(
+    let cf = match (
+        std::env::var("CDASH_CF_TEAM_DOMAIN").ok().filter(|s| !s.is_empty()),
+        std::env::var("CDASH_CF_AUD").ok().filter(|s| !s.is_empty()),
+    ) {
+        (Some(team_domain), Some(aud)) => {
+            Some(crate::auth::cfaccess::CfConfig { team_domain, aud })
+        }
+        _ => None,
+    };
+    AuthConfig::build_with_cf(
         guards,
         std::env::var("CDASH_TOKEN").ok(),
         std::env::var("CDASH_PROXY_HEADER").unwrap_or_else(|_| "X-Forwarded-Email".to_string()),
         proxy_allow,
+        cf,
     )
 }
 

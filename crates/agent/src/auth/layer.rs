@@ -18,6 +18,7 @@ pub struct GuardState {
     pub auth: Arc<AuthConfig>,
     pub log: Arc<LogBuffer>,
     pub password: Option<super::login::PasswordState>,
+    pub cf: Option<Arc<super::cfaccess::CfState>>,
 }
 
 /// A rejected request says only this. Which leg failed goes to the log buffer,
@@ -47,6 +48,11 @@ pub async fn guard_mw(
         .get(&st.auth.proxy_header)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
+    let cf_assertion = req
+        .headers()
+        .get("Cf-Access-Jwt-Assertion")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
     let cookie = req
         .headers()
         .get(axum::http::header::COOKIE)
@@ -67,9 +73,23 @@ pub async fn guard_mw(
             GuardKind::Password => {
                 st.password.as_ref().is_some_and(|p| p.authenticated(cookie.as_deref()))
             }
-            // Not implemented until plan 6c. Refusing here is the safe
-            // direction: a configured-but-unimplemented guard must never pass.
-            GuardKind::CfAccess => false,
+            GuardKind::CfAccess => st.cf.as_ref().is_some_and(|cf| {
+                // No key set loaded yet means reject, not admit: a guard that
+                // fails open is not a guard.
+                let Some(jwks) = cf.jwks.get() else {
+                    st.log.push("cf-access: no JWKS loaded");
+                    return false;
+                };
+                cf_assertion.as_deref().is_some_and(|t| {
+                    match super::cfaccess::verify_cf_jwt(t, &jwks, &cf.cfg) {
+                        Ok(_) => true,
+                        Err(e) => {
+                            st.log.push(format!("cf-access: {e}"));
+                            false
+                        }
+                    }
+                })
+            }),
         };
         if !ok {
             st.log.push(format!("auth: rejected by {g:?}"));

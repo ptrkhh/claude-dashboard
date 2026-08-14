@@ -21,3 +21,21 @@ Requires `tmux`, `claude` and `git` on `PATH`; the agent reports any that are mi
 | `CLAUDE_DIR` | `~/.claude` | Path to the Claude config/projects directory. |
 | `DISK_EXTRA` | — | Optional second mount to report alongside `/`, e.g. `/mnt/d`. |
 | `CDASH_PUBLIC` | `public` | Directory served as static files. |
+| `CDASH_AUTH` | `none` | Comma-composable guard chain, **AND** semantics: `none`, `bearer`, `password`, `trusted-proxy`, `cf-access`. An unknown value refuses to boot rather than falling back to `none`. |
+| `CDASH_TOKEN` | — | Required by `bearer`. |
+| `CDASH_PASSWORD_HASH` | — | Required by `password`. Produce it with `cdash-agent set-password`. |
+| `CDASH_PUBLIC_URL` | — | Required by `password` on a non-loopback bind, and must be `https://` — `__Host-` cookies are discarded by browsers over plain HTTP with no error. |
+| `CDASH_ALLOW_INSECURE_COOKIE` | — | `1` accepts session theft on a plain-HTTP origin; drops `Secure` and the `__Host-` prefix together. |
+| `CDASH_PROXY_ALLOW` / `CDASH_PROXY_HEADER` | — / `X-Forwarded-Email` | Required by `trusted-proxy`. Unsafe unless the origin is unreachable except through the proxy. |
+| `CDASH_CF_TEAM_DOMAIN` / `CDASH_CF_AUD` | — | Required by `cf-access`. |
+| `CDASH_LOGIN_PENDING_MAX` | `1024` | Bound on delayed logins pending at once. |
+
+### `cf-access` is partial
+
+The Cloudflare Access JWT verifier is implemented and tested — signature, `aud`
+array membership, `iss`, expiry, the `service_token_status` discriminator, the
+`common_name` rejection, and `alg: none`. **The JWKS fetch is not wired**: the
+agent links no HTTP client, and adding one is a deliberate dependency decision
+rather than an implementation detail. Until a fetcher is supplied,
+`CDASH_AUTH=cf-access` rejects every request — a guard that fails open is not a
+guard.

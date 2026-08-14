@@ -103,7 +103,10 @@ pub fn router(
     auth: Arc<AuthConfig>,
     password: Option<crate::auth::login::PasswordState>,
 ) -> Router {
-    let st = GuardState { auth, log: Arc::clone(&ctx.host.log), password: password.clone() };
+    let cf = auth.cf.clone().map(|cfg| {
+        Arc::new(crate::auth::cfaccess::CfState { cfg, jwks: crate::auth::cfaccess::JwksCache::new() })
+    });
+    let st = GuardState { auth, log: Arc::clone(&ctx.host.log), password: password.clone(), cf };
 
     let guarded = guarded_router()
         .fallback_service(tower_http::services::ServeDir::new(public_dir))
