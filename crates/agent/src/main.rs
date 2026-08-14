@@ -2,7 +2,15 @@ use cdash_agent::http::serve::{serve, Config};
 
 #[tokio::main]
 async fn main() {
-    let cfg = Config::from_env();
+    let cfg = match Config::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            // A misconfiguration that would otherwise open the origin is
+            // refused at boot rather than debugged in production.
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
     let (bind, port) = (cfg.bind, cfg.port);
 
     match serve(cfg).await {

@@ -44,6 +44,19 @@ pub async fn get_sessions(State(ctx): State<Arc<Ctx>>) -> Response {
     Json(collect_sessions(&ctx).await).into_response()
 }
 
+/// Authenticated: it names the host's platform and which binaries are absent.
+/// `/api/health` is the unauthenticated one and says only `{ok:true}`.
+pub async fn get_hostinfo(State(ctx): State<Arc<Ctx>>) -> Response {
+    Json(serde_json::json!({
+        "platform": std::env::consts::OS,
+        "version": env!("CARGO_PKG_VERSION"),
+        // Re-probed per request, never a boot-time cache: the setup screen's
+        // re-check button is worthless against a stale answer.
+        "missing": ctx.host.missing(),
+    }))
+    .into_response()
+}
+
 pub async fn get_logs(State(ctx): State<Arc<Ctx>>) -> Response {
     Json(serde_json::json!({ "lines": ctx.host.log.lines() })).into_response()
 }
@@ -182,6 +195,25 @@ mod tests {
         assert!(v["running"].is_array());
         assert!(v["resumable"].is_array());
         assert!(v["stats"]["ramTotalKb"].is_number());
+    }
+
+    #[tokio::test]
+    async fn hostinfo_reports_platform_version_and_missing_binaries() {
+        let b = serve(cfg_for(tempdir("hostinfo"))).await.unwrap();
+        let body = reqwest_get(&format!("http://{}/api/hostinfo", b.addr)).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["platform"], std::env::consts::OS);
+        assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
+        assert!(v["missing"].is_array(), "the setup screen reads this array");
+    }
+
+    #[tokio::test]
+    async fn hostinfo_missing_is_recomputed_not_a_boot_time_cache() {
+        // UX-5: a user who installs tmux while the agent runs and presses
+        // re-check must get the new answer.
+        let b = serve(cfg_for(tempdir("hostinfo-recheck"))).await.unwrap();
+        let url = format!("http://{}/api/hostinfo", b.addr);
+        assert_eq!(reqwest_get(&url).await, reqwest_get(&url).await);
     }
 
     #[tokio::test]

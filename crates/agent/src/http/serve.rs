@@ -1,7 +1,9 @@
 use super::routes;
+use crate::auth::config::AuthConfig;
+use crate::auth::layer::{guard_mw, GuardState};
 use crate::collect::ctx::Ctx;
 use crate::host;
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::{Json, Router};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -13,15 +15,33 @@ pub struct Config {
     pub claude_dir: PathBuf,
     pub disk_extra: Option<String>,
     pub public_dir: PathBuf,
+    pub auth: Arc<AuthConfig>,
+}
+
+crate::guarded_routes! {
+    get "/api/sessions" => routes::get_sessions,
+    get "/api/logs" => routes::get_logs,
+    get "/api/places" => routes::get_places,
+    get "/api/browse" => routes::get_browse,
+    get "/api/hostinfo" => routes::get_hostinfo,
+    post "/api/favorites" => routes::post_favorites,
+    post "/api/launch" => routes::post_launch,
+    post "/api/resume" => routes::post_resume,
+    post "/api/kill" => routes::post_kill,
+    post "/api/purge" => routes::post_purge,
 }
 
 impl Config {
     /// The bind default is `127.0.0.1` — a breaking change from the Node agent,
     /// which bound every interface. Exposing the dangerous topology now takes a
     /// deliberate `CDASH_BIND=0.0.0.0`.
-    pub fn from_env() -> Self {
+    /// A bad `CDASH_AUTH` is a boot error, surfaced by the caller. Returning it
+    /// here rather than defaulting is the point: a typo must not open the
+    /// origin.
+    pub fn from_env() -> Result<Self, String> {
+        let auth = crate::auth::config::config_from_env()?;
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-        Self {
+        Ok(Self {
             bind: std::env::var("CDASH_BIND")
                 .ok()
                 .and_then(|b| b.parse().ok())
@@ -37,7 +57,8 @@ impl Config {
             public_dir: std::env::var("CDASH_PUBLIC")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("public")),
-        }
+            auth: Arc::new(auth),
+        })
     }
 }
 
@@ -48,20 +69,22 @@ pub struct Bound {
     pub ctx: Arc<Ctx>,
 }
 
-pub fn router(ctx: Arc<Ctx>, public_dir: &Path) -> Router {
+/// Built in two halves: an unauthenticated router carrying exactly the
+/// enumerated exceptions, and a guarded one carrying everything else — the
+/// static file service included — with the guard applied as a layer over the
+/// second before the two are merged. A route added to the guarded half cannot
+/// escape the layer regardless of where it is written.
+pub fn router(ctx: Arc<Ctx>, public_dir: &Path, auth: Arc<AuthConfig>) -> Router {
+    let st = GuardState { auth, log: Arc::clone(&ctx.host.log) };
+
+    let guarded = guarded_router()
+        .fallback_service(tower_http::services::ServeDir::new(public_dir))
+        .layer(axum::middleware::from_fn_with_state(st, guard_mw))
+        .with_state(ctx);
+
     Router::new()
         .route("/api/health", get(|| async { Json(serde_json::json!({ "ok": true })) }))
-        .route("/api/sessions", get(routes::get_sessions))
-        .route("/api/logs", get(routes::get_logs))
-        .route("/api/places", get(routes::get_places))
-        .route("/api/browse", get(routes::get_browse))
-        .route("/api/favorites", post(routes::post_favorites))
-        .route("/api/launch", post(routes::post_launch))
-        .route("/api/resume", post(routes::post_resume))
-        .route("/api/kill", post(routes::post_kill))
-        .route("/api/purge", post(routes::post_purge))
-        .fallback_service(tower_http::services::ServeDir::new(public_dir))
-        .with_state(ctx)
+        .merge(guarded)
 }
 
 /// Bind, start serving on a background task, and return the bound address.
@@ -73,10 +96,13 @@ pub async fn serve(cfg: Config) -> std::io::Result<Bound> {
 
     let h = host::init::init().await;
     let ctx = Arc::new(Ctx::new(h, cfg.claude_dir, cfg.disk_extra));
-    let app = router(Arc::clone(&ctx), &cfg.public_dir);
+    let app = router(Arc::clone(&ctx), &cfg.public_dir, Arc::clone(&cfg.auth));
 
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        // `ConnectInfo` needs the peer address, which the trusted-proxy guard
+        // checks against its allowlist.
+        let _ = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+            .await;
     });
 
     Ok(Bound { addr, ctx })
@@ -100,6 +126,15 @@ pub(crate) mod tests {
             claude_dir: dir,
             disk_extra: None,
             public_dir: PathBuf::from("public"),
+            auth: Arc::new(
+                AuthConfig::build(
+                    vec![crate::auth::config::GuardKind::None],
+                    None,
+                    "X-Forwarded-Email".into(),
+                    vec![],
+                )
+                .expect("none is always buildable"),
+            ),
         }
     }
 
