@@ -87,6 +87,17 @@ pub fn tmux_name(dir: &str) -> String {
     format!("cdash-{base}-{hhmm}-{suffix}")
 }
 
+/// Record a discovered link, unless the session vanished while it was being
+/// read. Returns whether the write happened. Split out from `poll_rc_link` so
+/// this guard can be tested on its own: inside the poll the earlier guard
+/// returns first, so no poll-level test can reach this one.
+pub fn commit_rc_link(ctx: &Arc<Ctx>, name: &str, link: &str) -> bool {
+    let Some(mut m) = ctx.meta_get(name) else { return false };
+    m.rc_link = Some(link.to_string());
+    ctx.meta_set(name, m);
+    true
+}
+
 /// Wait for `claude` to publish its remote-control session id, then record the
 /// link. Two guards, both required: the session can be killed while this
 /// sleeps, and again between the read and the write.
@@ -103,12 +114,9 @@ pub async fn poll_rc_link(
             return; // killed while polling
         }
         if let Some(link) = rc_link_for(&ctx.claude_dir, pid).await {
-            if !ctx.meta_has(&name) {
+            if !commit_rc_link(&ctx, &name, &link) {
                 return; // killed between the check and the write
             }
-            let mut m = ctx.meta_get(&name).unwrap_or_default();
-            m.rc_link = Some(link);
-            ctx.meta_set(&name, m);
             ctx.host.log.push(format!(
                 "rc-link captured {name} ({}s)",
                 (i + 1) as f64 * interval.as_secs_f64()
@@ -270,6 +278,31 @@ mod tests {
         assert_ne!(tmux_name("/x/y"), tmux_name("/x/y"));
     }
 
+    #[test]
+    fn the_poll_budget_is_thirty_seconds() {
+        // C4: the attempt count and interval are separately adjustable, so the
+        // product is what actually needs pinning.
+        assert_eq!(RC_POLL_INTERVAL * RC_POLL_ATTEMPTS, Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn the_write_step_alone_refuses_a_session_that_is_already_gone() {
+        // D4 in isolation. The pair test below cannot prove this guard on its
+        // own — the first guard returns before the second is ever reached — so
+        // the write step is exercised directly.
+        let d = tempdir("commit-gone");
+        let ctx = ctx_for(d).await;
+        assert!(!commit_rc_link(&ctx, "cdash-vanished", "https://claude.ai/code/x"));
+        assert!(ctx.meta_get("cdash-vanished").is_none());
+
+        ctx.meta_set("cdash-here", Meta::default());
+        assert!(commit_rc_link(&ctx, "cdash-here", "https://claude.ai/code/y"));
+        assert_eq!(
+            ctx.meta_get("cdash-here").unwrap().rc_link.as_deref(),
+            Some("https://claude.ai/code/y")
+        );
+    }
+
     #[tokio::test]
     async fn trust_dir_marks_the_directory_and_preserves_every_other_key() {
         // D8: this file is the user's real ~/.claude.json. Losing an unrelated
@@ -387,6 +420,39 @@ mod tests {
         tokio::fs::write(d.join("history.jsonl"), "").await.unwrap();
         let e = resume_session(&ctx, "2f8a1c94-3b7e-4d51-9a02-6c5f8e1b7d34").await.unwrap_err();
         assert!(e.0.contains("unknown session"));
+    }
+
+    #[tokio::test]
+    async fn resume_un_purges_the_session_it_is_bringing_back() {
+        // D6: without this the resumed session is filtered straight back out
+        // of the list it was resumed from, and the row never reappears.
+        // PATH is pointed at nothing so the tmux call is a no-op — this test
+        // must not start a real session.
+        let d = tempdir("resume-unpurge");
+        let log = Arc::new(LogBuffer::new());
+        let host = crate::host::init::Host {
+            runner: Runner::new("/nonexistent-for-test".into(), Arc::clone(&log)),
+            log,
+            path: "/nonexistent-for-test".into(),
+            sampler: std::sync::Mutex::new(crate::host::sample::Sampler::new()),
+        };
+        let ctx = Arc::new(Ctx::new(host, d.clone(), None));
+
+        let sid = "2f8a1c94-3b7e-4d51-9a02-6c5f8e1b7d34";
+        tokio::fs::write(
+            d.join("history.jsonl"),
+            format!("{{\"sessionId\":\"{sid}\",\"project\":\"/tmp\",\"timestamp\":1,\"display\":\"x\"}}\n"),
+        )
+        .await
+        .unwrap();
+        purge_session(&ctx, sid).unwrap();
+        assert!(ctx.purged.lock().unwrap().contains(sid));
+
+        resume_session(&ctx, sid).await.unwrap();
+        assert!(
+            !ctx.purged.lock().unwrap().contains(sid),
+            "a resumed session must stop being hidden"
+        );
     }
 
     #[tokio::test]

@@ -324,6 +324,79 @@ mod tests {
         assert!(r.stats.disks[0].total_kb > 0);
     }
 
+    /// Put a stub `tmux` on a private PATH so the pane branch of
+    /// `collect_sessions` can be exercised without a real server. Without this
+    /// the whole pane loop — the majority of the function — has no test at all.
+    fn fake_tmux(dir: &Path, pane_line: &str) -> String {
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let script = format!(
+            "#!/bin/sh\ncase \"$1\" in\n  list-panes) echo '{pane_line}' ;;\n  *) echo '' ;;\nesac\n"
+        );
+        let p = bin.join("tmux");
+        std::fs::write(&p, script).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin.to_string_lossy().into_owned()
+    }
+
+    fn ctx_with_path(claude_dir: PathBuf, path: String) -> Arc<Ctx> {
+        let log = Arc::new(LogBuffer::new());
+        let host = crate::host::init::Host {
+            runner: crate::host::cmd::Runner::new(path.clone(), Arc::clone(&log)),
+            log,
+            path,
+            sampler: std::sync::Mutex::new(crate::host::sample::Sampler::new()),
+        };
+        Arc::new(Ctx::new(host, claude_dir, None))
+    }
+
+    #[tokio::test]
+    async fn a_pane_becomes_a_running_session_carrying_its_rc_link() {
+        let d = tempdir("pane");
+        std::fs::write(d.join("history.jsonl"), "").unwrap();
+        std::fs::write(
+            d.join("sessions/4242.json"),
+            r#"{"sessionId":"s-9","cwd":"/proj","bridgeSessionId":"session_pane"}"#,
+        )
+        .unwrap();
+        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000|/proj");
+        let ctx = ctx_with_path(d, path);
+
+        let r = collect_sessions(&ctx).await;
+        assert_eq!(r.running.len(), 1);
+        assert_eq!(r.running[0].name, "cdash-test-1200-abc");
+        assert_eq!(r.running[0].dir, "/proj");
+        assert_eq!(r.running[0].pid, 4242);
+        assert_eq!(
+            r.running[0].rc_link.as_deref(),
+            Some("https://claude.ai/code/session_pane")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_link_discovered_from_the_session_file_is_memoized_into_meta() {
+        // D9: rediscovering it on every 4s poll is wasted work, and the meta
+        // entry is what survives the session file being rewritten.
+        let d = tempdir("memo");
+        std::fs::write(d.join("history.jsonl"), "").unwrap();
+        std::fs::write(
+            d.join("sessions/777.json"),
+            r#"{"sessionId":"s-7","cwd":"/proj","bridgeSessionId":"session_memo"}"#,
+        )
+        .unwrap();
+        let path = fake_tmux(&d, "cdash-memo-1200-xyz|777|1785050000|/proj");
+        let ctx = ctx_with_path(d, path);
+
+        assert!(ctx.meta_get("cdash-memo-1200-xyz").is_none());
+        collect_sessions(&ctx).await;
+        assert_eq!(
+            ctx.meta_get("cdash-memo-1200-xyz").unwrap().rc_link.as_deref(),
+            Some("https://claude.ai/code/session_memo"),
+            "the discovered link must be remembered"
+        );
+    }
+
     #[test]
     fn a_pane_session_omits_the_external_key_entirely() {
         // Node set `external` only on external sessions; a pane entry has no

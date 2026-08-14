@@ -31,69 +31,69 @@ The spec forbids deriving this from `git log` and requires reading every file in
 
 ### A. Input validation at a trust boundary
 
-| # | Control | Node site | Ported in |
+| # | Control | Node site | Proven by |
 |---|---|---|---|
-| A1 | `assertPath` — value must be a string and absolute | `server.js:28-30` | Task 8 |
-| A2 | kill target must match `^cdash-[\w-]+$` before reaching `tmux kill-session` | `server.js:62` | Task 8 |
-| A3 | `assertValidSid` — `^[0-9a-f-]{36}$/i` before `--resume` and before purge | `collect.js:167-170` | Task 8 |
-| A4 | `MODELS` allowlist before `--model` | `collect.js:108,160` | Task 8 |
-| A5 | `EFFORTS` allowlist before `--effort` | `collect.js:109,161` | Task 8 |
-| A6 | `dir` must stat as a directory before `tmux new-session -c dir` | `collect.js:162-163` | Task 9 |
-| A7 | browse errno mapped to a 400 with a fixed message, not raw error text | `server.js:47` | Task 7 |
+| A1 | `assertPath` — value must be a string and absolute | `server.js:28-30` | `validate::assert_path_requires_an_absolute_path` |
+| A2 | kill target must match `^cdash-[\w-]+$` before reaching `tmux kill-session` | `server.js:62` | `validate::assert_kill_name_admits_only_cdash_session_names`, `spawn::kill_rejects_a_name_that_is_not_ours_before_running_tmux` |
+| A3 | `assertValidSid` — `^[0-9a-f-]{36}$/i` before `--resume` and before purge | `collect.js:167-170` | `validate::assert_valid_sid_admits_only_a_36_char_uuid_shape`, `spawn::resume_rejects_a_bad_sid_before_touching_the_shell` |
+| A4 | `MODELS` allowlist before `--model` | `collect.js:108,160` | `validate::model_and_effort_are_allowlists_not_denylists` |
+| A5 | `EFFORTS` allowlist before `--effort` | `collect.js:109,161` | `validate::model_and_effort_are_allowlists_not_denylists` |
+| A6 | `dir` must stat as a directory before `tmux new-session -c dir` | `collect.js:162-163` | `spawn::launch_rejects_a_bad_model_effort_or_directory_before_spawning` |
+| A7 | browse errno mapped to a 400 with a fixed message, not raw error text | `server.js:47` | `browse::a_nonexistent_path_yields_a_400_with_a_fixed_message`, `browse::a_file_target_yields_the_not_a_folder_message` |
 
 ### B. Bounds
 
-| # | Control | Node site | Ported in |
+| # | Control | Node site | Proven by |
 |---|---|---|---|
-| B1 | `TAIL_BYTES` — read only the last 128 KiB of a transcript | `collect.js:64-77` | Task 2 |
-| B2 | `TRANSCRIPT_CACHE_MAX` — 200 entries, cleared wholesale at the cap | `collect.js:50,59` | Task 3 |
-| B3 | `MAX_ENTRIES` 1000 + the `truncated` flag | `browse.js:7,21-22` | Task 7 |
-| B4 | `MAX_RECENTS` 12 | `places.js:7,10` | Task 6 |
-| B5 | resumable list capped at 20 | `collect.js:269` | Task 11 |
-| B6 | RC-link poll bounded at 60 iterations | `collect.js:143` | Task 9 |
-| B7 | tmux session base name truncated to 30 chars | `collect.js:127` | Task 9 |
-| B8 | history capped at 60 groups, last 3 prompts each | `sessions.js:31-32` | **done** (prior plan, Task 2) |
-| B9 | log ring capped at 200 | `collect.js:25` | **done** (prior plan, Task 7) |
+| B1 | `TAIL_BYTES` — read only the last 128 KiB of a transcript | `collect.js:64-77` | `fsio::read_tail_reads_only_the_last_128_kib` |
+| B2 | `TRANSCRIPT_CACHE_MAX` — 200 entries, cleared wholesale at the cap | `collect.js:50,59` | `cache::the_cache_is_cleared_at_the_cap_rather_than_growing_without_bound` |
+| B3 | `MAX_ENTRIES` 1000 + the `truncated` flag | `browse.js:7,21-22` | `browse::a_directory_over_the_cap_is_truncated_and_says_so` |
+| B4 | `MAX_RECENTS` 12 | `places.js:7,10` | `places::push_recent_caps_the_list_length` |
+| B5 | resumable list capped at 20 | `collect.js:269` | `sessions::the_resumable_list_is_capped` |
+| B6 | RC-link poll bounded at 60 iterations | `collect.js:143` | `spawn::the_poll_gives_up_after_its_attempt_budget` |
+| B7 | tmux session base name truncated to 30 chars | `collect.js:127` | `spawn::tmux_name_is_prefixed_munged_and_length_capped` |
+| B8 | history capped at 60 groups, last 3 prompts each | `sessions.js:31-32` | **done** — `parse::history::group_history_groups_sorts_and_keeps_last_three` |
+| B9 | log ring capped at 200 | `collect.js:25` | **done** — `host::log::keeps_at_most_200_entries_dropping_oldest` |
 
 ### C. Time-boxes and their kill signals
 
-| # | Control | Node site | Ported in |
+| # | Control | Node site | Proven by |
 |---|---|---|---|
-| C1 | 5 s subprocess deadline with `killSignal: 'SIGKILL'` | `collect.js:12-13` | **done** (prior plan, Task 9) |
-| C2 | git status gets a 20 s ceiling, not the 5 s default | `collect.js:41` | Task 4 |
+| C1 | 5 s subprocess deadline with `killSignal: 'SIGKILL'` | `collect.js:12-13` | **done** — `host::cmd::a_hung_child_is_killed_at_the_timeout` |
+| C2 | git status gets a 20 s ceiling, not the 5 s default | `collect.js:41` | `git::git_gets_a_ceiling_well_above_the_default_time_box` |
 | C3 | PATH probe 2000 ms | spec §Host layer | **done** (prior plan, Task 8) |
-| C4 | RC-link poll gives up after 30 s total | `collect.js:143-154` | Task 9 |
+| C4 | RC-link poll gives up after 30 s total | `collect.js:143-154` | `spawn::the_poll_budget_is_thirty_seconds` |
 
 ### D. Atomicity and ordering
 
-| # | Control | Node site | Ported in |
+| # | Control | Node site | Proven by |
 |---|---|---|---|
-| D1 | `~/.claude.json` written to `.cdash.tmp` then renamed | `collect.js:121-123` | Task 9 |
-| D2 | places file written to `.tmp` then renamed | `places.js:29-33` | Task 6 |
-| D3 | RC poll aborts if the session was killed while polling | `collect.js:145` | Task 9 |
-| D4 | RC poll aborts between the read and the write — the resurrection guard. **No test exists in Node.** | `collect.js:148` | Task 9 |
-| D5 | git cache `busy` flag — at most one refresh in flight per directory | `collect.js:36-39` | Task 4 |
-| D6 | `purged.delete(sid)` happens before the resume spawn | `collect.js:177` | Task 9 |
-| D7 | `meta.delete(name)` after a successful kill | `server.js:64` | Task 9 |
-| D8 | the trust write preserves every other key of `~/.claude.json` | `collect.js:117-120` | Task 9 |
-| D9 | a discovered `rcLink` is memoized into `meta` | `collect.js:234` | Task 11 |
+| D1 | `~/.claude.json` written to `.cdash.tmp` then renamed | `collect.js:121-123` | `spawn::trust_dir_marks_the_directory_and_preserves_every_other_key` |
+| D2 | places file written to `.tmp` then renamed | `places.js:29-33` | `places::the_write_is_atomic_and_leaves_no_temp_file` |
+| D3 | RC poll aborts if the session was killed while polling | `collect.js:145` | `spawn::a_session_killed_during_the_poll_is_not_resurrected` |
+| D4 | RC poll aborts between the read and the write — the resurrection guard. **No test exists in Node.** | `collect.js:148` | `spawn::the_write_step_alone_refuses_a_session_that_is_already_gone` |
+| D5 | git cache `busy` flag — at most one refresh in flight per directory | `collect.js:36-39` | `git::a_busy_entry_is_never_refreshed_however_stale` |
+| D6 | `purged.delete(sid)` happens before the resume spawn | `collect.js:177` | `spawn::resume_un_purges_the_session_it_is_bringing_back` |
+| D7 | `meta.delete(name)` after a successful kill | `server.js:64` | `spawn::kill_forgets_the_session_meta` |
+| D8 | the trust write preserves every other key of `~/.claude.json` | `collect.js:117-120` | `spawn::trust_dir_marks_the_directory_and_preserves_every_other_key` |
+| D9 | a discovered `rcLink` is memoized into `meta` | `collect.js:234` | `sessions::a_link_discovered_from_the_session_file_is_memoized_into_meta` |
 
 ### E. Filters that exclude by design
 
-| # | Control | Node site | Ported in |
+| # | Control | Node site | Proven by |
 |---|---|---|---|
-| E1 | `entrypoint !== 'cli'` — excludes `sdk-cli` observers and SDK runs | `collect.js:193-195` | Task 10 |
-| E2 | git cache staleness rule: serve the last known answer, never block a poll | `collect.js:37,45` | Task 4 |
-| E3 | external sessions already represented by a tmux pane are dropped | `collect.js:190` | Task 10 |
-| E4 | only sessions whose pid is still alive | `collect.js:184,190` | Task 10 |
-| E5 | a session file without `sessionId` or `cwd` is dropped | `collect.js:192` | Task 10 |
-| E6 | resumable skips sids that are running or purged | `collect.js:270` | Task 11 |
-| E7 | resumable requires `assistantCount >= 3` | `collect.js:273` | Task 11 |
-| E8 | resumable requires a parseable transcript | `collect.js:272` | Task 11 |
-| E9 | `transcriptFor` takes `.jsonl` only, with a 5 s grace on session start | `collect.js:99-101` | Task 5 |
-| E10 | browse returns directories and symlinks only, dotfolders hidden unless asked | `browse.js:15-17` | Task 7 |
-| E11 | external scan takes `.json` files with a numeric pid only | `collect.js:190` | Task 10 |
-| E12 | tmux panes filtered to the `cdash-` prefix | `sessions.js:57` | **done** (prior plan, Task 4) |
+| E1 | `entrypoint !== 'cli'` — excludes `sdk-cli` observers and SDK runs | `collect.js:193-195` | `external::an_sdk_cli_session_is_excluded` |
+| E2 | git cache staleness rule: serve the last known answer, never block a poll | `collect.js:37,45` | `git::the_first_call_returns_none_immediately_and_does_not_block` |
+| E3 | external sessions already represented by a tmux pane are dropped | `collect.js:190` | `external::a_pid_already_shown_as_a_pane_is_excluded` |
+| E4 | only sessions whose pid is still alive | `collect.js:184,190` | `external::a_dead_pid_is_excluded` |
+| E5 | a session file without `sessionId` or `cwd` is dropped | `collect.js:192` | `external::a_session_without_session_id_or_cwd_is_excluded` |
+| E6 | resumable skips sids that are running or purged | `collect.js:270` | `sessions::a_purged_session_is_hidden` |
+| E7 | resumable requires `assistantCount >= 3` | `collect.js:273` | `sessions::a_resumable_session_needs_three_assistant_turns` |
+| E8 | resumable requires a parseable transcript | `collect.js:272` | `sessions::a_session_with_no_transcript_is_not_resumable` |
+| E9 | `transcriptFor` takes `.jsonl` only, with a 5 s grace on session start | `collect.js:99-101` | `lookup::a_transcript_older_than_the_five_second_grace_is_rejected` |
+| E10 | browse returns directories and symlinks only, dotfolders hidden unless asked | `browse.js:15-17` | `browse::returns_folders_only_case_insensitively_sorted_hidden_excluded` |
+| E11 | external scan takes `.json` files with a numeric pid only | `collect.js:190` | `external::non_json_files_and_non_numeric_names_are_skipped` |
+| E12 | tmux panes filtered to the `cdash-` prefix | `sessions.js:57` | **done** — `parse::tmux::filters_to_cdash_prefixed_sessions` |
 
 **Residual, restated:** this is a human code-read. It is materially more complete than commit-message derivation, but it is not provably complete, and no adopted mechanism detects a control dropped during the port. The parity gate does not close it — a dropped bound agrees with Node on ordinary input and diverges only on the input the guard existed for.
 

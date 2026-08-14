@@ -104,6 +104,15 @@ mod tests {
     }
 
     #[test]
+    fn git_gets_a_ceiling_well_above_the_default_time_box() {
+        // C2: `git status` on a big tree over a network mount routinely beats
+        // the 5 s default. Silently falling back to it means no git badge on
+        // exactly the repositories that need one.
+        assert_eq!(GIT_TIMEOUT, Duration::from_secs(20));
+        assert!(GIT_TIMEOUT > crate::host::cmd::DEFAULT_TIMEOUT);
+    }
+
+    #[test]
     fn a_busy_entry_is_never_refreshed_however_stale() {
         // D5: without this, every 4s poll stacks another `git status` on a
         // repository that is already slow enough to still be running.
