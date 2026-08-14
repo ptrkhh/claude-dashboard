@@ -1,7 +1,8 @@
 use regex::Regex;
+use serde::Serialize;
 use std::sync::OnceLock;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GitStatus {
     pub branch: String,
     pub dirty: usize,
@@ -65,6 +66,13 @@ mod tests {
             parse_git_status("## feature-x\n"),
             GitStatus { branch: "feature-x".into(), dirty: 0, ahead: 0, behind: 0 }
         );
+    }
+
+    #[test]
+    fn git_status_serializes_with_nodes_field_names() {
+        let j = serde_json::to_string(&parse_git_status("## main...origin/main [ahead 2]\n M x\n"))
+            .unwrap();
+        assert_eq!(j, r#"{"branch":"main","dirty":1,"ahead":2,"behind":0}"#);
     }
 
     #[test]
