@@ -21,6 +21,7 @@ fn cfg(dir: PathBuf, auth: AuthConfig) -> Config {
         disk_extra: None,
         public_dir: PathBuf::from("public"),
         auth: Arc::new(auth),
+        password: None,
     }
 }
 

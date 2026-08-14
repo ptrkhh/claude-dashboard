@@ -174,6 +174,16 @@ pub async fn post_purge(
     Ok(Json(serde_json::json!({ "ok": true })).into_response())
 }
 
+/// Behind the guard: revoking a session requires holding one.
+pub async fn post_logout(State(ctx): State<Arc<Ctx>>, headers: axum::http::HeaderMap) -> Response {
+    match ctx.password.get() {
+        Some(pw) => crate::auth::login::post_logout(pw, &headers).await,
+        // Reachable only under a chain without `password`, where there is no
+        // session to revoke.
+        None => Json(serde_json::json!({ "ok": true })).into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::http::serve::serve;

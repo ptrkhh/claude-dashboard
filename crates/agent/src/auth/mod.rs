@@ -6,3 +6,4 @@ pub mod session;
 pub mod cookie;
 pub mod throttle;
 pub mod boot;
+pub mod login;

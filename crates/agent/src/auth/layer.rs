@@ -11,12 +11,13 @@ use std::sync::Arc;
 /// The unauthenticated exceptions, enumerated rather than implied.
 /// `/login` and `POST /api/login` join this list in plan 6b, bringing it to
 /// the spec's three.
-pub const UNAUTH_PATHS: &[&str] = &["/api/health"];
+pub const UNAUTH_PATHS: &[&str] = &["/api/health", "/login", "/api/login"];
 
 #[derive(Clone)]
 pub struct GuardState {
     pub auth: Arc<AuthConfig>,
     pub log: Arc<LogBuffer>,
+    pub password: Option<super::login::PasswordState>,
 }
 
 /// A rejected request says only this. Which leg failed goes to the log buffer,
@@ -46,6 +47,11 @@ pub async fn guard_mw(
         .get(&st.auth.proxy_header)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
+    let cookie = req
+        .headers()
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
     for g in &st.auth.guards {
         let ok = match g {
@@ -58,13 +64,25 @@ pub async fn guard_mw(
                 proxy_identity.as_deref(),
                 &st.auth.proxy_allow,
             ),
-            // Not implemented until plans 6b and 6c. Refusing here is the safe
+            GuardKind::Password => {
+                st.password.as_ref().is_some_and(|p| p.authenticated(cookie.as_deref()))
+            }
+            // Not implemented until plan 6c. Refusing here is the safe
             // direction: a configured-but-unimplemented guard must never pass.
-            GuardKind::Password | GuardKind::CfAccess => false,
+            GuardKind::CfAccess => false,
         };
         if !ok {
             st.log.push(format!("auth: rejected by {g:?}"));
-            return unauthorized();
+            // `/api/*` gets the uniform rejection body. A browser navigation
+            // is redirected to the login page — but only when there is one:
+            // under a chain without `password`, `/login` does not exist and a
+            // redirect would be an endless loop, so 401 is the honest answer.
+            let navigational = !req.uri().path().starts_with("/api/");
+            return if navigational && st.password.is_some() {
+                (StatusCode::FOUND, [(axum::http::header::LOCATION, "/login")]).into_response()
+            } else {
+                unauthorized()
+            };
         }
     }
     next.run(req).await

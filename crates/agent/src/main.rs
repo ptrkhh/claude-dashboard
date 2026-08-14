@@ -1,7 +1,60 @@
 use cdash_agent::http::serve::{serve, Config};
 
+/// Prints the hash to stdout for the operator to place in the environment. It
+/// never writes a file: this process serves `/api/browse` and `/api/logs`, so
+/// a secret on its disk is one disclosure away from total compromise.
+fn read_password_twice() -> Result<String, String> {
+    let a = prompt_hidden("Password: ")?;
+    let b = prompt_hidden("Again: ")?;
+    if a != b {
+        return Err("passwords did not match".to_string());
+    }
+    cdash_agent::auth::password::hash_password(&a)
+}
+
+/// Echo suppression via termios, so the password never reaches the terminal
+/// scrollback. Falls back to an unsuppressed read when stdin is not a tty
+/// (a pipe), which is what makes the subcommand scriptable.
+fn prompt_hidden(prompt: &str) -> Result<String, String> {
+    use std::io::{BufRead, Write};
+    eprint!("{prompt}");
+    std::io::stderr().flush().ok();
+
+    let tty = std::io::stdin();
+    let saved = rustix::termios::tcgetattr(&tty).ok();
+    if let Some(s) = &saved {
+        let mut raw = s.clone();
+        raw.local_modes -= rustix::termios::LocalModes::ECHO;
+        let _ = rustix::termios::tcsetattr(&tty, rustix::termios::OptionalActions::Now, &raw);
+    }
+
+    let mut line = String::new();
+    let read = tty.lock().read_line(&mut line);
+    // Restore the terminal whatever happened.
+    if let Some(s) = &saved {
+        let _ = rustix::termios::tcsetattr(&tty, rustix::termios::OptionalActions::Now, s);
+        eprintln!();
+    }
+    read.map_err(|e| e.to_string())?;
+
+    Ok(line.trim_end_matches(['\n', '\r']).to_string())
+}
+
 #[tokio::main]
 async fn main() {
+    if std::env::args().nth(1).as_deref() == Some("set-password") {
+        match read_password_twice() {
+            Ok(hash) => {
+                println!("{hash}");
+                return;
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(2);
+            }
+        }
+    }
+
     let cfg = match Config::from_env() {
         Ok(c) => c,
         Err(e) => {

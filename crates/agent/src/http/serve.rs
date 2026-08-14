@@ -16,6 +16,9 @@ pub struct Config {
     pub disk_extra: Option<String>,
     pub public_dir: PathBuf,
     pub auth: Arc<AuthConfig>,
+    /// Present exactly when `CDASH_AUTH` includes `password`. Built at boot so
+    /// a misconfiguration is refused before anything listens.
+    pub password: Option<crate::auth::login::PasswordState>,
 }
 
 crate::guarded_routes! {
@@ -29,6 +32,7 @@ crate::guarded_routes! {
     post "/api/resume" => routes::post_resume,
     post "/api/kill" => routes::post_kill,
     post "/api/purge" => routes::post_purge,
+    post "/api/logout" => routes::post_logout,
 }
 
 impl Config {
@@ -41,11 +45,30 @@ impl Config {
     pub fn from_env() -> Result<Self, String> {
         let auth = crate::auth::config::config_from_env()?;
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-        Ok(Self {
-            bind: std::env::var("CDASH_BIND")
+        let bind: IpAddr = std::env::var("CDASH_BIND")
+            .ok()
+            .and_then(|b| b.parse().ok())
+            .unwrap_or_else(|| "127.0.0.1".parse().expect("literal is a valid IP"));
+
+        let password = if auth.guards.contains(&crate::auth::config::GuardKind::Password) {
+            let policy = crate::auth::boot::decide(
+                std::env::var("CDASH_PASSWORD_HASH").ok().as_deref(),
+                bind,
+                std::env::var("CDASH_PUBLIC_URL").ok().as_deref(),
+                std::env::var("CDASH_ALLOW_INSECURE_COOKIE").as_deref() == Ok("1"),
+            )?;
+            let pending_max = std::env::var("CDASH_LOGIN_PENDING_MAX")
                 .ok()
-                .and_then(|b| b.parse().ok())
-                .unwrap_or_else(|| "127.0.0.1".parse().expect("literal is a valid IP")),
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(crate::auth::throttle::DEFAULT_PENDING_MAX);
+            Some(crate::auth::login::PasswordState::new(policy, pending_max))
+        } else {
+            None
+        };
+
+        Ok(Self {
+            password,
+            bind,
             port: std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080),
             claude_dir: std::env::var("CLAUDE_DIR")
                 .map(PathBuf::from)
@@ -74,17 +97,33 @@ pub struct Bound {
 /// static file service included — with the guard applied as a layer over the
 /// second before the two are merged. A route added to the guarded half cannot
 /// escape the layer regardless of where it is written.
-pub fn router(ctx: Arc<Ctx>, public_dir: &Path, auth: Arc<AuthConfig>) -> Router {
-    let st = GuardState { auth, log: Arc::clone(&ctx.host.log) };
+pub fn router(
+    ctx: Arc<Ctx>,
+    public_dir: &Path,
+    auth: Arc<AuthConfig>,
+    password: Option<crate::auth::login::PasswordState>,
+) -> Router {
+    let st = GuardState { auth, log: Arc::clone(&ctx.host.log), password: password.clone() };
 
     let guarded = guarded_router()
         .fallback_service(tower_http::services::ServeDir::new(public_dir))
         .layer(axum::middleware::from_fn_with_state(st, guard_mw))
         .with_state(ctx);
 
-    Router::new()
-        .route("/api/health", get(|| async { Json(serde_json::json!({ "ok": true })) }))
-        .merge(guarded)
+    let mut unauth = Router::new()
+        .route("/api/health", get(|| async { Json(serde_json::json!({ "ok": true })) }));
+    if let Some(pw) = password {
+        // Exceptions 2 and 3: static HTML with no host data, and a throttled
+        // login that carries none either.
+        unauth = unauth.merge(
+            Router::new()
+                .route("/login", get(crate::auth::login::get_login))
+                .route("/api/login", axum::routing::post(crate::auth::login::post_login))
+                .with_state(pw),
+        );
+    }
+
+    unauth.merge(guarded)
 }
 
 /// Bind, start serving on a background task, and return the bound address.
@@ -96,7 +135,10 @@ pub async fn serve(cfg: Config) -> std::io::Result<Bound> {
 
     let h = host::init::init().await;
     let ctx = Arc::new(Ctx::new(h, cfg.claude_dir, cfg.disk_extra));
-    let app = router(Arc::clone(&ctx), &cfg.public_dir, Arc::clone(&cfg.auth));
+    if let Some(pw) = cfg.password.clone() {
+        let _ = ctx.password.set(pw);
+    }
+    let app = router(Arc::clone(&ctx), &cfg.public_dir, Arc::clone(&cfg.auth), cfg.password.clone());
 
     tokio::spawn(async move {
         // `ConnectInfo` needs the peer address, which the trusted-proxy guard
@@ -135,6 +177,7 @@ pub(crate) mod tests {
                 )
                 .expect("none is always buildable"),
             ),
+            password: None,
         }
     }
 

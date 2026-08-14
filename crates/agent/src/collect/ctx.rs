@@ -29,6 +29,9 @@ pub struct Ctx {
     pub purged: Mutex<HashSet<String>>,
     pub transcripts: TranscriptCache,
     pub git: Arc<GitCache>,
+    /// Set once at boot when `CDASH_AUTH` includes `password`. A `OnceLock`
+    /// because `Ctx` is shared behind an `Arc` by the time the policy exists.
+    pub password: std::sync::OnceLock<crate::auth::login::PasswordState>,
 }
 
 impl Ctx {
@@ -47,6 +50,7 @@ impl Ctx {
             purged: Mutex::new(HashSet::new()),
             transcripts: TranscriptCache::new(),
             git: Arc::new(GitCache::new()),
+            password: std::sync::OnceLock::new(),
         }
     }
 
