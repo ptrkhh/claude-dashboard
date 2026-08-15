@@ -102,10 +102,8 @@ pub fn router(
     public_dir: &Path,
     auth: Arc<AuthConfig>,
     password: Option<crate::auth::login::PasswordState>,
+    cf: Option<Arc<crate::auth::cfaccess::CfState>>,
 ) -> Router {
-    let cf = auth.cf.clone().map(|cfg| {
-        Arc::new(crate::auth::cfaccess::CfState { cfg, jwks: crate::auth::cfaccess::JwksCache::new() })
-    });
     let st = GuardState { auth, log: Arc::clone(&ctx.host.log), password: password.clone(), cf };
 
     let guarded = guarded_router()
@@ -133,6 +131,25 @@ pub fn router(
 /// Errors rather than logging-and-aborting because the in-process caller has no
 /// stderr to scrape and no child to have exited.
 pub async fn serve(cfg: Config) -> std::io::Result<Bound> {
+    // Fetched before binding: a cf-access origin that cannot verify anything
+    // must fail as a service that did not start, with a named reason, rather
+    // than as a successful SSO followed by 401 on every request.
+    let cf = match cfg.auth.cf.clone() {
+        Some(cfcfg) => {
+            let url = crate::auth::cfaccess::certs_url(&cfcfg.team_domain);
+            let jwks = crate::auth::cfaccess::fetch_jwks(&url).await.map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("cf-access: could not fetch JWKS: {e}"),
+                )
+            })?;
+            let cache = crate::auth::cfaccess::JwksCache::new();
+            cache.install(jwks);
+            Some(Arc::new(crate::auth::cfaccess::CfState { cfg: cfcfg, jwks: cache }))
+        }
+        None => None,
+    };
+
     let listener = tokio::net::TcpListener::bind((cfg.bind, cfg.port)).await?;
     let addr = listener.local_addr()?;
 
@@ -141,7 +158,11 @@ pub async fn serve(cfg: Config) -> std::io::Result<Bound> {
     if let Some(pw) = cfg.password.clone() {
         let _ = ctx.password.set(pw);
     }
-    let app = router(Arc::clone(&ctx), &cfg.public_dir, Arc::clone(&cfg.auth), cfg.password.clone());
+    if let Some(cf) = cf.clone() {
+        crate::auth::cfaccess::spawn_refresh(cf, Arc::clone(&ctx.host.log));
+    }
+    let app =
+        router(Arc::clone(&ctx), &cfg.public_dir, Arc::clone(&cfg.auth), cfg.password.clone(), cf);
 
     tokio::spawn(async move {
         // `ConnectInfo` needs the peer address, which the trusted-proxy guard

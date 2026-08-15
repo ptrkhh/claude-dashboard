@@ -150,6 +150,42 @@ async fn assertion_5_a_composed_chain_mounts_every_leg_it_names() {
 }
 
 #[tokio::test]
+async fn cf_access_refuses_to_boot_when_the_keys_cannot_be_fetched() {
+    // The UX this prevents: authenticating successfully with Cloudflare and
+    // then hitting 401 on every request, with the reason only in the server's
+    // stderr. A startup that cannot verify anything must not listen at all.
+    let auth = AuthConfig::build_with_cf(
+        vec![GuardKind::CfAccess],
+        None,
+        "X-Forwarded-Email".into(),
+        vec![],
+        Some(cdash_agent::auth::cfaccess::CfConfig {
+            // Reserved by RFC 6761 to never resolve, so this is a local
+            // failure rather than a test that depends on the network.
+            team_domain: "https://cdash-test.invalid".into(),
+            aud: "some-aud".into(),
+        }),
+    )
+    .unwrap();
+
+    let mut c = cfg(tempdir("cf-boot"), auth);
+    c.port = 0;
+    let Err(e) = serve(c).await else {
+        panic!("cf-access with unreachable JWKS must refuse to start");
+    };
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+    assert!(e.to_string().contains("cf-access"), "the message must name the guard: {e}");
+    assert!(e.to_string().contains("JWKS"), "and what it could not obtain: {e}");
+}
+
+#[tokio::test]
+async fn cf_access_without_its_config_is_a_boot_error_not_a_silent_lockout() {
+    let e = AuthConfig::build(vec![GuardKind::CfAccess], None, "X-Forwarded-Email".into(), vec![])
+        .unwrap_err();
+    assert!(e.contains("CDASH_CF_TEAM_DOMAIN"), "the message must name what to set: {e}");
+}
+
+#[tokio::test]
 async fn under_none_no_route_is_rejected() {
     // The invariant is that the guard refactor did not start rejecting the
     // local default — not that every handler succeeds on an empty body.

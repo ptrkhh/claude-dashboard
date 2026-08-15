@@ -81,6 +81,12 @@ async fn main() {
             eprintln!("port {port} already in use");
             std::process::exit(3);
         }
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            // A startup refusal, e.g. cf-access could not obtain its keys.
+            // Named, non-zero, and nothing ever listened.
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
         Err(e) => {
             eprintln!("cannot bind {bind}:{port}: {e}");
             std::process::exit(1);

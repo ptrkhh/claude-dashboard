@@ -144,6 +144,46 @@ pub struct CfState {
     pub jwks: JwksCache,
 }
 
+/// Time-box on the JWKS fetch. Cloudflare being slow must not hang boot.
+pub const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Fetch Cloudflare's public keys. `rustls` rather than native TLS so the
+/// static musl build the VPS profile ships still links.
+pub async fn fetch_jwks(url: &str) -> Result<Jwks, String> {
+    let client = reqwest::Client::builder()
+        .timeout(JWKS_FETCH_TIMEOUT)
+        .build()
+        .map_err(|e| format!("could not build an HTTPS client: {e}"))?;
+    let resp = client.get(url).send().await.map_err(|e| format!("{url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("{url}: HTTP {}", resp.status()));
+    }
+    let jwks: Jwks = resp.json().await.map_err(|e| format!("{url}: bad JWKS JSON: {e}"))?;
+    if jwks.keys.is_empty() {
+        return Err(format!("{url}: JWKS contains no keys"));
+    }
+    Ok(jwks)
+}
+
+/// Refresh the key set in the background for the process's lifetime.
+/// Cloudflare rotates keys; a cache that never refreshed would lock every user
+/// out at the rotation. A failed refresh keeps the last good set.
+pub fn spawn_refresh(state: std::sync::Arc<CfState>, log: std::sync::Arc<crate::host::log::LogBuffer>) {
+    tokio::spawn(async move {
+        let url = certs_url(&state.cfg.team_domain);
+        loop {
+            tokio::time::sleep(JWKS_TTL).await;
+            match fetch_jwks(&url).await {
+                Ok(j) => state.jwks.install(j),
+                Err(e) => {
+                    state.jwks.note_failure();
+                    log.push(format!("cf-access: JWKS refresh failed, keeping last keys: {e}"));
+                }
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 #[allow(clippy::disallowed_types)] // test fixture: generates an RSA keypair, never runs at runtime
 mod tests {

@@ -30,12 +30,28 @@ Requires `tmux`, `claude` and `git` on `PATH`; the agent reports any that are mi
 | `CDASH_CF_TEAM_DOMAIN` / `CDASH_CF_AUD` | — | Required by `cf-access`. |
 | `CDASH_LOGIN_PENDING_MAX` | `1024` | Bound on delayed logins pending at once. |
 
-### `cf-access` is partial
+### `cf-access`
 
-The Cloudflare Access JWT verifier is implemented and tested — signature, `aud`
-array membership, `iss`, expiry, the `service_token_status` discriminator, the
-`common_name` rejection, and `alg: none`. **The JWKS fetch is not wired**: the
-agent links no HTTP client, and adding one is a deliberate dependency decision
-rather than an implementation detail. Until a fetcher is supplied,
-`CDASH_AUTH=cf-access` rejects every request — a guard that fails open is not a
-guard.
+For a VPS behind Cloudflare Access. Cloudflare authenticates the user with your
+team's identity provider and injects a signed `Cf-Access-Jwt-Assertion` header;
+the agent verifies it against Cloudflare's public keys. There is no cdash
+password — one identity, managed in Cloudflare, and adding or revoking a person
+changes nothing on the box.
+
+```
+CDASH_AUTH=cf-access
+CDASH_CF_TEAM_DOMAIN=https://yourteam.cloudflareaccess.com
+CDASH_CF_AUD=<the Application Audience tag>
+```
+
+The key set is fetched at startup and refreshed hourly, so Cloudflare's key
+rotation is invisible. **If the keys cannot be fetched the agent refuses to
+start**, naming the reason on stderr — rather than starting and returning 401 to
+someone who just authenticated successfully. A failed *refresh* keeps the last
+good key set, so a brief Cloudflare outage does not lock anyone out.
+
+**Keep the origin unreachable except through Cloudflare** — a `cloudflared`
+tunnel, or a firewall allowing only Cloudflare's addresses. Anyone who can reach
+the origin directly skips Access entirely and lands on an agent that launches
+sessions with `--dangerously-skip-permissions`. If the origin might be
+reachable, use `CDASH_AUTH=password,cf-access`, which requires both.

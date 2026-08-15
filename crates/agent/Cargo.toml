@@ -29,3 +29,4 @@ sha2 = "0.10"
 getrandom = "0.4"
 base64 = "0.22"
 jsonwebtoken = "9"
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json", "http2"] }
