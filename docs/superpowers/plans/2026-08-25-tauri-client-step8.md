@@ -131,41 +131,40 @@ git commit -m "feat: tauri client skeleton embedding the shared public/ UI"
 - Modify: `crates/agent/Cargo.toml` if a lib feature gate is needed (none expected — `serve` and `Config` are already public)
 
 **Interfaces:**
-- Consumes: `cdash_agent::http::serve::serve(cfg) -> Result<Bound>` and `Config` construction from env (verify exact names with `codegraph_search` or reading `crates/agent/src/http/serve.rs` before writing code — the brief writer has confirmed `serve` exists; match its actual signature).
+- Consumes: `cdash_agent::http::serve::serve(cfg) -> std::io::Result<Bound>` — **verified**: it binds, spawns axum on an internal background task, and resolves immediately with `Bound { addr, ctx }`. The caller holds no future.
 - Produces:
-  - `server_start() -> Result<String, String>` — binds `PORT=0`, `CDASH_BIND=127.0.0.1`, `CDASH_AUTH=none` env for the child config, spawns `serve` on a tokio task, stores the abort handle + bound address in `tauri::State<Mutex<Option<ServerHandle>>>`, returns `http://127.0.0.1:<port>`.
-  - `server_stop()` — aborts the task, clears state.
+  - `server_start() -> Result<String, String>` — builds `Config { port: 0, bind: "127.0.0.1".into(), auth: none, ..Default }`, calls `serve`, stores bound address + shutdown trigger in `tauri::State<Mutex<Option<Running>>>`, returns `http://127.0.0.1:<port>`.
+  - `server_stop()` — fires the shutdown trigger, clears state.
   - `server_state() -> Option<String>` — the bound address if running.
+
+**Required agent change (small, this task):** `serve` currently has no way to stop its internal axum task. Switch the internal `axum::serve(...)` to `.with_graceful_shutdown(...)` driven by a `tokio::sync::watch` (or `oneshot`) created inside `serve`, and add the trigger (or a `stop()` method) to `pub struct Bound`. This keeps the standalone binary unchanged (it never stops) and gives the in-process caller real teardown. Test in the agent crate: start `serve`, call `bound.stop()`, await completion, assert the port is free again (rebind succeeds).
 
 ```rust
 #[derive(Default)]
 struct ServerState(std::sync::Mutex<Option<Running>>);
 
 struct Running {
-    handle: tokio::task::JoinHandle<()>,
     addr: String,
+    stop: tokio::sync::watch::Sender<bool>, // shape per the Bound change above
 }
 
 #[tauri::command]
 fn server_start(state: tauri::State<ServerState>) -> Result<String, String> {
     let mut guard = state.0.lock().unwrap();
-    if let Some(r) = guard.as_ref() { return Ok(r.addr.clone()); }
-    // Bind on a free port; loopback; no auth — the in-process trust shape.
-    std::env::set_var("PORT", "0");
-    std::env::remove_var("CDASH_AUTH");
-    let rt_addr = tokio::runtime::Handle::current();
-    let (tx, rx) = std::sync::mpsc::channel();
-    let join = rt_addr.spawn(async move {
-        match cdash_agent::http::serve::serve(Default::default()).await {
-            Ok(bound) => { let _ = tx.send(Ok(bound)); /* await the server future */ }
-            Err(e) => { let _ = tx.send(Err(e.to_string())); }
-        }
-    });
+    if let Some(r) = guard.as_ref() { return Ok(r.addr.clone()); } // idempotent
+    let cfg = cdash_agent::http::serve::Config {
+        port: 0, bind: "127.0.0.1".into(),
+        auth: Default::default(),          // CDASH_AUTH=none — the in-process trust shape
+        ..Default::default()
+    };
+    // serve() resolves as soon as the listener is bound; call it from the
+    // Tauri async runtime (e.g. tauri::async_runtime::block_on) and keep
+    // Bound's stop trigger for server_stop.
     ...
 }
 ```
 
-The sketch above is indicative, not normative — adapt to the real `serve` signature (does it return `(Bound, impl Future)` or take ownership?). Whatever the shape, the contract is: the caller learns the bound address synchronously after `await`, readiness is that resolution, and a bind error propagates as `Err(String)` naming the reason (the spec's "held port is a diagnosed condition"). If `serve` consumes itself into a future, hold both the JoinHandle and the address.
+The contract, regardless of exact plumbing: the caller learns the bound address synchronously after `serve` resolves; readiness is that resolution (nothing polls); a bind error propagates as `Err(String)` naming the reason — the spec's "held port is a diagnosed condition".
 
 - [ ] **Step 1: Read the real signature, then implement**
 
