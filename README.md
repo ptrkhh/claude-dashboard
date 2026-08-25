@@ -10,6 +10,14 @@ or 403 halts the poll until you act; throttling never does. The service worker
 caches at runtime (network-first navigations, stale-while-revalidate assets), so
 offline works from the second visit; there is no precache manifest to maintain.
 
+## Desktop client (Linux)
+
+```
+cargo run -p cdash-tauri
+```
+
+A Tauri desktop wrapper around the same UI. The agent runs in-process (no separate server, no port to remember) and the same `/api/*` calls go through a Tauri command instead of HTTP. Connection profiles are stored in the app's config directory via `tauri-plugin-store`. Secrets handling arrives in step 10.
+
 ## Run
 
 ```

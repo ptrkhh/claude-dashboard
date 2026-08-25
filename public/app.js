@@ -108,16 +108,32 @@ function toast(msg) {
   setTimeout(() => t.classList.remove('show'), 4000);
 }
 
+// Confirmed: tauri.conf.json sets withGlobalTauri, so the runtime injects
+// window.__TAURI__ (and __TAURI_INTERNALS__ unconditionally) in the webview
+// and neither on the web.
 const isTauri = typeof window !== 'undefined' &&
-  ('__TAURI_INTERNALS__' in window || '__TAURI__' in window); // ponytail: predicate unconfirmed — spec requires verifying which global the Tauri runtime injects, in step 8
+  ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
 
 async function api(path, body) {
+  if (isTauri) {
+    const res = await window.__TAURI__.core.invoke('api_request', {
+      method: body ? 'POST' : 'GET',
+      path,
+      body,
+    });
+    // api_request returns { status, body } without throwing on non-2xx;
+    // re-raise as an Error to keep api()'s fetch-style contract.
+    if (res.status >= 400) {
+      const err = new Error(res.body?.error || res.body?.message || `HTTP ${res.status}`);
+      err.status = res.status;
+      throw err;
+    }
+    return res.body;
+  }
   const opts = body
     ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
     : undefined;
-  const res = isTauri
-    ? await window.__TAURI_INTERNALS__.invoke('api', { path, body })
-    : await fetch(path, opts);
+  const res = await fetch(path, opts);
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const err = new Error(data.error || res.statusText);
