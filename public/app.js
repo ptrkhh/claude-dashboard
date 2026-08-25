@@ -233,7 +233,7 @@ document.body.addEventListener('click', async e => {
     } else if (el.dataset.purge) {
       await api('/api/purge', { sid: el.dataset.purge }); poll();
     }
-  } catch (err) { toast(err.message); }
+  } catch (err) { toast(err.message); poll(); } // re-arm even when the action failed
 });
 
 // Launch: submitting the command bar (button or Enter in the directory field).
@@ -245,7 +245,7 @@ $('#launcher').addEventListener('submit', async e => {
   const model = modelDD.value, effort = effortDD.value;
   btn.disabled = true; btn.innerHTML = `${ICONS.play}<span>Launching…</span>`;
   try { await api('/api/launch', { dir, model, effort }); $('#dir').value = ''; poll(); }
-  catch (err) { toast(err.message); }
+  catch (err) { toast(err.message); poll(); } // re-arm even when the launch failed
   finally { btn.disabled = false; btn.innerHTML = `${ICONS.play}<span>Launch</span>`; }
 });
 
@@ -382,20 +382,22 @@ pkCrumbs.addEventListener('click', e => { const c = e.target.closest('[data-nav]
 
 let bk = cdashBackoff.initial();
 let timer = null;
+let gen = 0; // stale-tick guard: a superseded tick's result is dropped
 
 function arm() {
+  const g = gen;
   clearTimeout(timer);
-  timer = setTimeout(tick, cdashBackoff.delay(bk));
+  timer = setTimeout(() => { if (g === gen) tick(); }, cdashBackoff.delay(bk));
 }
 
 async function tick() {
+  const g = gen;
   if (document.hidden) { arm(); return; }
   let outcome;
   try {
     render(await api('/api/sessions'));
     $('#health').className = 'dot ok';
     $('#health-label').textContent = 'Connected';
-    if ($('#logbox').open) $('#logs').textContent = (await api('/api/logs')).lines.join('\n');
     outcome = 'ok';
   } catch (err) {
     // Only transport errors and 401/403 reach here as distinct things;
@@ -405,6 +407,12 @@ async function tick() {
     $('#health').className = 'dot bad';
     $('#health-label').textContent = 'Disconnected';
   }
+  // Logs are secondary: their failure must not flip the indicator or
+  // advance the ladder once sessions have rendered.
+  if ($('#logbox').open && outcome === 'ok') {
+    try { $('#logs').textContent = (await api('/api/logs')).lines.join('\n'); } catch {}
+  }
+  if (g !== gen) return;
   bk = cdashBackoff.next(bk, outcome);
   if (!bk.halted) arm();
 }
@@ -413,6 +421,7 @@ async function tick() {
 // reset the ladder and try immediately.
 function poll() {
   clearTimeout(timer);
+  gen++;
   bk = cdashBackoff.initial();
   tick();
 }
@@ -422,5 +431,5 @@ $('#launch').innerHTML = `${ICONS.play}<span>Launch</span>`;
 
 poll();
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) { clearTimeout(timer); bk = cdashBackoff.initial(); tick(); }
+  if (!document.hidden) { clearTimeout(timer); gen++; bk = cdashBackoff.initial(); tick(); }
 });

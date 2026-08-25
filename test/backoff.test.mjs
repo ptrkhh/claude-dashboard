@@ -35,6 +35,11 @@ test('an auth failure halts and stays halted', () => {
   assert.equal(s.halted, true);
 });
 
+test('success clears a halt — the safety valve', () => {
+  const s = b.next({ i: 0, halted: true }, 'ok');
+  assert.deepEqual(s, { i: 0, halted: false });
+});
+
 test('next never mutates the state it is given', () => {
   const s = b.initial();
   b.next(s, 'fail');
