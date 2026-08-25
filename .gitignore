@@ -10,3 +10,6 @@ docs/*
 docs/superpowers/*
 !docs/superpowers/specs/
 !docs/superpowers/plans/
+
+# Tauri build-time generated schemas
+crates/tauri-app/gen/schemas/
