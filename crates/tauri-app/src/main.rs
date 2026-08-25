@@ -138,6 +138,21 @@ fn profile_remove(profiles: &mut ProfilesDoc, name: &str) {
     profiles.remove(name);
 }
 
+/// The delete command's whole logic: removing the active profile clears
+/// "active"; anything else leaves it untouched.
+fn delete_profile(profiles: &mut ProfilesDoc, active: &mut Option<String>, name: &str) {
+    if active.as_deref() == Some(name) {
+        *active = None;
+    }
+    profile_remove(profiles, name);
+}
+
+/// Store-value parsing for the "profiles" key: an absent or non-object value
+/// means no profiles.
+fn doc_from_value(value: Option<&serde_json::Value>) -> ProfilesDoc {
+    value.and_then(|v| v.as_object().cloned()).unwrap_or_default()
+}
+
 fn profile_records(profiles: &ProfilesDoc) -> Vec<ProfileRecord> {
     let mut out: Vec<ProfileRecord> = profiles
         .values()
@@ -153,10 +168,7 @@ fn open_store(app: &tauri::AppHandle) -> Result<Arc<tauri_plugin_store::Store<ta
 }
 
 fn profiles_doc(store: &tauri_plugin_store::Store<tauri::Wry>) -> ProfilesDoc {
-    store
-        .get("profiles")
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default()
+    doc_from_value(store.get("profiles").as_ref())
 }
 
 /// No-op passthrough until step 10 wires bearer tokens from the keyring.
@@ -167,11 +179,17 @@ fn attach_auth(
     req
 }
 
-fn active_record(store: &tauri_plugin_store::Store<tauri::Wry>) -> Option<ProfileRecord> {
-    let name = store.get("active")?.as_str()?.to_string();
-    profiles_doc(store)
-        .get(&name)
+/// Resolves the active profile name against the stored records; a stale
+/// "active" (pointing at a missing record) resolves to None.
+fn resolve_active(profiles: &ProfilesDoc, active: Option<&str>) -> Option<ProfileRecord> {
+    profiles
+        .get(active?)
         .and_then(|v| serde_json::from_value(v.clone()).ok())
+}
+
+fn active_record(store: &tauri_plugin_store::Store<tauri::Wry>) -> Option<ProfileRecord> {
+    let active = store.get("active")?.as_str()?.to_string();
+    resolve_active(&profiles_doc(store), Some(&active))
 }
 
 /// The entire data path: JS names a path, we resolve it against the bound
@@ -235,12 +253,10 @@ fn profile_save(app: tauri::AppHandle, profile: ProfileInput) -> Result<(), Stri
 fn profile_delete(app: tauri::AppHandle, name: String) -> Result<(), String> {
     let store = open_store(&app)?;
     let mut doc = profiles_doc(&store);
-    let was_active = store.get("active").and_then(|v| v.as_str().map(|s| s == name));
-    profile_remove(&mut doc, &name);
+    let mut active = store.get("active").and_then(|v| v.as_str().map(str::to_string));
+    delete_profile(&mut doc, &mut active, &name);
     store.set("profiles", serde_json::Value::Object(doc));
-    if was_active == Some(true) {
-        store.set("active", serde_json::Value::Null);
-    }
+    store.set("active", active.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null));
     store.save().map_err(|e| format!("cannot persist profiles: {e}"))
 }
 
@@ -415,5 +431,61 @@ mod tests {
         assert!(profile_upsert(&mut doc, m).is_err());
         assert!(profile_upsert(&mut doc, input("")).is_err());
         assert!(doc.is_empty());
+    }
+
+    #[test]
+    fn active_record_resolves_the_active_name_against_stored_records() {
+        let mut doc = ProfilesDoc::new();
+        profile_upsert(&mut doc, input("local")).unwrap();
+        profile_upsert(&mut doc, input("remote")).unwrap();
+
+        let rec = resolve_active(&doc, Some("remote")).unwrap();
+        assert_eq!(rec.name, "remote");
+        assert_eq!(rec.base_url, "http://127.0.0.1");
+        assert!(!rec.has_secret);
+
+        // no active name / stale name pointing at a deleted record
+        assert!(resolve_active(&doc, None).is_none());
+        assert!(resolve_active(&doc, Some("ghost")).is_none());
+
+        // corrupt record value degrades to None rather than panicking
+        let mut corrupt = doc.clone();
+        corrupt.insert("bad".into(), serde_json::Value::Bool(true));
+        assert!(resolve_active(&corrupt, Some("bad")).is_none());
+    }
+
+    #[test]
+    fn deleting_the_active_profile_clears_active() {
+        let mut doc = ProfilesDoc::new();
+        profile_upsert(&mut doc, input("local")).unwrap();
+        profile_upsert(&mut doc, input("remote")).unwrap();
+        let mut active = Some("local".to_string());
+
+        delete_profile(&mut doc, &mut active, "local");
+        assert!(active.is_none());
+        assert!(profile_records(&doc).iter().all(|r| r.name != "local"));
+    }
+
+    #[test]
+    fn deleting_a_non_active_profile_leaves_active_untouched() {
+        let mut doc = ProfilesDoc::new();
+        profile_upsert(&mut doc, input("local")).unwrap();
+        profile_upsert(&mut doc, input("remote")).unwrap();
+        let mut active = Some("local".to_string());
+
+        delete_profile(&mut doc, &mut active, "remote");
+        assert_eq!(active.as_deref(), Some("local"));
+    }
+
+    #[test]
+    fn profiles_doc_parsing_tolerates_absent_and_non_object_values() {
+        assert!(doc_from_value(None).is_empty());
+        assert!(doc_from_value(Some(&serde_json::Value::Null)).is_empty());
+        assert!(doc_from_value(Some(&serde_json::json!("nope"))).is_empty());
+
+        let mut doc = ProfilesDoc::new();
+        profile_upsert(&mut doc, input("local")).unwrap();
+        let v = serde_json::Value::Object(doc.clone());
+        assert_eq!(profile_records(&doc_from_value(Some(&v))), profile_records(&doc));
     }
 }
