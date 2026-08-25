@@ -44,15 +44,20 @@ fn start_locked(state: &Mutex<Option<Running>>) -> Result<String, String> {
     Ok(addr)
 }
 
-fn stop_locked(state: &Mutex<Option<Running>>) {
-    let running = state.lock().ok().and_then(|mut g| g.take());
-    if let Some(r) = running {
+fn stop_locked(state: &Mutex<Option<Running>>) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|_| "server state poisoned")?;
+    if let Some(r) = guard.take() {
         tauri::async_runtime::block_on(r.bound.stop());
     }
+    Ok(())
 }
 
-fn addr_locked(state: &Mutex<Option<Running>>) -> Option<String> {
-    state.lock().ok().and_then(|g| g.as_ref().map(|r| r.addr.clone()))
+fn addr_locked(state: &Mutex<Option<Running>>) -> Result<Option<String>, String> {
+    Ok(state
+        .lock()
+        .map_err(|_| "server state poisoned")?
+        .as_ref()
+        .map(|r| r.addr.clone()))
 }
 
 #[tauri::command]
@@ -61,12 +66,12 @@ fn server_start(state: tauri::State<ServerState>) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn server_stop(state: tauri::State<ServerState>) {
+fn server_stop(state: tauri::State<ServerState>) -> Result<(), String> {
     stop_locked(&state.0)
 }
 
 #[tauri::command]
-fn server_state(state: tauri::State<ServerState>) -> Option<String> {
+fn server_state(state: tauri::State<ServerState>) -> Result<Option<String>, String> {
     addr_locked(&state.0)
 }
 
@@ -162,12 +167,14 @@ fn profile_records(profiles: &ProfilesDoc) -> Vec<ProfileRecord> {
     out
 }
 
-fn open_store(app: &tauri::AppHandle) -> Result<Arc<tauri_plugin_store::Store<tauri::Wry>>, String> {
+fn open_store<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<Arc<tauri_plugin_store::Store<R>>, String> {
     use tauri_plugin_store::StoreExt;
     app.store("profiles.json").map_err(|e| format!("store unavailable: {e}"))
 }
 
-fn profiles_doc(store: &tauri_plugin_store::Store<tauri::Wry>) -> ProfilesDoc {
+fn profiles_doc<R: tauri::Runtime>(store: &tauri_plugin_store::Store<R>) -> ProfilesDoc {
     doc_from_value(store.get("profiles").as_ref())
 }
 
@@ -187,7 +194,7 @@ fn resolve_active(profiles: &ProfilesDoc, active: Option<&str>) -> Option<Profil
         .and_then(|v| serde_json::from_value(v.clone()).ok())
 }
 
-fn active_record(store: &tauri_plugin_store::Store<tauri::Wry>) -> Option<ProfileRecord> {
+fn active_record<R: tauri::Runtime>(store: &tauri_plugin_store::Store<R>) -> Option<ProfileRecord> {
     let active = store.get("active")?.as_str()?.to_string();
     resolve_active(&profiles_doc(store), Some(&active))
 }
@@ -235,13 +242,16 @@ async fn api_request(
 }
 
 #[tauri::command]
-fn profiles_list(app: tauri::AppHandle) -> Result<Vec<ProfileRecord>, String> {
+fn profiles_list<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<Vec<ProfileRecord>, String> {
     let store = open_store(&app)?;
     Ok(profile_records(&profiles_doc(&store)))
 }
 
 #[tauri::command]
-fn profile_save(app: tauri::AppHandle, profile: ProfileInput) -> Result<(), String> {
+fn profile_save<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    profile: ProfileInput,
+) -> Result<(), String> {
     let store = open_store(&app)?;
     let mut doc = profiles_doc(&store);
     profile_upsert(&mut doc, profile)?;
@@ -250,7 +260,10 @@ fn profile_save(app: tauri::AppHandle, profile: ProfileInput) -> Result<(), Stri
 }
 
 #[tauri::command]
-fn profile_delete(app: tauri::AppHandle, name: String) -> Result<(), String> {
+fn profile_delete<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    name: String,
+) -> Result<(), String> {
     let store = open_store(&app)?;
     let mut doc = profiles_doc(&store);
     let mut active = store.get("active").and_then(|v| v.as_str().map(str::to_string));
@@ -261,7 +274,10 @@ fn profile_delete(app: tauri::AppHandle, name: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn profile_activate(app: tauri::AppHandle, name: String) -> Result<(), String> {
+fn profile_activate<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    name: String,
+) -> Result<(), String> {
     let store = open_store(&app)?;
     if !profiles_doc(&store).contains_key(&name) {
         return Err(format!("unknown profile {name:?}"));
@@ -306,28 +322,28 @@ mod tests {
         assert!(first.starts_with("http://127.0.0.1:"));
         let second = start_locked(&state).unwrap();
         assert_eq!(first, second, "a second start must return the same address");
-        assert_eq!(addr_locked(&state), Some(first));
-        stop_locked(&state);
-        assert_eq!(addr_locked(&state), None, "stop must clear the state");
+        assert_eq!(addr_locked(&state).unwrap(), Some(first));
+        stop_locked(&state).unwrap();
+        assert_eq!(addr_locked(&state).unwrap(), None, "stop must clear the state");
     }
 
     #[test]
     fn stop_then_start_binds_a_fresh_port() {
         let state = Mutex::new(None);
         let first = start_locked(&state).unwrap();
-        stop_locked(&state);
+        stop_locked(&state).unwrap();
         let second = start_locked(&state).unwrap();
         assert_ne!(first, second, "ephemeral ports after teardown are re-drawn");
-        stop_locked(&state);
+        stop_locked(&state).unwrap();
     }
 
     #[test]
     fn state_of_a_stopped_server_is_none() {
         let state = Mutex::new(None);
-        assert_eq!(addr_locked(&state), None);
+        assert_eq!(addr_locked(&state).unwrap(), None);
         start_locked(&state).unwrap();
-        stop_locked(&state);
-        assert_eq!(addr_locked(&state), None);
+        stop_locked(&state).unwrap();
+        assert_eq!(addr_locked(&state).unwrap(), None);
     }
 
     /// `start_locked`/`stop_locked` block on tauri's own runtime; they must
@@ -339,7 +355,7 @@ mod tests {
     }
 
     fn shutdown(state: &Mutex<Option<Running>>) {
-        std::thread::scope(|s| s.spawn(|| stop_locked(state)).join().unwrap());
+        std::thread::scope(|s| s.spawn(|| stop_locked(state).unwrap()).join().unwrap());
     }
 
     #[tokio::test]
@@ -487,5 +503,49 @@ mod tests {
         profile_upsert(&mut doc, input("local")).unwrap();
         let v = serde_json::Value::Object(doc.clone());
         assert_eq!(profile_records(&doc_from_value(Some(&v))), profile_records(&doc));
+    }
+
+    /// A headless app with the real store plugin, pointed at an isolated XDG
+    /// data dir so tests never touch actual user data.
+    fn mock_app_with_store() -> tauri::App<tauri::test::MockRuntime> {
+        let dir = std::env::temp_dir().join(format!("cdash-tauri-store-test-{}", std::process::id()));
+        std::env::set_var("XDG_DATA_HOME", &dir);
+        let app = tauri::test::mock_app();
+        app.handle()
+            .plugin(tauri_plugin_store::Builder::new().build())
+            .expect("plugin registers on the mock app");
+        app
+    }
+
+    #[test]
+    fn profile_commands_round_trip_through_the_real_store() {
+        let app = mock_app_with_store();
+        let handle = app.handle().clone();
+
+        profile_save(handle.clone(), input("local")).unwrap();
+        profile_save(handle.clone(), input("remote")).unwrap();
+        profile_activate(handle.clone(), "remote".into()).unwrap();
+        assert!(profile_activate(handle.clone(), "ghost".into()).is_err());
+
+        let listed = profiles_list(handle.clone()).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].name, "local"); // sorted
+
+        // a fresh store instance re-reads what was flushed to disk
+        let reread = tauri_plugin_store::StoreBuilder::new(&handle, "profiles.json")
+            .build()
+            .expect("store builds");
+        reread.reload().expect("saved file parses");
+        assert_eq!(reread.get("active").and_then(|v| v.as_str().map(str::to_string)), Some("remote".into()));
+        assert_eq!(profiles_doc(&reread).len(), 2);
+
+        // deleting the active profile persists the cleared "active" key
+        profile_delete(handle.clone(), "remote".into()).unwrap();
+        let store = open_store(&handle).unwrap();
+        assert_eq!(profiles_doc(&store).len(), 1);
+        assert_eq!(store.get("active"), Some(serde_json::Value::Null));
+        assert_eq!(profiles_list(handle).unwrap()[0].name, "local");
+
+        let _ = std::fs::remove_dir_all(std::env::var("XDG_DATA_HOME").unwrap());
     }
 }
