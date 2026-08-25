@@ -380,21 +380,47 @@ pkList.addEventListener('click', e => {
 });
 pkCrumbs.addEventListener('click', e => { const c = e.target.closest('[data-nav]'); if (c) { pkPath = c.dataset.nav; browseTo(pkPath); } });
 
-async function poll() {
+let bk = cdashBackoff.initial();
+let timer = null;
+
+function arm() {
+  clearTimeout(timer);
+  timer = setTimeout(tick, cdashBackoff.delay(bk));
+}
+
+async function tick() {
+  if (document.hidden) { arm(); return; }
+  let outcome;
   try {
     render(await api('/api/sessions'));
     $('#health').className = 'dot ok';
     $('#health-label').textContent = 'Connected';
     if ($('#logbox').open) $('#logs').textContent = (await api('/api/logs')).lines.join('\n');
-  } catch {
+    outcome = 'ok';
+  } catch (err) {
+    // Only transport errors and 401/403 reach here as distinct things;
+    // everything non-auth backs off. A halt is cleared only by poll(),
+    // which is user-initiated.
+    outcome = err.status === 401 || err.status === 403 ? 'auth' : 'fail';
     $('#health').className = 'dot bad';
-    $('#health-label').textContent = 'Offline';
+    $('#health-label').textContent = 'Disconnected';
   }
+  bk = cdashBackoff.next(bk, outcome);
+  if (!bk.halted) arm();
+}
+
+// Any user-initiated action (launch, kill, resume, purge) calls poll():
+// reset the ladder and try immediately.
+function poll() {
+  clearTimeout(timer);
+  bk = cdashBackoff.initial();
+  tick();
 }
 
 // Give the launch button its resting icon + label.
 $('#launch').innerHTML = `${ICONS.play}<span>Launch</span>`;
 
 poll();
-setInterval(() => { if (!document.hidden) poll(); }, 4000);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) { clearTimeout(timer); bk = cdashBackoff.initial(); tick(); }
+});
