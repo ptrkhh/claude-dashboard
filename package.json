@@ -1,5 +1,8 @@
 {
   "name": "claude-dashboard",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "scripts": {
+    "test": "node --test 'test/*.mjs'"
+  }
 }
