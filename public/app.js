@@ -108,10 +108,22 @@ function toast(msg) {
   setTimeout(() => t.classList.remove('show'), 4000);
 }
 
+const isTauri = typeof window !== 'undefined' &&
+  ('__TAURI_INTERNALS__' in window || '__TAURI__' in window); // ponytail: predicate unconfirmed — spec requires verifying which global the Tauri runtime injects, in step 8
+
 async function api(path, body) {
-  const res = await fetch(path, body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : undefined);
+  const opts = body
+    ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
+    : undefined;
+  const res = isTauri
+    ? await window.__TAURI_INTERNALS__.invoke('api', { path, body })
+    : await fetch(path, opts);
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || res.statusText);
+  if (!res.ok) {
+    const err = new Error(data.error || res.statusText);
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }
 
