@@ -16,6 +16,10 @@ offline works from the second visit; there is no precache manifest to maintain.
 cargo run -p cdash-agent     # http://127.0.0.1:8080
 ```
 
+### Static release builds
+
+`scripts/release.sh` builds static musl binaries for VPS/WSL (`x86_64`) and VPS/Termux (`aarch64`) and executes both as the release gate (CI runs the same matrix). Prereqs: `rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl`, `sudo apt install musl-tools qemu-user`, and the [musl.cc](https://musl.cc) `aarch64-linux-musl-cross` toolchain unpacked at `~/.local/opt/`.
+
 Requires `tmux`, `claude` and `git` on `PATH`; the agent reports any that are missing at startup.
 
 ## Configuration

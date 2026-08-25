@@ -10,3 +10,33 @@ jobs:
           components: clippy
       - run: cargo test --all --locked
       - run: cargo clippy --all-targets --locked -- -D warnings -D clippy::disallowed_types
+
+  release-matrix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools qemu-user
+      # aarch64 musl C cross-compilation (ring/aws-lc-sys) needs an
+      # aarch64-linux-musl-gcc, which Ubuntu does not package — musl.cc does.
+      - name: Fetch the aarch64 musl cross-toolchain
+        run: |
+          curl -fsSL https://musl.cc/aarch64-linux-musl-cross.tgz | tar xz -C ~
+          echo ~/aarch64-linux-musl-cross/bin >> "$GITHUB_PATH"
+      - name: Build and execute both targets
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-musl-gcc
+        run: |
+          cargo build --release --locked -p cdash-agent --target x86_64-unknown-linux-musl
+          cargo build --release --locked -p cdash-agent --target aarch64-unknown-linux-musl
+          PORT=0 ./target/x86_64-unknown-linux-musl/release/cdash-agent & p=$!; sleep 1; kill $p
+          PORT=0 timeout 5 qemu-aarch64 -L ~/aarch64-linux-musl-cross \
+            ./target/aarch64-unknown-linux-musl/release/cdash-agent || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cdash-agent-musl
+          path: |
+            target/x86_64-unknown-linux-musl/release/cdash-agent
+            target/aarch64-unknown-linux-musl/release/cdash-agent
