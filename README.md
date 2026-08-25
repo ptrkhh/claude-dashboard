@@ -4,6 +4,12 @@ A small local web dashboard for launching, monitoring, resuming, and killing Cla
 
 The launcher has a touch-friendly folder picker (the folder button in the directory field) that browses the server's filesystem from `/`, with server-backed **Recents** (auto-recorded on launch) and **Favorites**. Since it can enumerate any directory, keep the "trusted LAN / behind Cloudflare Access" caveat above in mind. Recents and favorites persist to `$CLAUDE_DIR/cdash-places.json`.
 
+The dashboard polls `/api/sessions` on a graduated ladder — 4s, 8s, 15s, capped
+at 30s — resetting on any successful poll, tab refocus, or button press. A 401
+or 403 halts the poll until you act; throttling never does. The service worker
+caches at runtime (network-first navigations, stale-while-revalidate assets), so
+offline works from the second visit; there is no precache manifest to maintain.
+
 ## Run
 
 ```
