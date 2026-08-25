@@ -78,11 +78,108 @@ struct ApiResponse {
     body: serde_json::Value,
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
+struct ProfileRecord {
+    name: String,
+    base_url: String,
+    /// "in-process" | "external"
+    managed: String,
+    auth: String,
+    has_secret: bool,
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct ProfileInput {
+    name: String,
+    base_url: String,
+    managed: String,
+    auth: String,
+}
+
+fn validate_profile(input: &ProfileInput) -> Result<(), String> {
+    if input.name.trim().is_empty() {
+        return Err("profile name must not be empty".into());
+    }
+    if input.managed != "in-process" && input.managed != "external" {
+        return Err("managed must be \"in-process\" or \"external\"".into());
+    }
+    if input.auth != "none" {
+        // Fail closed: a secret-bearing profile must never be silently accepted.
+        return Err(format!(
+            "auth {:?} is not supported until step 10 wires the keyring; only \"none\" is accepted",
+            input.auth
+        ));
+    }
+    Ok(())
+}
+
+/// The store logic in plain form so tests can run it headlessly: the
+/// "profiles" document is a JSON map keyed by profile name.
+type ProfilesDoc = serde_json::Map<String, serde_json::Value>;
+
+fn record_of(input: &ProfileInput) -> ProfileRecord {
+    ProfileRecord {
+        name: input.name.clone(),
+        base_url: input.base_url.clone(),
+        managed: input.managed.clone(),
+        auth: input.auth.clone(),
+        has_secret: false, // step 10 wires the keyring
+    }
+}
+
+fn profile_upsert(profiles: &mut ProfilesDoc, input: ProfileInput) -> Result<(), String> {
+    validate_profile(&input)?;
+    let rec = record_of(&input);
+    profiles.insert(rec.name.clone(), serde_json::to_value(&rec).expect("serializable"));
+    Ok(())
+}
+
+fn profile_remove(profiles: &mut ProfilesDoc, name: &str) {
+    profiles.remove(name);
+}
+
+fn profile_records(profiles: &ProfilesDoc) -> Vec<ProfileRecord> {
+    let mut out: Vec<ProfileRecord> = profiles
+        .values()
+        .filter_map(|v| serde_json::from_value(v.clone()).ok())
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+fn open_store(app: &tauri::AppHandle) -> Result<Arc<tauri_plugin_store::Store<tauri::Wry>>, String> {
+    use tauri_plugin_store::StoreExt;
+    app.store("profiles.json").map_err(|e| format!("store unavailable: {e}"))
+}
+
+fn profiles_doc(store: &tauri_plugin_store::Store<tauri::Wry>) -> ProfilesDoc {
+    store
+        .get("profiles")
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+/// No-op passthrough until step 10 wires bearer tokens from the keyring.
+fn attach_auth(
+    _profile: Option<&ProfileRecord>,
+    req: reqwest::RequestBuilder,
+) -> reqwest::RequestBuilder {
+    req
+}
+
+fn active_record(store: &tauri_plugin_store::Store<tauri::Wry>) -> Option<ProfileRecord> {
+    let name = store.get("active")?.as_str()?.to_string();
+    profiles_doc(store)
+        .get(&name)
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+}
+
 /// The entire data path: JS names a path, we resolve it against the bound
 /// loopback address only. No cookie jar; the client is built once.
 async fn request_inner(
     http: &reqwest::Client,
     addr: Option<String>,
+    active: Option<&ProfileRecord>,
     method: String,
     path: String,
     body: Option<serde_json::Value>,
@@ -97,7 +194,7 @@ async fn request_inner(
         "POST" => reqwest::Method::POST,
         m => reqwest::Method::from_bytes(m.as_bytes()).map_err(|e| e.to_string())?,
     };
-    let req = http.request(m, &url);
+    let req = attach_auth(active, http.request(m, &url));
     let req = if let Some(b) = body { req.json(&b) } else { req };
     let res = req.send().await.map_err(|e| e.to_string())?;
     let status = res.status().as_u16();
@@ -107,6 +204,7 @@ async fn request_inner(
 
 #[tauri::command]
 async fn api_request(
+    app: tauri::AppHandle,
     state: tauri::State<'_, ServerState>,
     http: tauri::State<'_, ReqwestState>,
     method: String,
@@ -114,7 +212,51 @@ async fn api_request(
     body: Option<serde_json::Value>,
 ) -> Result<ApiResponse, String> {
     let addr = state.0.lock().map_err(|_| "server state poisoned")?.as_ref().map(|r| r.addr.clone());
-    request_inner(&http.0, addr, method, path, body).await
+    let active = open_store(&app).ok().and_then(|s| active_record(&s));
+    request_inner(&http.0, addr, active.as_ref(), method, path, body).await
+}
+
+#[tauri::command]
+fn profiles_list(app: tauri::AppHandle) -> Result<Vec<ProfileRecord>, String> {
+    let store = open_store(&app)?;
+    Ok(profile_records(&profiles_doc(&store)))
+}
+
+#[tauri::command]
+fn profile_save(app: tauri::AppHandle, profile: ProfileInput) -> Result<(), String> {
+    let store = open_store(&app)?;
+    let mut doc = profiles_doc(&store);
+    profile_upsert(&mut doc, profile)?;
+    store.set("profiles", serde_json::Value::Object(doc));
+    store.save().map_err(|e| format!("cannot persist profile: {e}"))
+}
+
+#[tauri::command]
+fn profile_delete(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    let store = open_store(&app)?;
+    let mut doc = profiles_doc(&store);
+    let was_active = store.get("active").and_then(|v| v.as_str().map(|s| s == name));
+    profile_remove(&mut doc, &name);
+    store.set("profiles", serde_json::Value::Object(doc));
+    if was_active == Some(true) {
+        store.set("active", serde_json::Value::Null);
+    }
+    store.save().map_err(|e| format!("cannot persist profiles: {e}"))
+}
+
+#[tauri::command]
+fn profile_activate(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    let store = open_store(&app)?;
+    if !profiles_doc(&store).contains_key(&name) {
+        return Err(format!("unknown profile {name:?}"));
+    }
+    store.set("active", name);
+    store.save().map_err(|e| format!("cannot persist active profile: {e}"))
+}
+
+#[tauri::command]
+fn host_platform() -> String {
+    std::env::consts::OS.to_string()
 }
 
 fn main() {
@@ -126,7 +268,12 @@ fn main() {
             server_start,
             server_stop,
             server_state,
-            api_request
+            api_request,
+            profiles_list,
+            profile_save,
+            profile_delete,
+            profile_activate,
+            host_platform
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -183,7 +330,7 @@ mod tests {
     async fn request_round_trips_health() {
         let (state, addr) = boot();
         let http = reqwest::Client::new();
-        let res = request_inner(&http, Some(addr), "GET".into(), "/api/health".into(), None)
+        let res = request_inner(&http, Some(addr), None, "GET".into(), "/api/health".into(), None)
             .await
             .expect("health round trip");
         assert_eq!(res.status, 200);
@@ -195,7 +342,7 @@ mod tests {
     async fn relative_paths_are_rejected() {
         let (state, addr) = boot();
         let http = reqwest::Client::new();
-        let err = request_inner(&http, Some(addr), "GET".into(), "api/x".into(), None)
+        let err = request_inner(&http, Some(addr), None, "GET".into(), "api/x".into(), None)
             .await
             .unwrap_err();
         assert!(err.contains("absolute"), "got: {err}");
@@ -205,9 +352,68 @@ mod tests {
     #[tokio::test]
     async fn requests_without_a_running_server_fail() {
         let http = reqwest::Client::new();
-        let err = request_inner(&http, None, "GET".into(), "/api/health".into(), None)
+        let err = request_inner(&http, None, None, "GET".into(), "/api/health".into(), None)
             .await
             .unwrap_err();
         assert_eq!(err, "server not running");
+    }
+
+    fn input(name: &str) -> ProfileInput {
+        ProfileInput {
+            name: name.into(),
+            base_url: "http://127.0.0.1".into(),
+            managed: "in-process".into(),
+            auth: "none".into(),
+        }
+    }
+
+    #[test]
+    fn profile_save_list_delete_round_trip() {
+        let mut doc = ProfilesDoc::new();
+        profile_upsert(&mut doc, input("local")).unwrap();
+        profile_upsert(&mut doc, input("remote")).unwrap();
+
+        let listed = profile_records(&doc);
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].name, "local"); // sorted
+        assert_eq!(listed[0].auth, "none");
+        assert!(!listed[0].has_secret);
+
+        // upsert overwrites by name, never duplicates
+        let mut updated = input("local");
+        updated.base_url = "http://127.0.0.1:9999".into();
+        profile_upsert(&mut doc, updated).unwrap();
+        assert_eq!(profile_records(&doc).len(), 2);
+        assert_eq!(profile_records(&doc)[0].base_url, "http://127.0.0.1:9999");
+
+        profile_remove(&mut doc, "remote");
+        assert_eq!(profile_records(&doc).len(), 1);
+        profile_remove(&mut doc, "missing"); // delete of unknown is a no-op
+        assert_eq!(profile_records(&doc).len(), 1);
+    }
+
+    #[test]
+    fn profiles_survive_a_json_round_trip() {
+        let mut doc = ProfilesDoc::new();
+        profile_upsert(&mut doc, input("local")).unwrap();
+        let stored = serde_json::to_value(doc.clone()).unwrap();
+        let restored: ProfilesDoc = serde_json::from_value(stored).unwrap();
+        assert_eq!(profile_records(&restored), profile_records(&doc));
+    }
+
+    #[test]
+    fn secret_bearing_profiles_are_rejected_naming_step_10() {
+        let mut doc = ProfilesDoc::new();
+        let mut bad = input("secret");
+        bad.auth = "bearer".into();
+        let err = profile_upsert(&mut doc, bad).unwrap_err();
+        assert!(err.contains("step 10"), "got: {err}");
+        assert!(doc.is_empty(), "fail closed: nothing persisted");
+
+        let mut m = input("x");
+        m.managed = "cloud".into();
+        assert!(profile_upsert(&mut doc, m).is_err());
+        assert!(profile_upsert(&mut doc, input("")).is_err());
+        assert!(doc.is_empty());
     }
 }
