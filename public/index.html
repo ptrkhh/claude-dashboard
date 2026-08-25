@@ -104,6 +104,11 @@
 <div id="toast" role="status" aria-live="polite"></div>
 <script src="transport/backoff.js"></script>
 <script src="app.js"></script>
-<script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');</script>
+<script>
+  // Same predicate as api()'s transport branch. Both of sw.js's assumptions
+  // (same-origin /api/, http-cache semantics) break in a Tauri webview.
+  if (!('__TAURI_INTERNALS__' in window || '__TAURI__' in window) && 'serviceWorker' in navigator)
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+</script>
 </body>
 </html>
