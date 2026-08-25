@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/agent"]
+members = ["crates/agent", "crates/tauri-app"]
 resolver = "2"
 
 # The KDF is unusably slow unoptimised — 1.08s per verify, measured — which
