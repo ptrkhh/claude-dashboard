@@ -119,7 +119,7 @@ Ports `machineStats` (`lib/stats.js:32-35`), the last function left in that file
   - `pub struct MachineStats { pub cpu_pct: u32, pub ram_used_kb: u64, pub ram_total_kb: u64 }` (serialized as `cpuPct`, `ramUsedKb`, `ramTotalKb`)
   - `pub fn machine_stats(&mut self) -> MachineStats` on `Sampler`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the `tests` module in `crates/agent/src/host/sample.rs`:
 
@@ -145,12 +145,12 @@ Add to the `tests` module in `crates/agent/src/host/sample.rs`:
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p cdash-agent machine_stats`
 Expected: FAIL — `cannot find type 'MachineStats' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 In `crates/agent/src/host/sample.rs`, extend the `use` line and add the struct plus the method:
 
@@ -194,12 +194,12 @@ Add inside `impl Sampler`:
     }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent machine_stats`
 Expected: PASS, 2 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/agent/src/host/sample.rs
@@ -228,7 +228,7 @@ Checklist rows: **B1**, and the mechanism behind **D1**/**D2**.
   - `pub async fn read_tail(file: &Path) -> Option<String>`
   - `pub async fn write_atomic(file: &Path, contents: &str, tmp_suffix: &str) -> std::io::Result<()>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/collect/fsio.rs`:
 
@@ -292,7 +292,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Add the tokio filesystem features**
+- [x] **Step 2: Add the tokio filesystem features**
 
 In `crates/agent/Cargo.toml`, replace the `tokio` line with:
 
@@ -300,7 +300,7 @@ In `crates/agent/Cargo.toml`, replace the `tokio` line with:
 tokio = { version = "1", features = ["process", "time", "rt", "rt-multi-thread", "macros", "fs", "io-util"] }
 ```
 
-- [ ] **Step 3: Run tests to verify they fail**
+- [x] **Step 3: Run tests to verify they fail**
 
 Register the module first — `crates/agent/src/collect/mod.rs`:
 
@@ -317,7 +317,7 @@ pub mod collect;
 Run: `cargo test -p cdash-agent fsio`
 Expected: FAIL — `cannot find function 'read_if' in this scope`.
 
-- [ ] **Step 4: Write the implementation**
+- [x] **Step 4: Write the implementation**
 
 Prepend to `crates/agent/src/collect/fsio.rs`:
 
@@ -363,12 +363,12 @@ pub async fn write_atomic(file: &Path, contents: &str, tmp_suffix: &str) -> std:
 }
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent fsio`
 Expected: PASS, 5 tests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/agent/src/collect/fsio.rs crates/agent/src/collect/mod.rs crates/agent/src/lib.rs crates/agent/Cargo.toml Cargo.lock
@@ -394,7 +394,7 @@ Checklist row: **B2**.
   - `pub struct TranscriptCache` with `pub fn new() -> Self` and `pub async fn get(&self, file: &Path) -> Option<Transcript>`
   - `pub fn mtime_ms(md: &std::fs::Metadata) -> f64`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/collect/cache.rs`:
 
@@ -495,7 +495,7 @@ The tests need one helper that sets mtime without a new dependency. Add it to th
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Add to `crates/agent/src/collect/mod.rs`:
 
@@ -506,7 +506,7 @@ pub mod cache;
 Run: `cargo test -p cdash-agent cache`
 Expected: FAIL — `cannot find type 'TranscriptCache' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/agent/src/collect/cache.rs`:
 
@@ -592,12 +592,12 @@ impl TranscriptCache {
         let md = tokio::fs::metadata(file).await.ok()?;
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent cache`
 Expected: PASS, 4 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/agent/src/collect/cache.rs crates/agent/src/collect/mod.rs
@@ -624,7 +624,7 @@ Checklist rows: **C2**, **D5**, **E2**.
   - `pub fn status_for(self: &Arc<Self>, runner: Arc<Runner>, dir: &str, now_ms: u64) -> Option<String>`
   - `pub fn refresh_due(entry_ts_ms: u64, busy: bool, now_ms: u64) -> bool` — pure, testable
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/collect/git.rs`:
 
@@ -691,7 +691,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Add to `crates/agent/src/collect/mod.rs`:
 
@@ -702,7 +702,7 @@ pub mod git;
 Run: `cargo test -p cdash-agent git`
 Expected: FAIL — `cannot find function 'refresh_due' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/agent/src/collect/git.rs`:
 
@@ -790,12 +790,12 @@ impl GitCache {
 
 Note the `ts` written by the background task is `now_ms` — the timestamp of the *request that scheduled it*, not of completion. That matches Node closely enough for the TTL to behave the same and avoids threading a clock into the spawned task.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent git -- --test-threads=1`
 Expected: PASS, 5 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/agent/src/collect/git.rs crates/agent/src/collect/mod.rs
@@ -826,7 +826,7 @@ Checklist row: **E9**.
   - `pub async fn rc_link_for(claude_dir: &Path, pid: i32) -> Option<String>`
   - `pub async fn transcript_for(claude_dir: &Path, cwd: &str, created_sec: i64) -> Option<(PathBuf, f64)>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/collect/lookup.rs`:
 
@@ -921,7 +921,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Add to `crates/agent/src/collect/mod.rs`:
 
@@ -933,7 +933,7 @@ pub mod lookup;
 Run: `cargo test -p cdash-agent lookup`
 Expected: FAIL — `cannot find function 'session_file_for' in this scope`.
 
-- [ ] **Step 3: Write `Ctx`**
+- [x] **Step 3: Write `Ctx`**
 
 `crates/agent/src/collect/ctx.rs`:
 
@@ -1007,7 +1007,7 @@ impl Ctx {
 
 `Host` already owns a `Runner`, but it is not behind an `Arc` and the git cache's background task needs one. Constructing a second `Runner` over the same resolved PATH and the same `LogBuffer` keeps the log-once set per-runner — acceptable, and noted here so the duplicate is deliberate rather than accidental.
 
-- [ ] **Step 4: Write the lookups**
+- [x] **Step 4: Write the lookups**
 
 Prepend to `crates/agent/src/collect/lookup.rs`:
 
@@ -1081,12 +1081,12 @@ pub async fn transcript_for(
 
 If `is_none_or` is unavailable on the pinned toolchain, use `best.as_ref().map_or(true, |(_, b)| ms > *b)`.
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent lookup`
 Expected: PASS, 6 tests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/agent/src/collect/ctx.rs crates/agent/src/collect/lookup.rs crates/agent/src/collect/mod.rs
@@ -1116,7 +1116,7 @@ Checklist rows: **B4**, **D2**.
   - `pub async fn add_recent(file: &Path, p: &str) -> std::io::Result<Places>`
   - `pub async fn toggle_favorite(file: &Path, p: &str) -> std::io::Result<Places>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/collect/places.rs`:
 
@@ -1192,7 +1192,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Add to `crates/agent/src/collect/mod.rs`:
 
@@ -1203,7 +1203,7 @@ pub mod places;
 Run: `cargo test -p cdash-agent places`
 Expected: FAIL — `cannot find function 'push_recent' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/agent/src/collect/places.rs`:
 
@@ -1272,12 +1272,12 @@ pub async fn toggle_favorite(file: &Path, p: &str) -> std::io::Result<Places> {
 
 A wrongly-typed `recents` makes the whole document fail to deserialize, so both fields fall back together — the same outcome Node produced via its `try/catch`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent places`
 Expected: PASS, 6 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/agent/src/collect/places.rs crates/agent/src/collect/mod.rs
@@ -1305,7 +1305,7 @@ Checklist rows: **A7**, **B3**, **E10**.
   - `pub struct BrowseError { pub message: String }` with `pub fn status(&self) -> u16` returning 400
   - `pub async fn list_dirs(target: &str, show_hidden: bool) -> Result<Listing, BrowseError>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/collect/browse.rs`:
 
@@ -1389,7 +1389,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Add to `crates/agent/src/collect/mod.rs`:
 
@@ -1400,7 +1400,7 @@ pub mod browse;
 Run: `cargo test -p cdash-agent browse`
 Expected: FAIL — `cannot find function 'list_dirs' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/agent/src/collect/browse.rs`:
 
@@ -1501,12 +1501,12 @@ pub async fn list_dirs(target: &str, show_hidden: bool) -> Result<Listing, Brows
 
 If `std::path::absolute` or `ErrorKind::NotADirectory` are unavailable on the pinned toolchain, substitute `std::fs::canonicalize` (falling back to the input on error) and match `e.raw_os_error() == Some(20)` for `ENOTDIR` respectively — and note the substitution in the commit message.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent browse`
 Expected: PASS, 6 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/agent/src/collect/browse.rs crates/agent/src/collect/mod.rs
@@ -1536,7 +1536,7 @@ Checklist rows: **A1**, **A2**, **A3**, **A4**, **A5**.
   - `pub fn assert_effort(effort: &str) -> Result<(), BadRequest>`
   - `pub const MODELS: &[&str]`, `pub const EFFORTS: &[&str]`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/collect/validate.rs`:
 
@@ -1590,7 +1590,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Add to `crates/agent/src/collect/mod.rs`:
 
@@ -1601,7 +1601,7 @@ pub mod validate;
 Run: `cargo test -p cdash-agent validate`
 Expected: FAIL — `cannot find function 'assert_path' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/agent/src/collect/validate.rs`:
 
@@ -1676,12 +1676,12 @@ pub fn assert_effort(effort: &str) -> Result<(), BadRequest> {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent validate`
 Expected: PASS, 5 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/agent/src/collect/validate.rs crates/agent/src/collect/mod.rs
@@ -1714,7 +1714,7 @@ Checklist rows: **A6**, **B6**, **B7**, **C4**, **D1**, **D3**, **D4**, **D6**, 
   - `pub async fn kill_session(ctx: &Arc<Ctx>, name: &str) -> Result<(), BadRequest>`
   - `pub fn purge_session(ctx: &Arc<Ctx>, sid: &str) -> Result<(), BadRequest>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/collect/spawn.rs`:
 
@@ -1916,7 +1916,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Add to `crates/agent/src/collect/mod.rs`:
 
@@ -1927,7 +1927,7 @@ pub mod spawn;
 Run: `cargo test -p cdash-agent spawn`
 Expected: FAIL — `cannot find function 'tmux_name' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/agent/src/collect/spawn.rs`:
 
@@ -2168,12 +2168,12 @@ use super::validate::{
 
 `Runner` is imported for the test module's `Host` construction; if clippy flags it as unused in the non-test build, move the import into the `tests` module.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent spawn -- --test-threads=1`
 Expected: PASS, 13 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/agent/src/collect/spawn.rs crates/agent/src/collect/mod.rs
@@ -2198,7 +2198,7 @@ Checklist rows: **E1**, **E3**, **E4**, **E5**, **E11**.
   - `pub struct Session { … }` — the `/api/sessions` `running[]` entry, shared with Task 11
   - `pub async fn external_sessions(ctx: &Arc<Ctx>, rows: &[ProcRow], pane_pids: &HashSet<i32>, now_ms: f64) -> Vec<Session>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/collect/external.rs`:
 
@@ -2328,7 +2328,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Add to `crates/agent/src/collect/mod.rs`:
 
@@ -2339,7 +2339,7 @@ pub mod external;
 Run: `cargo test -p cdash-agent external`
 Expected: FAIL — `cannot find function 'external_sessions' in this scope`.
 
-- [ ] **Step 3: Make `GitStatus` serializable**
+- [x] **Step 3: Make `GitStatus` serializable**
 
 `Session.git` is `Option<GitStatus>` and `Session` is serialized straight into `/api/sessions`, but `GitStatus` was built by the previous plan with no `Serialize`. In `crates/agent/src/parse/git.rs`, add the import and extend the derive:
 
@@ -2366,7 +2366,7 @@ Its four field names — `branch`, `dirty`, `ahead`, `behind` — already match 
 Run: `cargo test -p cdash-agent git_status_serializes`
 Expected: PASS.
 
-- [ ] **Step 4: Write the implementation**
+- [x] **Step 4: Write the implementation**
 
 Prepend to `crates/agent/src/collect/external.rs`:
 
@@ -2523,12 +2523,12 @@ fn basename(p: &str) -> String {
 
 Remove the `Pane` and `PathBuf` imports if the compiler reports them unused here — they are listed because Task 11 shares this module's `Session` type.
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent external -- --test-threads=1`
 Expected: PASS, 9 tests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/agent/src/collect/external.rs crates/agent/src/collect/mod.rs crates/agent/src/parse/git.rs
@@ -2557,7 +2557,7 @@ Checklist rows: **B5**, **D9**, **E6**, **E7**, **E8**.
   - `pub const RESUMABLE_MAX: usize` = 20
   - `pub async fn collect_sessions(ctx: &Arc<Ctx>) -> SessionsResponse`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/collect/sessions.rs`:
 
@@ -2696,7 +2696,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Add to `crates/agent/src/collect/mod.rs`:
 
@@ -2707,7 +2707,7 @@ pub mod sessions;
 Run: `cargo test -p cdash-agent sessions`
 Expected: FAIL — `cannot find function 'collect_sessions' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/agent/src/collect/sessions.rs`:
 
@@ -2923,12 +2923,12 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>) -> SessionsResponse {
 
 `g.ts` is `f64` in `HistoryGroup`; `Resumable::ts` matches it so the JSON number is unchanged. Drop the unused `Path` import if the compiler objects.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent sessions -- --test-threads=1`
 Expected: PASS, 8 tests.
 
-- [ ] **Step 5: Ship the one-line UI change that `cpu: null` requires**
+- [x] **Step 5: Ship the one-line UI change that `cpu: null` requires**
 
 The Rust agent reports `cpu` as `null` until two samples are 200 ms apart. `public/app.js:162` interpolates it directly, so an unsampled session would render `cpu null%`. This is the single documented exception to "the pivot does not rewrite `public/`", and it ships **here**, with the change that introduces the null — not with the later UI step.
 
@@ -2944,12 +2944,12 @@ to:
         ${chipHtml}<span>cpu ${r.cpu ?? '—'}%</span><span class="sep">·</span><span>${fmtKb(r.rssKb)}</span>
 ```
 
-- [ ] **Step 6: Verify the UI change by hand**
+- [x] **Step 6: Verify the UI change by hand**
 
 Run: `grep -n "cpu \${r.cpu" public/app.js`
 Expected: one line, containing `?? '—'`.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/agent/src/collect/sessions.rs crates/agent/src/collect/mod.rs public/app.js
@@ -2969,7 +2969,7 @@ The plan's own closing argument. A control with no test is a control that will b
 - Consumes: everything.
 - Produces: an audited checklist and a green suite.
 
-- [ ] **Step 1: Audit every checklist row against a real test name**
+- [x] **Step 1: Audit every checklist row against a real test name**
 
 For each row in [the derived control checklist](#the-derived-control-checklist) whose "Ported in" column names a task in this plan, find the test that proves it and write the test's name into the row. Run this to list every test name available:
 
@@ -2979,7 +2979,7 @@ cargo test -p cdash-agent -- --list
 
 A row with no test is **not** closed by writing prose. Add the missing test, then update the row.
 
-- [ ] **Step 2: Confirm no row is unclaimed**
+- [x] **Step 2: Confirm no row is unclaimed**
 
 Run:
 
@@ -2989,12 +2989,12 @@ grep -c '^| [A-E][0-9]' docs/superpowers/plans/2026-08-14-agent-port-collect-and
 
 Expected: 41 (A×7, B×9, C×4, D×9, E×12). Then read the table and confirm every row's rightmost column names either a test or `**done**` with the prior plan's task. **No row may defer to a later step** — every control in the table is either already proven or proven by this plan.
 
-- [ ] **Step 3: Run the full suite**
+- [x] **Step 3: Run the full suite**
 
 Run: `cargo test --all --locked -- --test-threads=1`
 Expected: PASS. Single-threaded because the sampler's timing assertions and the temp-directory fixtures are sensitive to parallel execution.
 
-- [ ] **Step 4: Run the lint gate**
+- [x] **Step 4: Run the lint gate**
 
 Run: `cargo clippy --all-targets --locked -- -D warnings -D clippy::disallowed_types`
 Expected: exit 0.
@@ -3007,14 +3007,14 @@ grep -rn "allow(clippy::disallowed_types)" crates/
 
 Expected: exactly two lines, both in `host/path.rs` and `host/cmd.rs`. A third is a defect.
 
-- [ ] **Step 5: Confirm the Node suite still passes**
+- [x] **Step 5: Confirm the Node suite still passes**
 
 The Node tree is the parity reference and must remain runnable until step 5 retires it.
 
 Run: `npm test`
 Expected: PASS, 22 tests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add docs/superpowers/plans/2026-08-14-agent-port-collect-and-orchestration.md

@@ -56,7 +56,7 @@ Every spec test case lives here. The key set is a parameter, so none of them nee
   - `pub enum CfIdentity { User(String), ServiceToken }`
   - `pub fn verify_cf_jwt(token: &str, jwks: &Jwks, cfg: &CfConfig) -> Result<CfIdentity, String>`
 
-- [ ] **Step 1: Add the dependency**
+- [x] **Step 1: Add the dependency**
 
 ```toml
 jsonwebtoken = "9"
@@ -64,7 +64,7 @@ jsonwebtoken = "9"
 
 Version 9 deliberately: 11 requires a crypto-provider feature and panics without one.
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 `crates/agent/src/auth/cfaccess.rs` — the tests generate a keypair once via `openssl` at fixture time and build tokens from it.
 
@@ -307,14 +307,14 @@ mod tests {
 
 **This makes a third `#[allow]` site.** The global constraint says a third site is a defect — it means *at runtime*, where the time-box is the point. A `#[cfg(test)]` fixture runs no subprocess in the shipped binary. Task 5 asserts the runtime count is still exactly two.
 
-- [ ] **Step 3: Run tests to verify they fail**
+- [x] **Step 3: Run tests to verify they fail**
 
 Add `pub mod cfaccess;` to `crates/agent/src/auth/mod.rs`.
 
 Run: `cargo test -p cdash-agent auth::cfaccess`
 Expected: FAIL — `cannot find function 'verify_cf_jwt' in this scope`.
 
-- [ ] **Step 4: Write the implementation**
+- [x] **Step 4: Write the implementation**
 
 Prepend to `crates/agent/src/auth/cfaccess.rs`:
 
@@ -409,12 +409,12 @@ pub fn verify_cf_jwt(token: &str, jwks: &Jwks, cfg: &CfConfig) -> Result<CfIdent
 }
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent auth::cfaccess`
 Expected: PASS, 12 tests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/agent/src/auth/ crates/agent/Cargo.toml Cargo.lock
@@ -436,7 +436,7 @@ Holds the key set and refreshes it periodically. The fetcher is injected, so the
   - `pub struct JwksCache` with `new(url)`, `get() -> Option<Jwks>`, `refresh_due(now) -> bool`, `install(Jwks)`
   - `pub fn certs_url(team_domain: &str) -> String`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
     #[test]
@@ -477,7 +477,7 @@ Holds the key set and refreshes it periodically. The fetcher is injected, so the
     }
 ```
 
-- [ ] **Step 2: Write the implementation**
+- [x] **Step 2: Write the implementation**
 
 ```rust
 use std::sync::Mutex;
@@ -537,12 +537,12 @@ impl JwksCache {
 }
 ```
 
-- [ ] **Step 3: Run tests to verify they pass**
+- [x] **Step 3: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent auth::cfaccess`
 Expected: PASS, 16 tests.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add crates/agent/src/auth/cfaccess.rs
@@ -556,7 +556,7 @@ git commit -m "feat: JWKS cache that serves the last good key set through a fail
 **Files:**
 - Modify: `crates/agent/src/auth/layer.rs`, `crates/agent/src/auth/config.rs`, `crates/agent/src/http/serve.rs`
 
-- [ ] **Step 1: Extend `GuardState`**
+- [x] **Step 1: Extend `GuardState`**
 
 ```rust
     pub cf: Option<Arc<CfState>>,
@@ -571,7 +571,7 @@ pub struct CfState {
 }
 ```
 
-- [ ] **Step 2: Replace the `CfAccess` arm**
+- [x] **Step 2: Replace the `CfAccess` arm**
 
 ```rust
             GuardKind::CfAccess => st.cf.as_ref().is_some_and(|cf| {
@@ -595,7 +595,7 @@ pub struct CfState {
 
 The header must be read alongside the others near the top of `guard_mw`, since `req` is moved into `next.run`.
 
-- [ ] **Step 3: Boot config**
+- [x] **Step 3: Boot config**
 
 In `config_from_env`, when the chain includes `cf-access`, require `CDASH_CF_TEAM_DOMAIN` and `CDASH_CF_AUD` and fail boot naming whichever is missing — the same shape as `bearer` requiring `CDASH_TOKEN`.
 
@@ -610,12 +610,12 @@ Add to `AuthConfig::build`:
         }
 ```
 
-- [ ] **Step 4: Run the suite**
+- [x] **Step 4: Run the suite**
 
 Run: `cargo test --all --locked -- --test-threads=1`
 Expected: PASS. Existing tests run under `none`, `bearer` or `password` and are unaffected.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/agent/src/auth/ crates/agent/src/http/
@@ -629,7 +629,7 @@ git commit -m "feat: wire the cf-access guard leg, rejecting when no key set is 
 **Files:**
 - Modify: `README.md`
 
-- [ ] **Step 1: Document the state honestly**
+- [x] **Step 1: Document the state honestly**
 
 Add to the README's configuration section:
 
@@ -644,7 +644,7 @@ implementation detail. Until a fetcher is supplied, `CDASH_AUTH=cf-access`
 rejects every request.
 ```
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add README.md
@@ -657,7 +657,7 @@ git commit -m "docs: record that cf-access verification is complete but the JWKS
 
 The test fixture generates an RSA keypair with `openssl`, which needs a third `#[allow(clippy::disallowed_types)]`. That exemption is `#[cfg(test)]` and must not leak into the shipped binary.
 
-- [ ] **Step 1: Assert the runtime count**
+- [x] **Step 1: Assert the runtime count**
 
 ```bash
 grep -rn "allow(clippy::disallowed_types)" crates/ --include=*.rs
@@ -665,7 +665,7 @@ grep -rn "allow(clippy::disallowed_types)" crates/ --include=*.rs
 
 Expected: exactly three lines — `host/path.rs`, `host/cmd.rs`, and the `#[cfg(test)]` module in `auth/cfaccess.rs`. Confirm the third is immediately above a `#[cfg(test)] mod tests`.
 
-- [ ] **Step 2: Run the gate**
+- [x] **Step 2: Run the gate**
 
 ```bash
 cargo test --all --locked -- --test-threads=1

@@ -54,7 +54,7 @@ Every other piece depends on knowing whether a password was correct.
   - `pub fn verify_password(password: &str, h: &ScryptHash) -> bool` — constant-time
   - `pub const MIN_PASSWORD_LEN: usize` = 12
 
-- [ ] **Step 1: Add the dependencies and the KDF build profile**
+- [x] **Step 1: Add the dependencies and the KDF build profile**
 
 In `crates/agent/Cargo.toml` under `[dependencies]`:
 
@@ -82,7 +82,7 @@ opt-level = 3
 opt-level = 3
 ```
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 `crates/agent/src/auth/password.rs`:
 
@@ -145,7 +145,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run tests to verify they fail**
+- [x] **Step 3: Run tests to verify they fail**
 
 Add to `crates/agent/src/auth/mod.rs`:
 
@@ -156,7 +156,7 @@ pub mod password;
 Run: `cargo test -p cdash-agent auth::password`
 Expected: FAIL — `cannot find function 'hash_password' in this scope`.
 
-- [ ] **Step 4: Write the implementation**
+- [x] **Step 4: Write the implementation**
 
 Prepend to `crates/agent/src/auth/password.rs`:
 
@@ -252,12 +252,12 @@ pub fn verify_password(password: &str, h: &ScryptHash) -> bool {
 }
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent auth::password`
 Expected: PASS, 5 tests, in a couple of seconds. **If a single test takes more than ~2 s, the build-profile block did not land** — check it is at the workspace root, not in `crates/agent/`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/agent/src/auth/ crates/agent/Cargo.toml Cargo.toml Cargo.lock
@@ -279,7 +279,7 @@ An opaque id in a map. No algorithm to influence, expiry is a number the server 
   - `pub const SESSION_TTL: Duration` = 12 h, `pub const SID_BYTES: usize` = 32
   - `pub struct Sessions` with `new`, `mint() -> String`, `is_valid(&str) -> bool`, `revoke(&str)`, `len()`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/auth/session.rs`:
 
@@ -343,14 +343,14 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Add `pub mod session;` to `crates/agent/src/auth/mod.rs`.
 
 Run: `cargo test -p cdash-agent auth::session`
 Expected: FAIL — `cannot find type 'Sessions' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/agent/src/auth/session.rs`:
 
@@ -421,12 +421,12 @@ impl Sessions {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent auth::session`
 Expected: PASS, 6 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/agent/src/auth/
@@ -450,7 +450,7 @@ The one piece of hand-rolled parsing on attacker-influenced input. It is exempt 
   - `pub fn set_cookie(name: &str, sid: &str, ttl: Duration, secure: bool) -> String`
   - `pub fn clear_cookie(name: &str, secure: bool) -> String`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/auth/cookie.rs`:
 
@@ -541,14 +541,14 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Add `pub mod cookie;` to `crates/agent/src/auth/mod.rs`.
 
 Run: `cargo test -p cdash-agent auth::cookie`
 Expected: FAIL — `cannot find value 'COOKIE_NAME_SECURE' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/agent/src/auth/cookie.rs`:
 
@@ -594,12 +594,12 @@ pub fn clear_cookie(name: &str, secure: bool) -> String {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent auth::cookie`
 Expected: PASS, 8 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/agent/src/auth/
@@ -622,7 +622,7 @@ Rules B and C. Rule A is client-side and out of scope, as recorded above.
   - `pub fn delay_for(distinct_failures: u32) -> Duration` — pure
   - `pub struct Throttle` with `new(pending_max)`, `admit() -> Option<Guard>`, `note_failure(&str)`, `note_success()`, `distinct_failures()`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/auth/throttle.rs`:
 
@@ -718,14 +718,14 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Add `pub mod throttle;` to `crates/agent/src/auth/mod.rs`.
 
 Run: `cargo test -p cdash-agent auth::throttle`
 Expected: FAIL — `cannot find function 'delay_for' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/agent/src/auth/throttle.rs`:
 
@@ -860,12 +860,12 @@ impl Throttle {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent auth::throttle`
 Expected: PASS, 8 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/agent/src/auth/
@@ -887,7 +887,7 @@ A misconfiguration that cannot be diagnosed from its symptom must be refused at 
   - `pub struct PasswordPolicy { pub hash: ScryptHash, pub secure_cookie: bool }`
   - `pub fn decide(hash_env: Option<&str>, bind: IpAddr, public_url: Option<&str>, allow_insecure: bool) -> Result<PasswordPolicy, String>` — pure
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/auth/boot.rs`:
 
@@ -956,14 +956,14 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Add `pub mod boot;` to `crates/agent/src/auth/mod.rs`.
 
 Run: `cargo test -p cdash-agent auth::boot`
 Expected: FAIL — `cannot find function 'decide' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/agent/src/auth/boot.rs`:
 
@@ -1017,12 +1017,12 @@ pub fn decide(
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent auth::boot`
 Expected: PASS, 7 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/agent/src/auth/
@@ -1045,7 +1045,7 @@ Wires the four pieces together: `/login`, `POST /api/login`, `POST /api/logout`,
   - `pub const LOGIN_HTML: &str`
   - `pub async fn get_login() -> Response`, `pub async fn post_login(...) -> Response`, `pub async fn post_logout(...) -> Response`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/auth/login.rs`:
 
@@ -1077,14 +1077,14 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Add `pub mod login;` to `crates/agent/src/auth/mod.rs`.
 
 Run: `cargo test -p cdash-agent auth::login`
 Expected: FAIL — `cannot find value 'LOGIN_HTML' in this scope`.
 
-- [ ] **Step 3: Write the page and the routes**
+- [x] **Step 3: Write the page and the routes**
 
 Prepend to `crates/agent/src/auth/login.rs`:
 
@@ -1238,7 +1238,7 @@ pub async fn post_logout(
 }
 ```
 
-- [ ] **Step 4: Wire the guard leg and the routes**
+- [x] **Step 4: Wire the guard leg and the routes**
 
 In `crates/agent/src/auth/layer.rs`, extend `UNAUTH_PATHS` to the spec's three and give `GuardState` the password state:
 
@@ -1311,12 +1311,12 @@ and in `router`, when a password policy exists:
 
 `routes::post_logout` is a thin wrapper that pulls `PasswordState` out of `Ctx`; add it to `crates/agent/src/http/routes.rs`.
 
-- [ ] **Step 5: Run the whole suite**
+- [x] **Step 5: Run the whole suite**
 
 Run: `cargo test -p cdash-agent -- --test-threads=1`
 Expected: PASS. Every existing test runs under `CDASH_AUTH=none`, where the guard is a pass-through and `password` is `None`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/agent/src/auth/ crates/agent/src/http/
@@ -1332,7 +1332,7 @@ A subcommand, reading from the terminal with echo suppressed. Never writes a fil
 **Files:**
 - Modify: `crates/agent/src/main.rs`
 
-- [ ] **Step 1: Write the implementation**
+- [x] **Step 1: Write the implementation**
 
 In `crates/agent/src/main.rs`, before the server starts:
 
@@ -1394,7 +1394,7 @@ fn prompt_hidden(prompt: &str) -> Result<String, String> {
 
 `rustix` needs the `termios` feature: in `crates/agent/Cargo.toml`, `rustix = { version = "1", features = ["fs", "termios"] }`.
 
-- [ ] **Step 2: Verify by hand**
+- [x] **Step 2: Verify by hand**
 
 Run:
 
@@ -1418,7 +1418,7 @@ Expected: 401, 200, and a `Set-Cookie` carrying `__Host-cdash_sid`, `HttpOnly`, 
 
 Record the observed output in the commit message.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add crates/agent/src/main.rs crates/agent/Cargo.toml Cargo.lock
@@ -1432,7 +1432,7 @@ git commit -m "feat: set-password subcommand with echo suppression"
 **Files:**
 - Create: `crates/agent/tests/password_integration.rs`
 
-- [ ] **Step 1: Write the tests**
+- [x] **Step 1: Write the tests**
 
 The suite mirrors `auth_integration.rs`'s raw-HTTP helper. Assertions, each named for its spec number:
 
@@ -1445,16 +1445,16 @@ The suite mirrors `auth_integration.rs`'s raw-HTTP helper. Assertions, each name
 
 Plus the spec's assertion 5 with its **exact** pair: boot `CDASH_AUTH=bearer,password` and assert 401 with a valid bearer alone, 401 with a valid cookie alone, 200 with both. 6a pinned this with `bearer,trusted-proxy`; this replaces the substitute.
 
-- [ ] **Step 2: Run and iterate**
+- [x] **Step 2: Run and iterate**
 
 Run: `cargo test -p cdash-agent --test password_integration -- --test-threads=1`
 Expected: PASS. A failure here is a guard defect, not a test to relax.
 
-- [ ] **Step 3: Verify the CSRF assertion is falsifiable**
+- [x] **Step 3: Verify the CSRF assertion is falsifiable**
 
 Temporarily change `post_kill` to take `body: String` instead of `Json<NameBody>` and re-run: assertion 8 must fail with 200 instead of 415. Revert.
 
-- [ ] **Step 4: Full gate and commit**
+- [x] **Step 4: Full gate and commit**
 
 ```bash
 cargo test --all --locked -- --test-threads=1

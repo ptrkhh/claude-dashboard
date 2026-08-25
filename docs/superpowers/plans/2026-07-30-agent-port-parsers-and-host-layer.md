@@ -38,7 +38,7 @@ The lint gate lands first because it is a required gate for every later task, an
 - Consumes: nothing.
 - Produces: crate `cdash_agent`; the command `cargo test -p cdash-agent`; the gate `cargo clippy --all-targets -- -D warnings -D clippy::disallowed_types`.
 
-- [ ] **Step 1: Create the workspace root**
+- [x] **Step 1: Create the workspace root**
 
 `Cargo.toml`:
 
@@ -48,7 +48,7 @@ members = ["crates/agent"]
 resolver = "2"
 ```
 
-- [ ] **Step 2: Create the agent crate manifest**
+- [x] **Step 2: Create the agent crate manifest**
 
 `crates/agent/Cargo.toml`:
 
@@ -76,7 +76,7 @@ rustix = { version = "1", features = ["fs"] }
 tokio = { version = "1", features = ["process", "time", "rt", "macros"] }
 ```
 
-- [ ] **Step 3: Create the library and binary entry points**
+- [x] **Step 3: Create the library and binary entry points**
 
 `crates/agent/src/lib.rs`:
 
@@ -94,7 +94,7 @@ fn main() {
 
 Create `crates/agent/src/parse/mod.rs` as an empty file for now — later tasks add modules to it.
 
-- [ ] **Step 4: Add the clippy gate configuration**
+- [x] **Step 4: Add the clippy gate configuration**
 
 `clippy.toml`:
 
@@ -102,7 +102,7 @@ Create `crates/agent/src/parse/mod.rs` as an empty file for now — later tasks 
 disallowed-types = ["std::process::Command", "tokio::process::Command"]
 ```
 
-- [ ] **Step 5: Add CI running both the tests and the gate**
+- [x] **Step 5: Add CI running both the tests and the gate**
 
 `.github/workflows/ci.yml`:
 
@@ -121,7 +121,7 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings -D clippy::disallowed_types
 ```
 
-- [ ] **Step 6: Verify the crate builds and the gate runs**
+- [x] **Step 6: Verify the crate builds and the gate runs**
 
 Run: `cargo test --all`
 Expected: PASS, 0 tests.
@@ -129,7 +129,7 @@ Expected: PASS, 0 tests.
 Run: `cargo clippy --all-targets -- -D warnings -D clippy::disallowed_types`
 Expected: no warnings, exit 0.
 
-- [ ] **Step 7: Verify the gate actually fails on a bypass**
+- [x] **Step 7: Verify the gate actually fails on a bypass**
 
 A gate nobody has seen fail is not known to work. Temporarily add to `crates/agent/src/main.rs`:
 
@@ -145,7 +145,7 @@ Expected: FAIL with `error: use of a disallowed type 'std::process::Command'`.
 
 Then delete `bypass()` and re-run; expected: exit 0.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add Cargo.toml crates/agent/Cargo.toml crates/agent/src/lib.rs crates/agent/src/main.rs crates/agent/src/parse/mod.rs clippy.toml .github/workflows/ci.yml
@@ -169,7 +169,7 @@ Ports `lib/sessions.js:1-35`. Node's `groupHistory` sorts newest-first, caps at 
   - `pub struct HistoryGroup { pub sid: String, pub cwd: Option<String>, pub ts: i64, pub prompts: Vec<String> }`
   - `pub fn group_history(jsonl: &str) -> Vec<HistoryGroup>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/parse/history.rs`:
 
@@ -216,12 +216,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p cdash-agent history`
 Expected: FAIL — `cannot find function 'usable_prompts' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/agent/src/parse/history.rs`:
 
@@ -321,17 +321,17 @@ Add to `crates/agent/src/parse/mod.rs`:
 pub mod history;
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent history`
 Expected: PASS, 3 tests.
 
-- [ ] **Step 5: Run the lint gate**
+- [x] **Step 5: Run the lint gate**
 
 Run: `cargo clippy --all-targets -- -D warnings -D clippy::disallowed_types`
 Expected: exit 0.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/agent/src/parse/history.rs crates/agent/src/parse/mod.rs
@@ -356,7 +356,7 @@ Ports `lib/sessions.js:37-51`.
   - `pub fn parse_transcript(jsonl: &str) -> Transcript`
   - `pub fn parse_rc_file(json: &str) -> Option<String>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/parse/transcript.rs`:
 
@@ -414,12 +414,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p cdash-agent transcript`
 Expected: FAIL — `cannot find function 'parse_transcript' in this scope`.
 
-- [ ] **Step 3: Make `parse_lines` shareable**
+- [x] **Step 3: Make `parse_lines` shareable**
 
 In `crates/agent/src/parse/history.rs`, change the signature from `fn parse_lines` to:
 
@@ -427,7 +427,7 @@ In `crates/agent/src/parse/history.rs`, change the signature from `fn parse_line
 pub(crate) fn parse_lines<T: for<'de> Deserialize<'de>>(text: &str) -> Vec<T> {
 ```
 
-- [ ] **Step 4: Write the implementation**
+- [x] **Step 4: Write the implementation**
 
 Prepend to `crates/agent/src/parse/transcript.rs`:
 
@@ -519,12 +519,12 @@ Add to `crates/agent/src/parse/mod.rs`:
 pub mod transcript;
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent transcript`
 Expected: PASS, 4 tests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/agent/src/parse/transcript.rs crates/agent/src/parse/mod.rs crates/agent/src/parse/history.rs
@@ -550,7 +550,7 @@ This changes the tmux format string, which is consumed by a later plan. The form
   - `pub struct Pane { pub name: String, pub pid: i32, pub path: String, pub created: i64 }`
   - `pub fn parse_tmux_panes(out: &str) -> Vec<Pane>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/parse/tmux.rs`:
 
@@ -598,12 +598,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p cdash-agent tmux`
 Expected: FAIL — `cannot find function 'parse_tmux_panes' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/agent/src/parse/tmux.rs`:
 
@@ -650,12 +650,12 @@ Add to `crates/agent/src/parse/mod.rs`:
 pub mod tmux;
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent tmux`
 Expected: PASS, 4 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/agent/src/parse/tmux.rs crates/agent/src/parse/mod.rs
@@ -680,7 +680,7 @@ Ports `lib/sessions.js:60-73`.
   - `pub fn parse_git_status(out: &str) -> GitStatus`
   - `pub fn project_dir_name(cwd: &str) -> String`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/parse/git.rs`:
 
@@ -735,12 +735,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p cdash-agent -- git paths`
 Expected: FAIL — `cannot find function 'parse_git_status' in this scope`.
 
-- [ ] **Step 3: Write the implementations**
+- [x] **Step 3: Write the implementations**
 
 Prepend to `crates/agent/src/parse/git.rs`:
 
@@ -811,12 +811,12 @@ pub mod git;
 pub mod paths;
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent`
 Expected: PASS, all tests including the 5 new ones.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/agent/src/parse/git.rs crates/agent/src/parse/paths.rs crates/agent/src/parse/mod.rs
@@ -841,7 +841,7 @@ Ports `lib/stats.js:3-23`. The walk survives as logic; its input becomes typed r
   - `pub struct TreeUsage { pub cpu: f32, pub rss_kb: u64 }`
   - `pub fn proc_tree_usage(rows: &[ProcRow], root_pid: i32) -> TreeUsage`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/host/proc.rs`:
 
@@ -887,12 +887,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p cdash-agent proc`
 Expected: FAIL — `cannot find function 'proc_tree_usage' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/agent/src/host/proc.rs`:
 
@@ -960,12 +960,12 @@ Add to `crates/agent/src/lib.rs`:
 pub mod host;
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent proc`
 Expected: PASS, 3 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/agent/src/host/mod.rs crates/agent/src/host/proc.rs crates/agent/src/lib.rs
@@ -988,7 +988,7 @@ The subprocess helper in Task 9 needs a place to write its log-once failures, an
   - `pub struct LogBuffer` with `pub fn new() -> Self`, `pub fn push(&self, line: impl AsRef<str>)`, `pub fn lines(&self) -> Vec<String>`
   - `LogBuffer` is `Send + Sync` and cheap to clone-by-reference (`Arc` it at the call site).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/host/log.rs`:
 
@@ -1022,12 +1022,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p cdash-agent log`
 Expected: FAIL — `cannot find type 'LogBuffer' in this scope`.
 
-- [ ] **Step 3: Add the time-formatting dependency**
+- [x] **Step 3: Add the time-formatting dependency**
 
 In `crates/agent/Cargo.toml`, add under `[dependencies]`:
 
@@ -1035,7 +1035,7 @@ In `crates/agent/Cargo.toml`, add under `[dependencies]`:
 time = { version = "0.3", features = ["formatting", "local-offset"] }
 ```
 
-- [ ] **Step 4: Write the implementation**
+- [x] **Step 4: Write the implementation**
 
 Prepend to `crates/agent/src/host/log.rs`:
 
@@ -1094,12 +1094,12 @@ Add to `crates/agent/src/host/mod.rs`:
 pub mod log;
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent log`
 Expected: PASS, 2 tests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/agent/src/host/log.rs crates/agent/src/host/mod.rs crates/agent/Cargo.toml
@@ -1124,7 +1124,7 @@ This task uses `tokio::process::Command` directly and therefore carries the `#[a
   - `pub async fn probe_path(log: &LogBuffer) -> String` — the resolved PATH value
   - `pub fn compose_path(probed: Option<&str>, inherited: &str) -> String` — pure, testable
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/host/path.rs`:
 
@@ -1172,12 +1172,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p cdash-agent path`
 Expected: FAIL — `cannot find function 'compose_path' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/agent/src/host/path.rs`:
 
@@ -1250,12 +1250,12 @@ Add to `crates/agent/src/host/mod.rs`:
 pub mod path;
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent path`
 Expected: PASS, 5 tests.
 
-- [ ] **Step 5: Verify the timeout path by hand**
+- [x] **Step 5: Verify the timeout path by hand**
 
 Run:
 
@@ -1265,7 +1265,7 @@ SHELL=/bin/sh cargo test -p cdash-agent path -- --nocapture
 
 Expected: the async test passes. If a `PATH probe failed` line appears on stderr, that is the fallback working, not a failure.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/agent/src/host/path.rs crates/agent/src/host/mod.rs
@@ -1289,7 +1289,7 @@ The single place a subprocess may be constructed. Carries the resolved PATH, the
   - `pub async fn run(&self, program: &str, args: &[&str], key: &str) -> String` — stdout on success, empty string on any failure, logging once per `key`
   - `pub async fn run_with_timeout(&self, program: &str, args: &[&str], key: &str, timeout: Duration) -> String`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/host/cmd.rs`:
 
@@ -1358,12 +1358,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p cdash-agent cmd`
 Expected: FAIL — `cannot find type 'Runner' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/agent/src/host/cmd.rs`:
 
@@ -1450,17 +1450,17 @@ Add to `crates/agent/src/host/mod.rs`:
 pub mod cmd;
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent cmd`
 Expected: PASS, 6 tests.
 
-- [ ] **Step 5: Run the lint gate**
+- [x] **Step 5: Run the lint gate**
 
 Run: `cargo clippy --all-targets -- -D warnings -D clippy::disallowed_types`
 Expected: exit 0. Only `host/cmd.rs` and `host/path.rs` carry `#[allow(clippy::disallowed_types)]`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/agent/src/host/cmd.rs crates/agent/src/host/mod.rs
@@ -1483,7 +1483,7 @@ A pure function over a PATH string. Feeds `/api/hostinfo`'s `missing: [...]` in 
   - `pub const REQUIRED_BINARIES: &[&str]` — exactly `["tmux", "claude", "git"]`
   - `pub fn missing_binaries(path: &str) -> Vec<String>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/host/probe.rs`:
 
@@ -1537,12 +1537,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p cdash-agent probe`
 Expected: FAIL — `cannot find function 'missing_binaries' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/agent/src/host/probe.rs`:
 
@@ -1587,12 +1587,12 @@ Add to `crates/agent/src/host/mod.rs`:
 pub mod probe;
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent probe`
 Expected: PASS, 4 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/agent/src/host/probe.rs crates/agent/src/host/mod.rs
@@ -1617,7 +1617,7 @@ Field names and units must match Node's output exactly: `{ mount, freeKb, totalK
   - `pub struct DiskUsage { pub mount: String, pub free_kb: u64, pub total_kb: u64 }` (serialized as `mount`, `freeKb`, `totalKb`)
   - `pub fn disk_usage(mount: &str) -> Option<DiskUsage>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/host/disk.rs`:
 
@@ -1660,12 +1660,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p cdash-agent disk`
 Expected: FAIL — `cannot find function 'disk_usage' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/agent/src/host/disk.rs`:
 
@@ -1702,14 +1702,14 @@ Add to `crates/agent/src/host/mod.rs`:
 pub mod disk;
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent disk`
 Expected: PASS, 4 tests.
 
 If `f_frsize` or `f_bavail` do not resolve, check the `rustix::fs::StatVfs` field names for the pinned version and adjust — the semantics wanted are fragment size, blocks available to a non-privileged user, and total blocks.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/agent/src/host/disk.rs crates/agent/src/host/mod.rs
@@ -1736,7 +1736,7 @@ git commit -m "feat: disk stats via statvfs, retiring df column parsing"
   - `pub fn tree_usage(&mut self, root_pid: i32) -> SampledUsage`
   - `MIN_CPU_INTERVAL: Duration` = 200 ms
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/host/sample.rs`:
 
@@ -1787,12 +1787,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p cdash-agent sample`
 Expected: FAIL — `cannot find type 'Sampler' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/agent/src/host/sample.rs`:
 
@@ -1891,12 +1891,12 @@ Add to `crates/agent/src/host/mod.rs`:
 pub mod sample;
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent sample -- --test-threads=1`
 Expected: PASS, 4 tests. Single-threaded because the timing assertions are sensitive to scheduler noise under parallel test execution.
 
-- [ ] **Step 5: Verify the deflation claim rather than trusting it**
+- [x] **Step 5: Verify the deflation claim rather than trusting it**
 
 Create `crates/agent/examples/cpu_sampling.rs`:
 
@@ -1920,7 +1920,7 @@ Expected: `first: None`, `after 50ms: None` (no re-sample was due), `after 250ms
 
 Record the observed values in the commit message. If `after 250ms` is `None`, the refresh predicate is wrong and Task 12 is not complete.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/agent/src/host/sample.rs crates/agent/src/host/mod.rs crates/agent/examples/cpu_sampling.rs
@@ -1945,7 +1945,7 @@ A single constructor so the next plan has one entry point, plus a full-suite run
   - `pub async fn init() -> Host`
   - `pub fn missing(&self) -> Vec<String>` — re-probes on demand, per UX-5; does NOT return a boot-time cache
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/agent/src/host/init.rs`:
 
@@ -1974,12 +1974,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p cdash-agent init`
 Expected: FAIL — `cannot find function 'init' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/agent/src/host/init.rs`:
 
@@ -2024,7 +2024,7 @@ Add to `crates/agent/src/host/mod.rs`:
 pub mod init;
 ```
 
-- [ ] **Step 4: Make the binary exercise it**
+- [x] **Step 4: Make the binary exercise it**
 
 `crates/agent/src/main.rs`:
 
@@ -2051,7 +2051,7 @@ Add `rt-multi-thread` to the tokio features in `crates/agent/Cargo.toml`:
 tokio = { version = "1", features = ["process", "time", "rt", "rt-multi-thread", "macros"] }
 ```
 
-- [ ] **Step 5: Run the full suite and the gate**
+- [x] **Step 5: Run the full suite and the gate**
 
 Run: `cargo test --all -- --test-threads=1`
 Expected: PASS, all tests from Tasks 2–13.
@@ -2062,7 +2062,7 @@ Expected: exit 0.
 Run: `cargo run -p cdash-agent`
 Expected: prints a version, a PATH containing `/usr/local/bin`, and either "all required binaries found" or a `missing:` line naming real absences.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/agent/src/host/init.rs crates/agent/src/host/mod.rs crates/agent/src/main.rs crates/agent/Cargo.toml

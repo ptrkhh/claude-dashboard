@@ -56,7 +56,7 @@ The step upstream of the composer. A parse that silently drops a leg leaves ever
   - `pub struct AuthConfig { pub guards: Vec<GuardKind>, pub token: Option<String>, pub proxy_header: String, pub proxy_allow: Vec<IpAddr> }`
   - `pub fn config_from_env() -> Result<AuthConfig, String>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/auth/config.rs`:
 
@@ -123,7 +123,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 `crates/agent/src/auth/mod.rs`:
 
@@ -140,7 +140,7 @@ pub mod auth;
 Run: `cargo test -p cdash-agent auth::config`
 Expected: FAIL — `cannot find function 'parse_auth' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/agent/src/auth/config.rs`:
 
@@ -233,12 +233,12 @@ pub fn config_from_env() -> Result<AuthConfig, String> {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent auth::config`
 Expected: PASS, 6 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/agent/src/auth/ crates/agent/src/lib.rs
@@ -262,7 +262,7 @@ Two pure functions over request-derived values, so both are testable without a s
   - `pub fn check_bearer(header: Option<&str>, token: &str) -> bool`
   - `pub fn check_trusted_proxy(peer: Option<IpAddr>, identity: Option<&str>, allow: &[IpAddr]) -> bool`
 
-- [ ] **Step 1: Add the constant-time compare dependency**
+- [x] **Step 1: Add the constant-time compare dependency**
 
 In `crates/agent/Cargo.toml`:
 
@@ -270,7 +270,7 @@ In `crates/agent/Cargo.toml`:
 subtle = "2"
 ```
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 `crates/agent/src/auth/guards.rs`:
 
@@ -321,7 +321,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run tests to verify they fail**
+- [x] **Step 3: Run tests to verify they fail**
 
 Add to `crates/agent/src/auth/mod.rs`:
 
@@ -332,7 +332,7 @@ pub mod guards;
 Run: `cargo test -p cdash-agent auth::guards`
 Expected: FAIL — `cannot find function 'check_bearer' in this scope`.
 
-- [ ] **Step 4: Write the implementation**
+- [x] **Step 4: Write the implementation**
 
 Prepend to `crates/agent/src/auth/guards.rs`:
 
@@ -369,12 +369,12 @@ pub fn check_trusted_proxy(
 }
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent auth::guards`
 Expected: PASS, 5 tests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/agent/src/auth/ crates/agent/Cargo.toml Cargo.lock
@@ -400,7 +400,7 @@ The structural change. Everything except three routes goes behind a layer, so a 
   - `guarded_routes!` — the macro emitting both the guarded router and `GUARDED_PATHS`
   - `pub const UNAUTH_PATHS: &[&str]` — exactly the three exceptions
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/auth/layer.rs`:
 
@@ -430,7 +430,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Add to `crates/agent/src/auth/mod.rs`:
 
@@ -441,7 +441,7 @@ pub mod layer;
 Run: `cargo test -p cdash-agent auth::layer`
 Expected: FAIL — `cannot find value 'UNAUTH_PATHS' in this scope`.
 
-- [ ] **Step 3: Write the guard layer**
+- [x] **Step 3: Write the guard layer**
 
 Prepend to `crates/agent/src/auth/layer.rs`:
 
@@ -520,7 +520,7 @@ pub async fn guard_mw(
 
 `GuardKind` needs `Debug` for the log line — it already derives it.
 
-- [ ] **Step 4: Write the route macro and split the router**
+- [x] **Step 4: Write the route macro and split the router**
 
 Add to `crates/agent/src/auth/layer.rs`:
 
@@ -599,7 +599,7 @@ set in `from_env` from `crate::auth::config::config_from_env()`, and in `serve`:
     });
 ```
 
-- [ ] **Step 5: Update every existing test's `cfg_for`**
+- [x] **Step 5: Update every existing test's `cfg_for`**
 
 `Config` gained a field, so the helper in `crates/agent/src/http/serve.rs` needs:
 
@@ -610,12 +610,12 @@ set in `from_env` from `crate::auth::config::config_from_env()`, and in `serve`:
             ),
 ```
 
-- [ ] **Step 6: Run the whole suite**
+- [x] **Step 6: Run the whole suite**
 
 Run: `cargo test -p cdash-agent -- --test-threads=1`
 Expected: PASS. Every existing HTTP test runs under `CDASH_AUTH=none`, which is a pass-through, so none of them should change behaviour. **If any existing test now 401s, the pass-through is wrong** — fix that before continuing.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/agent/src/auth/ crates/agent/src/http/
@@ -635,7 +635,7 @@ Authenticated. Delivers the macOS setup story: when `tmux` is missing the UI sho
 - Consumes: `Host::missing` (step-2 plan, Task 13).
 - Produces: `pub async fn get_hostinfo(State<Arc<Ctx>>) -> Response`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to the `tests` module in `crates/agent/src/http/routes.rs`:
 
@@ -660,12 +660,12 @@ Add to the `tests` module in `crates/agent/src/http/routes.rs`:
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p cdash-agent hostinfo`
 Expected: FAIL — 404, because the route does not exist yet.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Add to `crates/agent/src/http/routes.rs`:
 
@@ -686,12 +686,12 @@ pub async fn get_hostinfo(State(ctx): State<Arc<Ctx>>) -> Response {
 
 The route is already declared in the `guarded_routes!` invocation from Task 3.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent hostinfo`
 Expected: PASS, 2 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/agent/src/http/routes.rs
@@ -711,7 +711,7 @@ Spec assertions 1–5. The spec calls the bypass test the highest-value test in 
 - Consumes: `serve`, `Config`, `AuthConfig`, `GUARDED_PATHS`, `UNAUTH_PATHS`.
 - Produces: the suite.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/tests/auth_integration.rs`:
 
@@ -880,26 +880,26 @@ async fn under_none_no_route_is_rejected() {
 }
 ```
 
-- [ ] **Step 2: Export what the suite imports**
+- [x] **Step 2: Export what the suite imports**
 
 An integration test links the crate as a library, so `GUARDED_PATHS` must be public from `http::serve`, and `Config`'s fields must be public (they already are).
 
 Run: `cargo test -p cdash-agent --test auth_integration`
 Expected: FAIL to compile — unresolved imports — then FAIL on assertions until Task 3's layer is in place.
 
-- [ ] **Step 3: Make the suite pass**
+- [x] **Step 3: Make the suite pass**
 
 No new production code should be required: Tasks 1–4 provide everything. If an assertion fails, the guard is wrong — fix the guard, not the assertion. Two failures to expect and what they mean:
 
 - **Assertion 3 returns 200 for `/index.html`** — the static service was attached outside the guarded half.
 - **Assertion 2 returns 415 rather than 401 for a POST** — the guard layer runs after the body extractor. The layer must reject before extraction; `from_fn_with_state` applied with `.layer()` on the router runs before handler extractors, so check the layer is on the guarded router rather than on an individual route.
 
-- [ ] **Step 4: Run the suite**
+- [x] **Step 4: Run the suite**
 
 Run: `cargo test -p cdash-agent --test auth_integration -- --test-threads=1`
 Expected: PASS, 6 tests.
 
-- [ ] **Step 5: Verify the bypass test actually fails on a bypass**
+- [x] **Step 5: Verify the bypass test actually fails on a bypass**
 
 A gate nobody has seen fail is not known to work. Temporarily add an unguarded route to the **unauthenticated** half in `crates/agent/src/http/serve.rs`:
 
@@ -914,13 +914,13 @@ Expected: **FAIL** — `GET /api/sessions-oops was reachable unauthenticated`.
 
 Remove both lines and re-run; expected: PASS.
 
-- [ ] **Step 6: Run the full gate**
+- [x] **Step 6: Run the full gate**
 
 Run: `cargo test --all --locked -- --test-threads=1`
 Run: `cargo clippy --all-targets --locked -- -D warnings -D clippy::disallowed_types`
 Expected: PASS and exit 0.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/agent/tests/auth_integration.rs

@@ -75,7 +75,7 @@ The skeleton, plus the one route that has no dependencies. `serve` returning the
   - `pub fn router(ctx: Arc<Ctx>, public_dir: &Path) -> Router`
   - `pub async fn serve(cfg: Config) -> std::io::Result<Bound>`
 
-- [ ] **Step 1: Add the dependencies**
+- [x] **Step 1: Add the dependencies**
 
 In `crates/agent/Cargo.toml`, under `[dependencies]`:
 
@@ -86,7 +86,7 @@ tower-http = { version = "0.7", features = ["fs"] }
 
 `Cargo.lock` is committed and CI builds `--locked`, so the exact resolved versions are pinned there rather than by a `=` requirement.
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 `crates/agent/src/http/serve.rs`:
 
@@ -189,7 +189,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run tests to verify they fail**
+- [x] **Step 3: Run tests to verify they fail**
 
 Create `crates/agent/src/http/mod.rs`:
 
@@ -206,7 +206,7 @@ pub mod http;
 Run: `cargo test -p cdash-agent http::`
 Expected: FAIL — `cannot find type 'Config' in this scope`.
 
-- [ ] **Step 4: Write the implementation**
+- [x] **Step 4: Write the implementation**
 
 Prepend to `crates/agent/src/http/serve.rs`:
 
@@ -288,12 +288,12 @@ pub async fn serve(cfg: Config) -> std::io::Result<Bound> {
 
 `Router::with_state(ctx)` types the router as `Router<()>` once every handler takes `State<Arc<Ctx>>`; the health handler takes no state, which is allowed.
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent http:: -- --test-threads=1`
 Expected: PASS, 3 tests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/agent/src/http/ crates/agent/src/lib.rs crates/agent/Cargo.toml Cargo.lock
@@ -317,7 +317,7 @@ Four GETs. `/api/browse` is the only one with input, and its guard already lives
   - `pub struct ApiError { pub status: StatusCode, pub message: String }` implementing `IntoResponse`
   - `pub async fn get_sessions`, `get_logs`, `get_places`, `get_browse` — axum handlers
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `crates/agent/src/http/routes.rs`:
 
@@ -405,7 +405,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Add to `crates/agent/src/http/mod.rs`:
 
@@ -423,7 +423,7 @@ Make the `serve.rs` test helpers visible to the sibling module by marking the mo
 pub(crate) mod tests {
 ```
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/agent/src/http/routes.rs`:
 
@@ -493,7 +493,7 @@ pub async fn get_browse(
 
 `collect_sessions` cannot fail — every fallible step inside it already degrades to a default — so `get_sessions` has no error arm. That is a real difference from Node, where any throw became a 500; it is a consequence of the port's error handling, not of this route.
 
-- [ ] **Step 4: Register the routes**
+- [x] **Step 4: Register the routes**
 
 In `crates/agent/src/http/serve.rs`, extend `router`:
 
@@ -514,12 +514,12 @@ pub fn router(ctx: Arc<Ctx>, public_dir: &Path) -> Router {
 }
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent http:: -- --test-threads=1`
 Expected: PASS, 9 tests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/agent/src/http/
@@ -540,7 +540,7 @@ Five POSTs. Every guard already exists and is tested as a function; this task pr
 - Consumes: `assert_path`, `toggle_favorite`, `add_recent`, `launch_session`, `resume_session`, `kill_session`, `purge_session`.
 - Produces: `pub async fn post_favorites`, `post_launch`, `post_resume`, `post_kill`, `post_purge`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the `tests` module in `crates/agent/src/http/routes.rs`:
 
@@ -647,12 +647,12 @@ Add to the `tests` module in `crates/agent/src/http/routes.rs`:
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p cdash-agent http::routes`
 Expected: FAIL — `cannot find function 'post_favorites' in this scope` (after the routes are registered in Step 4; before that, the POSTs 404).
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Add to `crates/agent/src/http/routes.rs`:
 
@@ -762,7 +762,7 @@ pub async fn post_purge(
 }
 ```
 
-- [ ] **Step 4: Register the routes**
+- [x] **Step 4: Register the routes**
 
 In `crates/agent/src/http/serve.rs`, add `use axum::routing::post;` and extend `router`:
 
@@ -774,12 +774,12 @@ In `crates/agent/src/http/serve.rs`, add `use axum::routing::post;` and extend `
         .route("/api/purge", post(routes::post_purge))
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent http:: -- --test-threads=1`
 Expected: PASS, 17 tests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/agent/src/http/
@@ -801,7 +801,7 @@ The last wiring: `public/` served, `main.rs` reading the environment, and the he
 - Consumes: `Config::from_env`, `serve`.
 - Produces: a runnable `cdash-agent` binary.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to the `tests` module in `crates/agent/src/http/routes.rs`:
 
@@ -839,12 +839,12 @@ Add to the `tests` module in `crates/agent/src/http/routes.rs`:
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p cdash-agent static_files`
 Expected: FAIL — the response is a 404, because `cfg_for` hard-codes `public_dir` and nothing writes the file. (If `ServeDir` already resolves it, the second test still pins the ordering.)
 
-- [ ] **Step 3: Write the binary**
+- [x] **Step 3: Write the binary**
 
 `crates/agent/src/main.rs`:
 
@@ -879,12 +879,12 @@ async fn main() {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p cdash-agent http:: -- --test-threads=1`
 Expected: PASS, 19 tests.
 
-- [ ] **Step 5: Run the binary against the real environment**
+- [x] **Step 5: Run the binary against the real environment**
 
 ```bash
 CDASH_PUBLIC=public PORT=0 cargo run -p cdash-agent &
@@ -903,7 +903,7 @@ PORT=8080 cargo run -q -p cdash-agent; echo "exit=$?"
 
 Expected: `port 8080 already in use` on stderr and `exit=3`. Kill the first instance.
 
-- [ ] **Step 6: Document the breaking change**
+- [x] **Step 6: Document the breaking change**
 
 The spec requires the README to document it. Add to `README.md`:
 
@@ -919,7 +919,7 @@ The spec requires the README to document it. Add to `README.md`:
 | `CDASH_PUBLIC` | `public` | Directory served as static files. |
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/agent/src/main.rs crates/agent/src/http/routes.rs README.md
@@ -947,7 +947,7 @@ If `tmux` is unavailable the gate reports that it could not compare the pane pat
 - Consumes: both agents.
 - Produces: a pass/fail report; exit 0 only when every comparison holds.
 
-- [ ] **Step 1: Write the gate**
+- [x] **Step 1: Write the gate**
 
 `scripts/parity-gate.mjs`:
 
@@ -1167,23 +1167,23 @@ if (fail.length) {
 console.log('PARITY GATE PASSED');
 ```
 
-- [ ] **Step 2: Build the Rust agent the gate expects**
+- [x] **Step 2: Build the Rust agent the gate expects**
 
 Run: `cargo build -p cdash-agent`
 Expected: `target/debug/cdash-agent` exists.
 
-- [ ] **Step 3: Run the gate**
+- [x] **Step 3: Run the gate**
 
 Run: `node scripts/parity-gate.mjs`
 Expected: `PARITY GATE PASSED`.
 
 **If it fails, the port is not finished.** Read each reported line: it names the field, the Node value, and the Rust value. Fix the Rust side to match Node unless the field is a sampled machine quantity — in which case adding an exemption is a design decision, not a test fix, and belongs in the spec first.
 
-- [ ] **Step 4: Record the result**
+- [x] **Step 4: Record the result**
 
 Paste the gate's output into the commit message. A gate whose passing run nobody recorded is a gate nobody can show passed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add scripts/parity-gate.mjs
@@ -1204,12 +1204,12 @@ Only after Task 5 passes. `server.js`, `lib/`, and `test/` are replaced by `crat
 - Consumes: a passing parity gate.
 - Produces: a repository whose only agent is the Rust one.
 
-- [ ] **Step 1: Confirm the gate passed on the current tree**
+- [x] **Step 1: Confirm the gate passed on the current tree**
 
 Run: `node scripts/parity-gate.mjs`
 Expected: `PARITY GATE PASSED`. **Do not proceed on a failure or a skip.**
 
-- [ ] **Step 2: Delete the Node agent**
+- [x] **Step 2: Delete the Node agent**
 
 ```bash
 git rm -r server.js lib test scripts/parity-gate.mjs
@@ -1217,7 +1217,7 @@ git rm -r server.js lib test scripts/parity-gate.mjs
 
 The gate goes with it: it spawns `node server.js` and cannot run once that file is gone. It stays in git history alongside the tree it validated.
 
-- [ ] **Step 3: Reduce `package.json` to what `public/` still needs**
+- [x] **Step 3: Reduce `package.json` to what `public/` still needs**
 
 `public/` is plain JavaScript with no build step, and nothing in it imports a dependency. `express` was the agent's only dependency.
 
@@ -1237,14 +1237,14 @@ Then remove the stale lockfile:
 git rm package-lock.json
 ```
 
-- [ ] **Step 4: Point CI at the only suite that remains**
+- [x] **Step 4: Point CI at the only suite that remains**
 
 `.github/workflows/ci.yml` already runs `cargo test --all --locked` and the clippy gate, and never ran `npm test`. Confirm no change is needed:
 
 Run: `grep -n "npm" .github/workflows/ci.yml`
 Expected: no output.
 
-- [ ] **Step 5: Update the README's run instructions**
+- [x] **Step 5: Update the README's run instructions**
 
 Replace any `npm start` / `node server.js` instruction in `README.md` with:
 
@@ -1258,7 +1258,7 @@ cargo run -p cdash-agent          # http://127.0.0.1:8080
 Configuration is environment-driven — see the table above.
 ```
 
-- [ ] **Step 6: Verify the tree still builds and tests green**
+- [x] **Step 6: Verify the tree still builds and tests green**
 
 Run: `cargo test --all --locked -- --test-threads=1`
 Expected: PASS.
@@ -1280,7 +1280,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8099/index.html
 
 Expected: `{"ok":true}` and `200`. Kill it afterwards.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add -A

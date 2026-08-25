@@ -36,7 +36,7 @@
   - `next(state, outcome)` → new state; `outcome ∈ {'ok', 'fail', 'auth'}`. `ok` resets; `fail` climbs the ladder one rung (capped at the last); `auth` returns `{ i: 0, halted: true }` and stays halted regardless of later `fail`s.
   - `delay(state)` → ms, from `[4000, 8000, 15000, 30000]`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `test/backoff.test.mjs`:
 
@@ -98,12 +98,12 @@ Modify `package.json` to:
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `npm test`
 Expected: FAIL — `Cannot read properties of undefined (reading 'initial')` (backoff.js does not exist yet).
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `public/transport/backoff.js`:
 
@@ -128,12 +128,12 @@ Create `public/transport/backoff.js`:
 
 (The `typeof globalThis === 'undefined' ? this : globalThis` fallback is belt-and-braces for ancient engines; in practice both environments have `globalThis`.)
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `npm test`
 Expected: PASS — 5 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add public/transport/backoff.js test/backoff.test.mjs package.json
@@ -151,7 +151,7 @@ git commit -m "feat: pure backoff ladder with reset-on-success and the auth halt
 - Consumes: nothing new.
 - Produces: thrown errors from `api()` carry `.status` (the HTTP status code, absent on transport errors). `poll()` in Task 3 reads it. The `isTauri` constant is defined here and re-declared in Task 4's registration snippet.
 
-- [ ] **Step 1: Replace `api()`**
+- [x] **Step 1: Replace `api()`**
 
 Replace the current `api()` at `public/app.js:111-116` with:
 
@@ -178,7 +178,7 @@ async function api(path, body) {
 
 The `invoke('api', …)` command name is provisional — step 8 names the real Tauri command; the shape (path + parsed-or-null body in, Response-like out) is what matters here.
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add public/app.js
@@ -197,7 +197,7 @@ git commit -m "feat: api() propagates the HTTP status and branches on the Tauri 
 - Consumes: `cdashBackoff` (Task 1), errors with `.status` (Task 2).
 - Produces: none — this is the top of the UI.
 
-- [ ] **Step 1: Load backoff.js before app.js**
+- [x] **Step 1: Load backoff.js before app.js**
 
 In `public/index.html`, immediately above the existing `<script src="app.js"></script>`, add:
 
@@ -205,7 +205,7 @@ In `public/index.html`, immediately above the existing `<script src="app.js"></s
 <script src="transport/backoff.js"></script>
 ```
 
-- [ ] **Step 2: Replace the polling tail**
+- [x] **Step 2: Replace the polling tail**
 
 Replace `public/app.js` lines 371–388 (from `async function poll() {` to the end of the file) with:
 
@@ -261,12 +261,12 @@ Behaviour notes for the reviewer:
 - While hidden, `tick` reschedules at the current delay without fetching — the tab wakes on `visibilitychange`, which resets to 4s and polls immediately.
 - An auth halt leaves the timer disarmed; the next click of Launch/Kill/etc. calls `poll()`, which resets and retries once — matching "requires user action".
 
-- [ ] **Step 3: Run the suites**
+- [x] **Step 3: Run the suites**
 
 Run: `npm test && cargo test --all --locked -- --test-threads=1`
 Expected: PASS — the Rust suite is untouched but proves the static files still serve.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add public/app.js public/index.html
@@ -285,7 +285,7 @@ git commit -m "feat: poll applies the backoff ladder, halts on 401/403, resets o
 - Consumes: the `isTauri` predicate definition (Task 2).
 - Produces: none.
 
-- [ ] **Step 1: Rewrite sw.js**
+- [x] **Step 1: Rewrite sw.js**
 
 Replace the entire contents of `public/sw.js` with the spec's code verbatim:
 
@@ -322,7 +322,7 @@ Why each guard exists (from the spec, restated so the reviewer does not have to 
 - **`r.ok` on every put**: `cache.put` happily stores a 401 body (static assets sit behind the guard) and an opaqueredirect; `addAll` used to reject both. This restores fail-closed.
 - **No `skipWaiting`/`clients.claim`**: unchanged behaviour, accepted cost.
 
-- [ ] **Step 2: Gate registration to web mode**
+- [x] **Step 2: Gate registration to web mode**
 
 In `public/index.html`, replace line 106:
 
@@ -341,12 +341,12 @@ with:
 </script>
 ```
 
-- [ ] **Step 3: Run the suites**
+- [x] **Step 3: Run the suites**
 
 Run: `npm test && cargo test --all --locked -- --test-threads=1`
 Expected: PASS.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add public/sw.js public/index.html
@@ -360,7 +360,7 @@ git commit -m "feat: network-first navigations and SWR sub-resources; registrati
 **Files:**
 - Modify: `README.md` (one paragraph)
 
-- [ ] **Step 1: Update the README**
+- [x] **Step 1: Update the README**
 
 Add a short paragraph after the intro describing the offline/polling model:
 
@@ -372,12 +372,12 @@ caches at runtime (network-first navigations, stale-while-revalidate assets), so
 offline works from the second visit; there is no precache manifest to maintain.
 ```
 
-- [ ] **Step 2: Full gate**
+- [x] **Step 2: Full gate**
 
 Run: `npm test && cargo clippy --all-targets --locked -- -D warnings -D clippy::disallowed_types && cargo test --all --locked -- --test-threads=1`
 Expected: all PASS / exit 0.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add README.md
