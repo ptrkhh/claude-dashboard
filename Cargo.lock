@@ -389,6 +389,7 @@ dependencies = [
 name = "cdash-tauri"
 version = "0.1.0"
 dependencies = [
+ "cdash-agent",
  "serde",
  "serde_json",
  "tauri",

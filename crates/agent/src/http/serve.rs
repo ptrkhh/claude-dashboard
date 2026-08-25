@@ -90,6 +90,19 @@ impl Config {
 pub struct Bound {
     pub addr: SocketAddr,
     pub ctx: Arc<Ctx>,
+    stop: tokio::sync::watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Bound {
+    /// Fire the graceful-shutdown trigger and wait for the serving task to
+    /// drain and exit, after which the port is released. The standalone binary
+    /// never calls this; it exists so an in-process embedder can tear the
+    /// server down.
+    pub async fn stop(self) {
+        let _ = self.stop.send(true);
+        let _ = self.task.await;
+    }
 }
 
 /// Built in two halves: an unauthenticated router carrying exactly the
@@ -164,14 +177,18 @@ pub async fn serve(cfg: Config) -> std::io::Result<Bound> {
     let app =
         router(Arc::clone(&ctx), &cfg.public_dir, Arc::clone(&cfg.auth), cfg.password.clone(), cf);
 
-    tokio::spawn(async move {
+    let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(async move {
         // `ConnectInfo` needs the peer address, which the trusted-proxy guard
         // checks against its allowlist.
         let _ = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+            .with_graceful_shutdown(async move {
+                let _ = stop_rx.changed().await;
+            })
             .await;
     });
 
-    Ok(Bound { addr, ctx })
+    Ok(Bound { addr, ctx, stop: stop_tx, task })
 }
 
 #[cfg(test)]
@@ -231,6 +248,19 @@ pub(crate) mod tests {
             panic!("binding a held port must fail");
         };
         assert_eq!(e.kind(), std::io::ErrorKind::AddrInUse);
+    }
+
+    #[tokio::test]
+    async fn stop_releases_the_port_for_rebinding() {
+        let b = serve(cfg_for(tempdir("stop"))).await.unwrap();
+        let addr = b.addr;
+        let mut cfg = cfg_for(tempdir("rebind"));
+        cfg.port = addr.port();
+        b.stop().await;
+        // The old listener must be gone, not just the accept loop parked.
+        tokio::net::TcpListener::bind(addr)
+            .await
+            .expect("port must be rebindable after stop");
     }
 
     /// Minimal HTTP GET. `reqwest` is a dependency this crate does not need in
