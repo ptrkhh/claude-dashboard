@@ -52,12 +52,15 @@ fn stop_locked(state: &Mutex<Option<Running>>) -> Result<(), String> {
     Ok(())
 }
 
+/// `None` once the serving task is gone, not merely once `stop` was called:
+/// a panicked accept loop must not keep reporting a live address while every
+/// request to it is refused.
 fn addr_locked(state: &Mutex<Option<Running>>) -> Result<Option<String>, String> {
-    Ok(state
-        .lock()
-        .map_err(|_| "server state poisoned")?
-        .as_ref()
-        .map(|r| r.addr.clone()))
+    let mut guard = state.lock().map_err(|_| "server state poisoned")?;
+    if guard.as_ref().is_some_and(|r| r.bound.is_finished()) {
+        *guard = None;
+    }
+    Ok(guard.as_ref().map(|r| r.addr.clone()))
 }
 
 #[tauri::command]
@@ -295,7 +298,23 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
         .manage(ServerState::default())
-        .manage(ReqwestState(reqwest::Client::new()))
+        // No redirects: this client has exactly one destination, and a
+        // redirect is the only way a request pinned to loopback could leave it.
+        .manage(ReqwestState(
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("a client with no TLS roots to load always builds"),
+        ))
+        // On Linux and macOS the client *is* the server. Nothing else starts
+        // it, so without this every api_request answers "server not running".
+        // Runs on the main thread before the event loop, which is what makes
+        // start_locked's block_on legal.
+        .setup(|app| {
+            use tauri::Manager;
+            start_locked(&app.state::<ServerState>().0).map_err(std::io::Error::other)?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             server_start,
             server_stop,
@@ -328,12 +347,15 @@ mod tests {
     }
 
     #[test]
-    fn stop_then_start_binds_a_fresh_port() {
+    fn stop_then_start_binds_again() {
         let state = Mutex::new(None);
-        let first = start_locked(&state).unwrap();
+        start_locked(&state).unwrap();
         stop_locked(&state).unwrap();
+        assert_eq!(addr_locked(&state).unwrap(), None);
+        // The kernel may hand back the same ephemeral port, so the assertion
+        // is that a second bind succeeds at all — not that it differs.
         let second = start_locked(&state).unwrap();
-        assert_ne!(first, second, "ephemeral ports after teardown are re-drawn");
+        assert!(second.starts_with("http://127.0.0.1:"));
         stop_locked(&state).unwrap();
     }
 
@@ -507,9 +529,20 @@ mod tests {
 
     /// A headless app with the real store plugin, pointed at an isolated XDG
     /// data dir so tests never touch actual user data.
-    fn mock_app_with_store() -> tauri::App<tauri::test::MockRuntime> {
-        let dir = std::env::temp_dir().join(format!("cdash-tauri-store-test-{}", std::process::id()));
+    /// ponytail: mutates process-global env from a test thread, which is UB
+    /// against a concurrent `getenv` (the server tests read HOME/PATH/SHELL).
+    /// Bounded to one mutation via `LazyLock` and done before any store call.
+    /// The clean upgrade is a `tests/store.rs` of its own — which needs this
+    /// binary crate split into lib + bin, more surgery than the risk is worth.
+    static STORE_DIR: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
+        let dir = std::env::temp_dir().join(format!("cdash-tauri-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::env::set_var("XDG_DATA_HOME", &dir);
+        dir
+    });
+
+    fn mock_app_with_store() -> tauri::App<tauri::test::MockRuntime> {
+        std::sync::LazyLock::force(&STORE_DIR);
         let app = tauri::test::mock_app();
         app.handle()
             .plugin(tauri_plugin_store::Builder::new().build())
@@ -546,6 +579,6 @@ mod tests {
         assert_eq!(store.get("active"), Some(serde_json::Value::Null));
         assert_eq!(profiles_list(handle).unwrap()[0].name, "local");
 
-        let _ = std::fs::remove_dir_all(std::env::var("XDG_DATA_HOME").unwrap());
+        let _ = std::fs::remove_dir_all(&*STORE_DIR);
     }
 }

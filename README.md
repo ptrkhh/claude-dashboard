@@ -16,7 +16,7 @@ offline works from the second visit; there is no precache manifest to maintain.
 cargo run -p cdash-tauri
 ```
 
-A Tauri desktop wrapper around the same UI. The agent runs in-process (no separate server, no port to remember) and the same `/api/*` calls go through a Tauri command instead of HTTP. Connection profiles are stored in the app's config directory via `tauri-plugin-store`. Secrets handling arrives in step 10.
+A Tauri desktop wrapper around the same UI. The agent runs in-process (no separate server, no port to remember), started at app setup on a tokio task. The HTTP boundary is kept even in-process: the same `/api/*` calls still speak HTTP to loopback, tunnelled through the `api_request` Tauri command rather than webview `fetch`. Connection profiles are stored in the app's config directory via `tauri-plugin-store`. Secrets handling arrives in step 10.
 
 ## Run
 
@@ -26,7 +26,9 @@ cargo run -p cdash-agent     # http://127.0.0.1:8080
 
 ### Static release builds
 
-`scripts/release.sh` builds static musl binaries for VPS/WSL (`x86_64`) and VPS/Termux (`aarch64`) and executes both as the release gate (CI runs the same matrix). Prereqs: `rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl`, `sudo apt install musl-tools qemu-user`, and the [musl.cc](https://musl.cc) `aarch64-linux-musl-cross` toolchain unpacked at `~/.local/opt/`.
+`scripts/release.sh` builds static musl binaries for VPS/WSL (`x86_64`) and VPS/Termux (`aarch64`) and boots both as the release gate — the gate is the startup banner, since a binary that dies instantly would otherwise pass. Prereqs: `rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl`, `sudo apt install musl-tools qemu-user`, and the [musl.cc](https://musl.cc) `aarch64-linux-musl-cross` toolchain unpacked at `~/.local/opt/`.
+
+CI gates the same two targets but sources its cross-toolchain from `taiki-e/setup-cross-toolchain-action` rather than musl.cc, which stopped responding from GitHub's runners and took every release build down with it. Use the same action if the local prereq above fails.
 
 Requires `tmux`, `claude` and `git` on `PATH`; the agent reports any that are missing at startup.
 
