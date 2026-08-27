@@ -21,7 +21,11 @@ pub async fn read_tail(file: &Path) -> Option<String> {
         fh.seek(std::io::SeekFrom::Start(start)).await.ok()?;
     }
     let mut buf = Vec::new();
-    fh.read_to_end(&mut buf).await.ok()?;
+    // `take` and not a bare `read_to_end`: the seek offset comes from a stat
+    // taken moments earlier, and a live `claude` appends between the two. The
+    // cap has to be on the read, or a session dumping tool output mid-poll is
+    // buffered whole.
+    fh.take(TAIL_BYTES).read_to_end(&mut buf).await.ok()?;
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
@@ -75,6 +79,27 @@ mod tests {
         assert_eq!(got.len(), TAIL_BYTES as usize);
         assert!(got.ends_with("TAIL"));
         assert!(!got.contains("HEAD"), "the head of an oversized file must not be read");
+    }
+
+    #[tokio::test]
+    async fn read_tail_caps_a_file_that_grows_after_the_stat() {
+        // The seek offset is chosen from a stat; by the time the read runs the
+        // file is longer. Only a cap on the read itself survives that.
+        let dir = tempdir("growing");
+        let f = dir.join("live.jsonl");
+        tokio::fs::write(&f, "x".repeat(1024)).await.unwrap();
+
+        let mut fh = tokio::fs::File::open(&f).await.unwrap();
+        let size = fh.metadata().await.unwrap().len();
+        let start = size.saturating_sub(TAIL_BYTES);
+        tokio::fs::write(&f, "x".repeat(4 * TAIL_BYTES as usize)).await.unwrap();
+
+        if start > 0 {
+            fh.seek(std::io::SeekFrom::Start(start)).await.unwrap();
+        }
+        let mut buf = Vec::new();
+        fh.take(TAIL_BYTES).read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf.len() as u64, TAIL_BYTES);
     }
 
     #[tokio::test]

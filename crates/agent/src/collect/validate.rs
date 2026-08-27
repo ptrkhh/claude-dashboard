@@ -22,7 +22,10 @@ pub fn assert_path(p: &str) -> Result<(), BadRequest> {
 
 fn kill_name_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^cdash-[\w-]+$").unwrap())
+    // `(?-u)`: JS's `\w` without the `u` flag is ASCII-only, and this crate's
+    // is Unicode-aware, so the plain port would admit `cdash-café` — a session
+    // this dashboard never created and Node refused to kill.
+    RE.get_or_init(|| Regex::new(r"(?-u)^cdash-[\w-]+$").unwrap())
 }
 
 fn sid_re() -> &'static Regex {
@@ -75,6 +78,17 @@ mod tests {
         assert!(assert_path("/home/x").is_ok());
         assert!(assert_path("relative/x").is_err());
         assert!(assert_path("").is_err());
+    }
+
+    #[test]
+    fn the_kill_target_pattern_is_ascii_only_as_node_s_was() {
+        // The regex crate's \\w is Unicode-aware; JS's (no /u flag) is not. A
+        // cdash-<non-ASCII> session was created by something other than this
+        // dashboard, and Node refused to kill it.
+        for name in ["cdash-caf\u{e9}", "cdash-\u{65e5}\u{672c}", "cdash-a\u{301}"] {
+            assert!(assert_kill_name(name).is_err(), "{name:?} must not be killable");
+        }
+        assert!(assert_kill_name("cdash-abc_1-2").is_ok());
     }
 
     #[test]

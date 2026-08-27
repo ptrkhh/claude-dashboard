@@ -30,14 +30,22 @@ pub fn toggle_in(list: &[String], p: &str) -> Vec<String> {
     }
 }
 
-/// Node returned the empty shape for a missing file, a malformed file, and a
-/// file whose fields are the wrong type (`lib/places.js:19-27`).
-/// `#[serde(default)]` covers absence; the `unwrap_or_default` covers the rest.
+/// Node validated the two fields *independently* (`lib/places.js:19-27`), so a
+/// `"recents": null` cost you recents alone. Deserializing the struct as a unit
+/// would fail both, and the next `/api/favorites` write would then persist that
+/// emptiness over the user's real favorites.
 pub async fn read_places(file: &Path) -> Places {
-    match read_if(file).await {
-        Some(txt) => serde_json::from_str(&txt).unwrap_or_default(),
-        None => Places::default(),
-    }
+    let Some(txt) = read_if(file).await else { return Places::default() };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else {
+        return Places::default();
+    };
+    let list = |key: &str| -> Vec<String> {
+        v.get(key)
+            .and_then(|x| x.as_array())
+            .map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
+    };
+    Places { recents: list("recents"), favorites: list("favorites") }
 }
 
 async fn write_places(file: &Path, data: &Places) -> std::io::Result<()> {
@@ -57,6 +65,50 @@ pub async fn toggle_favorite(file: &Path, p: &str) -> std::io::Result<Places> {
     data.favorites = toggle_in(&data.favorites, p);
     write_places(file, &data).await?;
     Ok(data)
+}
+
+#[cfg(test)]
+mod field_isolation_tests {
+    use super::*;
+
+    fn tempfile(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("cdash-places-iso-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("cdash-places.json")
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_recents_does_not_take_favorites_down_with_it() {
+        // The failure this prevents is silent and permanent: read both as
+        // empty, then the next /api/favorites write persists that emptiness
+        // over the user's real favorites.
+        let f = tempfile("mixed");
+        tokio::fs::write(&f, r#"{"recents": null, "favorites": ["/keep/me"]}"#).await.unwrap();
+        let p = read_places(&f).await;
+        assert!(p.recents.is_empty());
+        assert_eq!(p.favorites, vec!["/keep/me".to_string()]);
+
+        // ...and the next write must not erase it.
+        let after = toggle_favorite(&f, "/also/me").await.unwrap();
+        assert_eq!(after.favorites, vec!["/keep/me".to_string(), "/also/me".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn non_string_entries_are_dropped_rather_than_failing_the_list() {
+        let f = tempfile("mixedtypes");
+        tokio::fs::write(&f, r#"{"recents": ["/a", 7, "/b"], "favorites": "nope"}"#).await.unwrap();
+        let p = read_places(&f).await;
+        assert_eq!(p.recents, vec!["/a".to_string(), "/b".to_string()]);
+        assert!(p.favorites.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_file_that_is_not_json_at_all_is_still_the_empty_shape() {
+        let f = tempfile("garbage");
+        tokio::fs::write(&f, "not json").await.unwrap();
+        assert_eq!(read_places(&f).await, Places::default());
+    }
 }
 
 #[cfg(test)]

@@ -16,6 +16,13 @@ struct Entry {
     busy: bool,
 }
 
+fn now_millis() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_millis() as u64)
+}
+
 /// Pure refresh predicate, split out so the two rules that matter can be
 /// tested without a repository: stale entries refresh, busy entries never do.
 pub fn refresh_due(entry_ts_ms: u64, busy: bool, now_ms: u64) -> bool {
@@ -73,7 +80,12 @@ impl GitCache {
                 dir_owned,
                 Entry {
                     out: if out.is_empty() { None } else { Some(out) },
-                    ts: now_ms,
+                    // Stamped at completion, not at request. A `git status`
+                    // that takes longer than the TTL would otherwise land
+                    // already-stale and re-fire on the very next poll — the
+                    // slow repositories the 20 s ceiling exists for are exactly
+                    // the ones that would then run it back to back forever.
+                    ts: now_millis().unwrap_or(now_ms),
                     busy: false,
                 },
             );

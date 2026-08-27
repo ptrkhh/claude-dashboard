@@ -58,6 +58,20 @@ impl Ctx {
         self.meta.lock().unwrap_or_else(|e| e.into_inner()).get(name).cloned()
     }
 
+    /// Read-modify-write under a single lock. `meta_get` + `meta_set` is not a
+    /// guard on a multi-threaded runtime: a `POST /api/kill` landing in the gap
+    /// is re-inserted by the write.
+    pub fn meta_update(&self, name: &str, f: impl FnOnce(&mut Meta)) -> bool {
+        let mut g = self.meta.lock().unwrap_or_else(|e| e.into_inner());
+        match g.get_mut(name) {
+            Some(m) => {
+                f(m);
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn meta_set(&self, name: &str, m: Meta) {
         self.meta.lock().unwrap_or_else(|e| e.into_inner()).insert(name.to_string(), m);
     }

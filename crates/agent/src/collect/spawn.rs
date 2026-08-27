@@ -92,10 +92,7 @@ pub fn tmux_name(dir: &str) -> String {
 /// this guard can be tested on its own: inside the poll the earlier guard
 /// returns first, so no poll-level test can reach this one.
 pub fn commit_rc_link(ctx: &Arc<Ctx>, name: &str, link: &str) -> bool {
-    let Some(mut m) = ctx.meta_get(name) else { return false };
-    m.rc_link = Some(link.to_string());
-    ctx.meta_set(name, m);
-    true
+    ctx.meta_update(name, |m| m.rc_link = Some(link.to_string()))
 }
 
 /// Wait for `claude` to publish its remote-control session id, then record the
