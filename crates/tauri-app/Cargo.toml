@@ -11,7 +11,8 @@ tauri = { version = "2", features = [] }
 tauri-plugin-store = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json", "http2"] }
+# One destination, http://127.0.0.1:<port>, redirects disabled: no TLS, no h2.
+reqwest = { version = "0.13.4", default-features = false, features = ["json"] }
 cdash-agent = { path = "../agent" }
 
 # "test" only unifies into dev/test builds; release binaries never see it.

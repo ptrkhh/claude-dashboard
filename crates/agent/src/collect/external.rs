@@ -37,12 +37,8 @@ pub struct Session {
     pub cpu_sample_age_ms: u128,
     /// Node omitted this key entirely for pane sessions and set it to `true`
     /// for external ones. `skip_serializing_if` reproduces that exactly.
-    #[serde(skip_serializing_if = "is_false")]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub external: bool,
-}
-
-fn is_false(b: &bool) -> bool {
-    !*b
 }
 
 fn basename(p: &str) -> String {

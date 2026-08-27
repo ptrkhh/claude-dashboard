@@ -35,7 +35,24 @@ Copied verbatim from the spec. Every task's requirements implicitly include this
 
 Spec assertion 2 says the guarded-route list is "derived by enumerating the router at test time, not hand-written". **Axum exposes no public API to enumerate a `Router`'s routes** — verified against 0.8.9 before writing this plan. The purpose of that requirement is that *a route added later without a guard fails the test on the day it is added*, and it is preserved differently: every guarded route is declared once in a `guarded_routes!` macro invocation that emits **both** the router and the path list the test walks. A route cannot be added to the router through that macro without appearing in the list.
 
-What this does not catch is a route added to the *unauthenticated* half by hand. Assertion 1's companion check closes that: the unauthenticated router's own path list is asserted to be exactly the three exceptions, so a fourth fails the test.
+What this does not catch is a route added to the *unauthenticated* half by hand.
+
+**Correction (review pass, 2026-08-27).** The companion check as shipped did not
+close that. `UNAUTH_PATHS` lived in `auth/layer.rs`, nothing consulted it — the
+router in `serve.rs` enumerated the exceptions separately — and its test asserted
+`UNAUTH_PATHS.len() <= 3` against the const it also owned. A fourth hand-added
+route passed every test.
+
+What closes it now: the const moved to `serve.rs` and the unauthenticated router
+is *built by walking it*, so an entry with no arm registers nothing and a route
+with no entry is unreachable. The test is a live probe (`the_unauthenticated_
+surface_is_exactly_the_three_exceptions`) — every listed path answers without
+credentials, every `GUARDED_PATHS` entry does not. Verified falsifiable: adding
+a fourth entry fails it.
+
+Still not caught, stated rather than papered over: a `.route()` appended to
+`unauth` *after* the loop. Axum exposes no way to enumerate a built router, so
+this is a code-shape guarantee, not a mechanical one.
 
 ---
 

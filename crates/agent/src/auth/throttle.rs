@@ -48,12 +48,6 @@ pub struct Throttle {
     pending_max: usize,
 }
 
-impl Default for Throttle {
-    fn default() -> Self {
-        Self::new(DEFAULT_PENDING_MAX)
-    }
-}
-
 impl Throttle {
     pub fn new(pending_max: usize) -> Self {
         let mut key = [0u8; 32];

@@ -25,14 +25,9 @@ struct Entry {
 
 /// Memoized transcript parse, keyed by path and revalidated by mtime.
 /// Mirrors `parseTranscriptCached` (`lib/collect.js:51-62`).
+#[derive(Default)]
 pub struct TranscriptCache {
     map: Mutex<HashMap<PathBuf, Entry>>,
-}
-
-impl Default for TranscriptCache {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl TranscriptCache {
@@ -40,12 +35,11 @@ impl TranscriptCache {
         Self { map: Mutex::new(HashMap::new()) }
     }
 
-    pub fn len(&self) -> usize {
+    /// Test-only: the cap assertion is the sole reader, and a public `len`
+    /// obliges a public `is_empty` that nothing would ever call.
+    #[cfg(test)]
+    fn len(&self) -> usize {
         self.map.lock().unwrap_or_else(|e| e.into_inner()).len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 
     pub async fn get(&self, file: &Path) -> Option<Transcript> {

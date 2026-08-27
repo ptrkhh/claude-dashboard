@@ -1,4 +1,4 @@
-use crate::collect::browse::{list_dirs, BrowseError};
+use crate::collect::browse::list_dirs;
 use crate::collect::ctx::Ctx;
 use crate::collect::places::read_places;
 use crate::collect::sessions::collect_sessions;
@@ -25,15 +25,6 @@ impl IntoResponse for ApiError {
 impl From<BadRequest> for ApiError {
     fn from(e: BadRequest) -> Self {
         Self { status: StatusCode::BAD_REQUEST, message: e.0 }
-    }
-}
-
-impl From<BrowseError> for ApiError {
-    fn from(e: BrowseError) -> Self {
-        Self {
-            status: StatusCode::from_u16(e.status()).unwrap_or(StatusCode::BAD_REQUEST),
-            message: e.message,
-        }
     }
 }
 

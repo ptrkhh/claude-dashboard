@@ -11,14 +11,9 @@ pub const SID_BYTES: usize = 32;
 
 /// An opaque id in a map. A stateless token would need a signature, a pinned
 /// algorithm, and a re-checked expiry, and still could not be revoked.
+#[derive(Default)]
 pub struct Sessions {
     map: Mutex<HashMap<String, Instant>>,
-}
-
-impl Default for Sessions {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl Sessions {
@@ -54,13 +49,6 @@ impl Sessions {
         self.map.lock().unwrap_or_else(|e| e.into_inner()).remove(sid);
     }
 
-    pub fn len(&self) -> usize {
-        self.map.lock().unwrap_or_else(|e| e.into_inner()).len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 }
 
 #[cfg(test)]

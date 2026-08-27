@@ -87,14 +87,6 @@ pub fn tmux_name(dir: &str) -> String {
     format!("cdash-{base}-{hhmm}-{suffix}")
 }
 
-/// Record a discovered link, unless the session vanished while it was being
-/// read. Returns whether the write happened. Split out from `poll_rc_link` so
-/// this guard can be tested on its own: inside the poll the earlier guard
-/// returns first, so no poll-level test can reach this one.
-pub fn commit_rc_link(ctx: &Arc<Ctx>, name: &str, link: &str) -> bool {
-    ctx.meta_update(name, |m| m.rc_link = Some(link.to_string()))
-}
-
 /// Wait for `claude` to publish its remote-control session id, then record the
 /// link. Two guards, both required: the session can be killed while this
 /// sleeps, and again between the read and the write.
@@ -111,7 +103,7 @@ pub async fn poll_rc_link(
             return; // killed while polling
         }
         if let Some(link) = rc_link_for(&ctx.claude_dir, pid).await {
-            if !commit_rc_link(&ctx, &name, &link) {
+            if !ctx.meta_update(&name, |m| m.rc_link = Some(link.clone())) {
                 return; // killed between the check and the write
             }
             ctx.host.log.push(format!(
@@ -289,11 +281,11 @@ mod tests {
         // the write step is exercised directly.
         let d = tempdir("commit-gone");
         let ctx = ctx_for(d).await;
-        assert!(!commit_rc_link(&ctx, "cdash-vanished", "https://claude.ai/code/x"));
+        assert!(!ctx.meta_update("cdash-vanished", |m| m.rc_link = Some("https://claude.ai/code/x".into())));
         assert!(ctx.meta_get("cdash-vanished").is_none());
 
         ctx.meta_set("cdash-here", Meta::default());
-        assert!(commit_rc_link(&ctx, "cdash-here", "https://claude.ai/code/y"));
+        assert!(ctx.meta_update("cdash-here", |m| m.rc_link = Some("https://claude.ai/code/y".into())));
         assert_eq!(
             ctx.meta_get("cdash-here").unwrap().rc_link.as_deref(),
             Some("https://claude.ai/code/y")

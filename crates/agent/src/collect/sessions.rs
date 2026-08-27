@@ -3,7 +3,7 @@ use super::external::{external_sessions, Session};
 use super::fsio::{read_if, read_tail};
 use super::lookup::{session_file_for, transcript_for};
 use crate::host::disk::{disk_usage, DiskUsage};
-use crate::host::proc::proc_tree_usage;
+
 use crate::parse::git::parse_git_status;
 use crate::parse::history::group_history;
 use crate::parse::paths::project_dir_name;
@@ -113,7 +113,6 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>) -> SessionsResponse {
             }
         }
 
-        let usage = proc_tree_usage(&rows, p.pid);
         let cpu_state = {
             let mut s = ctx.host.sampler.lock().unwrap_or_else(|e| e.into_inner());
             s.tree_usage(p.pid)
@@ -134,7 +133,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>) -> SessionsResponse {
             last_message,
             sid,
             cpu: cpu_state.cpu,
-            rss_kb: usage.rss_kb,
+            rss_kb: cpu_state.rss_kb,
             cpu_sample_age_ms: cpu_state.cpu_sample_age_ms,
             external: false,
         });

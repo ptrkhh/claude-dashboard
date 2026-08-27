@@ -100,14 +100,9 @@ struct CacheState {
     fetched_at: Option<Instant>,
 }
 
+#[derive(Default)]
 pub struct JwksCache {
     state: Mutex<CacheState>,
-}
-
-impl Default for JwksCache {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl JwksCache {
@@ -119,24 +114,14 @@ impl JwksCache {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).jwks.clone()
     }
 
-    pub fn refresh_due(&self) -> bool {
-        let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        match st.fetched_at {
-            None => true,
-            Some(t) => t.elapsed() >= JWKS_TTL,
-        }
-    }
-
+    /// The only mutator. There is deliberately no eviction path: a failed
+    /// fetch leaves the last good key set in place, because an unreachable
+    /// Cloudflare must not lock out every user.
     pub fn install(&self, jwks: Jwks) {
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         st.jwks = Some(jwks);
         st.fetched_at = Some(Instant::now());
     }
-
-    /// A failed fetch keeps the last good key set and lets the next request try
-    /// again — it must not evict, because an unreachable Cloudflare would then
-    /// lock out every user.
-    pub fn note_failure(&self) {}
 }
 
 pub struct CfState {
@@ -176,7 +161,7 @@ pub fn spawn_refresh(state: std::sync::Arc<CfState>, log: std::sync::Arc<crate::
             match fetch_jwks(&url).await {
                 Ok(j) => state.jwks.install(j),
                 Err(e) => {
-                    state.jwks.note_failure();
+                    // Nothing is evicted: the last good key set keeps serving.
                     log.push(format!("cf-access: JWKS refresh failed, keeping last keys: {e}"));
                 }
             }
@@ -409,18 +394,8 @@ mod tests {
     }
 
     #[test]
-    fn a_cold_cache_has_no_keys_and_is_due_for_refresh() {
-        let c = JwksCache::new();
-        assert!(c.get().is_none());
-        assert!(c.refresh_due());
-    }
-
-    #[test]
-    fn an_installed_key_set_is_served_and_not_immediately_re_fetched() {
-        let c = JwksCache::new();
-        c.install(Jwks { keys: vec![JwkKey { kid: "k1".into(), n: "n".into(), e: "AQAB".into() }] });
-        assert_eq!(c.get().unwrap().keys.len(), 1);
-        assert!(!c.refresh_due(), "a fresh key set must not be re-fetched every request");
+    fn a_cold_cache_has_no_keys() {
+        assert!(JwksCache::new().get().is_none());
     }
 
     #[test]
@@ -428,7 +403,7 @@ mod tests {
         // Cloudflare being briefly unreachable must not lock every user out.
         let c = JwksCache::new();
         c.install(Jwks { keys: vec![JwkKey { kid: "k1".into(), n: "n".into(), e: "AQAB".into() }] });
-        c.note_failure();
+        // A failed refresh installs nothing, so `get` still answers.
         assert_eq!(c.get().unwrap().keys.len(), 1, "the last good key set survives a failure");
     }
 }

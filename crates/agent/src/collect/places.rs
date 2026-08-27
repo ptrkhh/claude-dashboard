@@ -13,10 +13,10 @@ pub struct Places {
     pub favorites: Vec<String>,
 }
 
-pub fn push_recent(list: &[String], p: &str, max: usize) -> Vec<String> {
+pub fn push_recent(list: &[String], p: &str) -> Vec<String> {
     let mut out = vec![p.to_string()];
     out.extend(list.iter().filter(|x| x.as_str() != p).cloned());
-    out.truncate(max);
+    out.truncate(MAX_RECENTS);
     out
 }
 
@@ -55,7 +55,7 @@ async fn write_places(file: &Path, data: &Places) -> std::io::Result<()> {
 
 pub async fn add_recent(file: &Path, p: &str) -> std::io::Result<Places> {
     let mut data = read_places(file).await;
-    data.recents = push_recent(&data.recents, p, MAX_RECENTS);
+    data.recents = push_recent(&data.recents, p);
     write_places(file, &data).await?;
     Ok(data)
 }
@@ -129,14 +129,14 @@ mod tests {
 
     #[test]
     fn push_recent_moves_an_existing_entry_to_the_front_without_duplicating() {
-        assert_eq!(push_recent(&s(&["/a", "/b", "/c"]), "/c", MAX_RECENTS), s(&["/c", "/a", "/b"]));
-        assert_eq!(push_recent(&s(&["/a", "/b"]), "/x", MAX_RECENTS), s(&["/x", "/a", "/b"]));
+        assert_eq!(push_recent(&s(&["/a", "/b", "/c"]), "/c"), s(&["/c", "/a", "/b"]));
+        assert_eq!(push_recent(&s(&["/a", "/b"]), "/x"), s(&["/x", "/a", "/b"]));
     }
 
     #[test]
     fn push_recent_caps_the_list_length() {
         let many: Vec<String> = (0..MAX_RECENTS).map(|i| format!("/p{i}")).collect();
-        let out = push_recent(&many, "/new", MAX_RECENTS);
+        let out = push_recent(&many, "/new");
         assert_eq!(out.len(), MAX_RECENTS);
         assert_eq!(out[0], "/new");
         assert!(!out.contains(&format!("/p{}", MAX_RECENTS - 1)), "oldest dropped");

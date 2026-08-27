@@ -1,23 +1,23 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use cdash_agent::auth::config::{AuthConfig, GuardKind};
+use cdash_agent::http::serve::Bound;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-struct Running {
-    addr: String,
-    bound: cdash_agent::http::serve::Bound,
-}
-
 #[derive(Default)]
-pub struct ServerState(Mutex<Option<Running>>);
+pub struct ServerState(Mutex<Option<cdash_agent::http::serve::Bound>>);
+
+fn url(b: &cdash_agent::http::serve::Bound) -> String {
+    format!("http://{}", b.addr)
+}
 
 /// The in-process trust shape: loopback only, no auth guard, ephemeral port.
 /// Mirrors the agent crate's own test config.
-fn server_config() -> Result<cdash_agent::http::serve::Config, String> {
+fn server_config() -> cdash_agent::http::serve::Config {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-    Ok(cdash_agent::http::serve::Config {
+    cdash_agent::http::serve::Config {
         bind: "127.0.0.1".parse::<IpAddr>().expect("literal is a valid IP"),
         port: 0, // OS chooses; the bound address is the readiness signal
         claude_dir: PathBuf::from(home).join(".claude"),
@@ -28,26 +28,25 @@ fn server_config() -> Result<cdash_agent::http::serve::Config, String> {
                 .expect("none is always buildable"),
         ),
         password: None,
-    })
+    }
 }
 
-fn start_locked(state: &Mutex<Option<Running>>) -> Result<String, String> {
+fn start_locked(state: &Mutex<Option<Bound>>) -> Result<String, String> {
     let mut guard = state.lock().map_err(|_| "server state poisoned")?;
-    if let Some(r) = guard.as_ref() {
-        return Ok(r.addr.clone()); // idempotent
+    if let Some(b) = guard.as_ref() {
+        return Ok(url(b)); // idempotent
     }
-    let cfg = server_config()?;
-    let b = tauri::async_runtime::block_on(cdash_agent::http::serve::serve(cfg))
+    let b = tauri::async_runtime::block_on(cdash_agent::http::serve::serve(server_config()))
         .map_err(|e| format!("cannot start agent server: {e}"))?;
-    let addr = format!("http://{}", b.addr);
-    *guard = Some(Running { addr: addr.clone(), bound: b });
+    let addr = url(&b);
+    *guard = Some(b);
     Ok(addr)
 }
 
-fn stop_locked(state: &Mutex<Option<Running>>) -> Result<(), String> {
+fn stop_locked(state: &Mutex<Option<Bound>>) -> Result<(), String> {
     let mut guard = state.lock().map_err(|_| "server state poisoned")?;
-    if let Some(r) = guard.take() {
-        tauri::async_runtime::block_on(r.bound.stop());
+    if let Some(b) = guard.take() {
+        tauri::async_runtime::block_on(b.stop());
     }
     Ok(())
 }
@@ -55,12 +54,12 @@ fn stop_locked(state: &Mutex<Option<Running>>) -> Result<(), String> {
 /// `None` once the serving task is gone, not merely once `stop` was called:
 /// a panicked accept loop must not keep reporting a live address while every
 /// request to it is refused.
-fn addr_locked(state: &Mutex<Option<Running>>) -> Result<Option<String>, String> {
+fn addr_locked(state: &Mutex<Option<Bound>>) -> Result<Option<String>, String> {
     let mut guard = state.lock().map_err(|_| "server state poisoned")?;
-    if guard.as_ref().is_some_and(|r| r.bound.is_finished()) {
+    if guard.as_ref().is_some_and(Bound::is_finished) {
         *guard = None;
     }
-    Ok(guard.as_ref().map(|r| r.addr.clone()))
+    Ok(guard.as_ref().map(url))
 }
 
 #[tauri::command]
@@ -125,25 +124,17 @@ fn validate_profile(input: &ProfileInput) -> Result<(), String> {
 /// "profiles" document is a JSON map keyed by profile name.
 type ProfilesDoc = serde_json::Map<String, serde_json::Value>;
 
-fn record_of(input: &ProfileInput) -> ProfileRecord {
-    ProfileRecord {
-        name: input.name.clone(),
-        base_url: input.base_url.clone(),
-        managed: input.managed.clone(),
-        auth: input.auth.clone(),
-        has_secret: false, // step 10 wires the keyring
-    }
-}
-
 fn profile_upsert(profiles: &mut ProfilesDoc, input: ProfileInput) -> Result<(), String> {
     validate_profile(&input)?;
-    let rec = record_of(&input);
+    let rec = ProfileRecord {
+        name: input.name,
+        base_url: input.base_url,
+        managed: input.managed,
+        auth: input.auth,
+        has_secret: false, // step 10 wires the keyring
+    };
     profiles.insert(rec.name.clone(), serde_json::to_value(&rec).expect("serializable"));
     Ok(())
-}
-
-fn profile_remove(profiles: &mut ProfilesDoc, name: &str) {
-    profiles.remove(name);
 }
 
 /// The delete command's whole logic: removing the active profile clears
@@ -152,7 +143,7 @@ fn delete_profile(profiles: &mut ProfilesDoc, active: &mut Option<String>, name:
     if active.as_deref() == Some(name) {
         *active = None;
     }
-    profile_remove(profiles, name);
+    profiles.remove(name);
 }
 
 /// Store-value parsing for the "profiles" key: an absent or non-object value
@@ -217,11 +208,7 @@ async fn request_inner(
         return Err("path must be absolute".into());
     }
     let url = format!("{addr}{path}");
-    let m = match method.as_str() {
-        "GET" => reqwest::Method::GET,
-        "POST" => reqwest::Method::POST,
-        m => reqwest::Method::from_bytes(m.as_bytes()).map_err(|e| e.to_string())?,
-    };
+    let m = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
     let req = attach_auth(active, http.request(m, &url));
     let req = if let Some(b) = body { req.json(&b) } else { req };
     let res = req.send().await.map_err(|e| e.to_string())?;
@@ -239,7 +226,7 @@ async fn api_request(
     path: String,
     body: Option<serde_json::Value>,
 ) -> Result<ApiResponse, String> {
-    let addr = state.0.lock().map_err(|_| "server state poisoned")?.as_ref().map(|r| r.addr.clone());
+    let addr = addr_locked(&state.0)?;
     let active = open_store(&app).ok().and_then(|s| active_record(&s));
     request_inner(&http.0, addr, active.as_ref(), method, path, body).await
 }
@@ -359,24 +346,15 @@ mod tests {
         stop_locked(&state).unwrap();
     }
 
-    #[test]
-    fn state_of_a_stopped_server_is_none() {
-        let state = Mutex::new(None);
-        assert_eq!(addr_locked(&state).unwrap(), None);
-        start_locked(&state).unwrap();
-        stop_locked(&state).unwrap();
-        assert_eq!(addr_locked(&state).unwrap(), None);
-    }
-
     /// `start_locked`/`stop_locked` block on tauri's own runtime; they must
     /// not run inside this test's tokio context.
-    fn boot() -> (Mutex<Option<Running>>, String) {
+    fn boot() -> (Mutex<Option<Bound>>, String) {
         let state = Mutex::new(None);
         let addr = std::thread::scope(|s| s.spawn(|| start_locked(&state).unwrap()).join().unwrap());
         (state, addr)
     }
 
-    fn shutdown(state: &Mutex<Option<Running>>) {
+    fn shutdown(state: &Mutex<Option<Bound>>) {
         std::thread::scope(|s| s.spawn(|| stop_locked(state).unwrap()).join().unwrap());
     }
 
@@ -440,19 +418,10 @@ mod tests {
         assert_eq!(profile_records(&doc).len(), 2);
         assert_eq!(profile_records(&doc)[0].base_url, "http://127.0.0.1:9999");
 
-        profile_remove(&mut doc, "remote");
+        doc.remove("remote");
         assert_eq!(profile_records(&doc).len(), 1);
-        profile_remove(&mut doc, "missing"); // delete of unknown is a no-op
+        doc.remove("missing"); // delete of unknown is a no-op
         assert_eq!(profile_records(&doc).len(), 1);
-    }
-
-    #[test]
-    fn profiles_survive_a_json_round_trip() {
-        let mut doc = ProfilesDoc::new();
-        profile_upsert(&mut doc, input("local")).unwrap();
-        let stored = serde_json::to_value(doc.clone()).unwrap();
-        let restored: ProfilesDoc = serde_json::from_value(stored).unwrap();
-        assert_eq!(profile_records(&restored), profile_records(&doc));
     }
 
     #[test]

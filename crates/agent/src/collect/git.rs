@@ -32,14 +32,9 @@ pub fn refresh_due(entry_ts_ms: u64, busy: bool, now_ms: u64) -> bool {
 /// `git status` per directory, refreshed in the background. A poll never waits
 /// on git: it gets the last known answer (or `None` the first time) and moves
 /// on. Mirrors `gitStatusFor` (`lib/collect.js:35-46`).
+#[derive(Default)]
 pub struct GitCache {
     map: Mutex<HashMap<String, Entry>>,
-}
-
-impl Default for GitCache {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl GitCache {

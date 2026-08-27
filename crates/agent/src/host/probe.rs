@@ -4,18 +4,14 @@ use std::path::Path;
 /// `statvfs` and never shells out to them.
 pub const REQUIRED_BINARIES: &[&str] = &["tmux", "claude", "git"];
 
+/// Unix-only, like the crate: `rustix::termios` (`main.rs`) and
+/// `rustix::fs::statvfs` (`host/disk.rs`) are unconditional, so a `cfg(not(unix))`
+/// arm here could never be compiled, let alone reached.
 fn is_executable(p: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(p)
-            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
-    }
-    #[cfg(not(unix))]
-    {
-        p.is_file()
-    }
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
 pub fn missing_binaries(path: &str) -> Vec<String> {

@@ -1,6 +1,4 @@
-use regex::Regex;
 use serde::Serialize;
-use std::sync::OnceLock;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GitStatus {
@@ -10,20 +8,12 @@ pub struct GitStatus {
     pub behind: u32,
 }
 
-fn ahead_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"ahead (\d+)").unwrap())
-}
-
-fn behind_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"behind (\d+)").unwrap())
-}
-
-fn captured(re: &Regex, hay: &str) -> u32 {
-    re.captures(hay)
-        .and_then(|c| c.get(1))
-        .and_then(|m| m.as_str().parse().ok())
+/// The count following `label` in a `-b` header, e.g. "ahead 2". Only the
+/// leading digits count, so "ahead 2, behind 1" reads as 2.
+fn counted(hay: &str, label: &str) -> u32 {
+    hay.split_once(label)
+        .map(|(_, rest)| rest.trim_start().split(|c: char| !c.is_ascii_digit()).next().unwrap_or(""))
+        .and_then(|d| d.parse().ok())
         .unwrap_or(0)
 }
 
@@ -42,8 +32,8 @@ pub fn parse_git_status(out: &str) -> GitStatus {
     GitStatus {
         branch,
         dirty: lines.len().saturating_sub(1),
-        ahead: captured(ahead_re(), head),
-        behind: captured(behind_re(), head),
+        ahead: counted(head, "ahead "),
+        behind: counted(head, "behind "),
     }
 }
 

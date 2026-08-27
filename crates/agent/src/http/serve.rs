@@ -123,6 +123,12 @@ impl Bound {
     }
 }
 
+/// The unauthenticated exceptions, enumerated rather than implied — and the
+/// list the router below is built from, so the two cannot disagree. A fourth
+/// entry here without a matching arm registers nothing; a fourth route without
+/// an entry here is unreachable.
+pub const UNAUTH_PATHS: &[&str] = &["/api/health", "/login", "/api/login"];
+
 /// Built in two halves: an unauthenticated router carrying exactly the
 /// enumerated exceptions, and a guarded one carrying everything else — the
 /// static file service included — with the guard applied as a layer over the
@@ -142,17 +148,26 @@ pub fn router(
         .layer(axum::middleware::from_fn_with_state(st, guard_mw))
         .with_state(ctx);
 
-    let mut unauth = Router::new()
-        .route("/api/health", get(|| async { Json(serde_json::json!({ "ok": true })) }));
-    if let Some(pw) = password {
-        // Exceptions 2 and 3: static HTML with no host data, and a throttled
-        // login that carries none either.
-        unauth = unauth.merge(
-            Router::new()
-                .route("/login", get(crate::auth::login::get_login))
-                .route("/api/login", axum::routing::post(crate::auth::login::post_login))
-                .with_state(pw),
-        );
+    // Built by walking UNAUTH_PATHS rather than beside it: the list and the
+    // router are one statement, so an exception cannot be added to the router
+    // without appearing in the list the bypass test reads.
+    let mut unauth = Router::new();
+    for p in UNAUTH_PATHS {
+        unauth = match (*p, password.clone()) {
+            ("/api/health", _) => unauth
+                .route(p, get(|| async { Json(serde_json::json!({ "ok": true })) })),
+            // Exceptions 2 and 3 exist only under `password`: static HTML with
+            // no host data, and a throttled login that carries none either.
+            ("/login", Some(pw)) => {
+                unauth.merge(Router::new().route(p, get(crate::auth::login::get_login)).with_state(pw))
+            }
+            ("/api/login", Some(pw)) => unauth.merge(
+                Router::new()
+                    .route(p, axum::routing::post(crate::auth::login::post_login))
+                    .with_state(pw),
+            ),
+            _ => unauth,
+        };
     }
 
     unauth.merge(guarded)
@@ -281,8 +296,9 @@ pub(crate) mod tests {
             .expect("port must be rebindable after stop");
     }
 
-    /// Minimal HTTP GET. `reqwest` is a dependency this crate does not need in
-    /// production, and the responses under test are small and well-formed.
+    /// `reqwest` used to be absent from this crate, which is why these helpers
+    /// spoke HTTP down a raw `TcpStream`. cf-access's JWKS fetch made it a
+    /// production dependency; the hand-rolled parser outlived its reason.
     pub(crate) async fn reqwest_get(url: &str) -> String {
         let (status, body) = http_get(url).await;
         assert_eq!(status, 200, "GET {url} returned {status}: {body}");
@@ -299,33 +315,18 @@ pub(crate) mod tests {
     }
 
     async fn raw_request(method: &str, url: &str, json: Option<&str>) -> (u16, String) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let rest = url.strip_prefix("http://").expect("http:// url");
-        let (host, path) = rest.split_once('/').expect("url has a path");
-        let mut req =
-            format!("{method} /{path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
+        // No redirects: the guard answers navigations with 302 -> /login, and
+        // following it would report 200 for a request that was refused.
+        let c = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("client builds");
+        let m = reqwest::Method::from_bytes(method.as_bytes()).expect("test method is a token");
+        let mut req = c.request(m, url);
         if let Some(b) = json {
-            req.push_str(&format!(
-                "Content-Type: application/json\r\nContent-Length: {}\r\n",
-                b.len()
-            ));
+            req = req.header("content-type", "application/json").body(b.to_string());
         }
-        req.push_str("\r\n");
-        if let Some(b) = json {
-            req.push_str(b);
-        }
-
-        let mut s = tokio::net::TcpStream::connect(host).await.unwrap();
-        s.write_all(req.as_bytes()).await.unwrap();
-        let mut raw = Vec::new();
-        s.read_to_end(&mut raw).await.unwrap();
-        let text = String::from_utf8_lossy(&raw).into_owned();
-        let status: u16 = text
-            .split_whitespace()
-            .nth(1)
-            .and_then(|c| c.parse().ok())
-            .unwrap_or(0);
-        let body = text.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
-        (status, body)
+        let res = req.send().await.expect("request reaches the test server");
+        (res.status().as_u16(), res.text().await.unwrap_or_default())
     }
 }

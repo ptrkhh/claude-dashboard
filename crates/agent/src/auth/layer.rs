@@ -8,11 +8,6 @@ use axum::Json;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-/// The unauthenticated exceptions, enumerated rather than implied.
-/// `/login` and `POST /api/login` join this list in plan 6b, bringing it to
-/// the spec's three.
-pub const UNAUTH_PATHS: &[&str] = &["/api/health", "/login", "/api/login"];
-
 #[derive(Clone)]
 pub struct GuardState {
     pub auth: Arc<AuthConfig>,
@@ -28,6 +23,10 @@ fn unauthorized() -> Response {
 }
 
 /// All configured guards must pass.
+fn header(h: &axum::http::HeaderMap, k: &str) -> Option<String> {
+    h.get(k).and_then(|v| v.to_str().ok()).map(str::to_string)
+}
+
 pub async fn guard_mw(
     State(st): State<GuardState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -38,26 +37,14 @@ pub async fn guard_mw(
         return next.run(req).await;
     }
 
-    let bearer = req
-        .headers()
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-    let proxy_identity = req
-        .headers()
-        .get(&st.auth.proxy_header)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-    let cf_assertion = req
-        .headers()
-        .get("Cf-Access-Jwt-Assertion")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-    let cookie = req
-        .headers()
-        .get(axum::http::header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+    // `HeaderMap::get` is case-insensitive and takes `&str`, so one function
+    // serves all four. A free fn and not a closure: a closure would hold its
+    // borrow of `req` past the `next.run(req)` move below.
+    let h = req.headers();
+    let bearer = header(h, "authorization");
+    let proxy_identity = header(h, &st.auth.proxy_header);
+    let cf_assertion = header(h, "cf-access-jwt-assertion");
+    let cookie = header(h, "cookie");
 
     for g in &st.auth.guards {
         let ok = match g {
@@ -125,17 +112,7 @@ macro_rules! guarded_routes {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::http::serve::GUARDED_PATHS;
-
-    #[test]
-    fn exactly_the_enumerated_routes_are_unauthenticated() {
-        // Assertion 1's companion: a fourth exception fails here on the day it
-        // is added. `/login` and `/api/login` land in plan 6b; until then the
-        // list is shorter, and this test says so rather than passing blindly.
-        assert!(UNAUTH_PATHS.contains(&"/api/health"));
-        assert!(UNAUTH_PATHS.len() <= 3, "no more than the three enumerated exceptions");
-    }
 
     #[test]
     fn every_guarded_route_is_listed_for_the_bypass_test() {

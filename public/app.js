@@ -374,13 +374,10 @@ function renderCrumbs(path) {
   pkCrumbs.scrollLeft = pkCrumbs.scrollWidth; // keep the deepest crumb in view
 }
 
+// starBtn is the one place that decides how a star looks; querySelectorAll
+// returns a static list, so replacing during iteration is safe.
 function refreshStars() {
-  pkList.querySelectorAll('.pk-star').forEach(btn => {
-    const on = favorites.includes(btn.dataset.fav);
-    btn.classList.toggle('on', on);
-    btn.innerHTML = on ? ICONS.starFilled : ICONS.star;
-    btn.setAttribute('aria-label', on ? 'Remove favorite' : 'Add favorite');
-  });
+  pkList.querySelectorAll('.pk-star').forEach(b => { b.outerHTML = starBtn(b.dataset.fav); });
 }
 async function toggleFav(path) {
   try {
@@ -405,9 +402,8 @@ let timer = null;
 let gen = 0; // stale-tick guard: a superseded tick's result is dropped
 
 function arm() {
-  const g = gen;
   clearTimeout(timer);
-  timer = setTimeout(() => { if (g === gen) tick(); }, cdashBackoff.delay(bk));
+  timer = setTimeout(tick, cdashBackoff.delay(bk));
 }
 
 async function tick() {
@@ -453,6 +449,9 @@ function poll() {
 $('#launch').innerHTML = `${ICONS.play}<span>Launch</span>`;
 
 poll();
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) { clearTimeout(timer); gen++; bk = cdashBackoff.initial(); tick(); }
-});
+document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+
+// Registration lives here, not in an inline script, so it shares one isTauri.
+// Both of sw.js's assumptions (same-origin /api/, http-cache semantics) break
+// in the Tauri webview.
+if (!isTauri && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});

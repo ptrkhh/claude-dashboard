@@ -1,6 +1,3 @@
-use regex::Regex;
-use std::sync::OnceLock;
-
 /// A rejected request. The HTTP layer renders this as a 400 with the message
 /// as the `error` field, matching `server.js:41`.
 #[derive(Debug, Clone, PartialEq)]
@@ -20,33 +17,30 @@ pub fn assert_path(p: &str) -> Result<(), BadRequest> {
     }
 }
 
-fn kill_name_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    // `(?-u)`: JS's `\w` without the `u` flag is ASCII-only, and this crate's
-    // is Unicode-aware, so the plain port would admit `cdash-café` — a session
-    // this dashboard never created and Node refused to kill.
-    RE.get_or_init(|| Regex::new(r"(?-u)^cdash-[\w-]+$").unwrap())
-}
-
-fn sid_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^(?i)[0-9a-f-]{36}$").unwrap())
-}
-
 /// Mirrors the inline guard at `server.js:62`. The value reaches
 /// `tmux kill-session -t`, so nothing outside this shape may pass.
+///
+/// Byte-wise and not a regex: JS's `\w` without the `u` flag is ASCII, and
+/// every regex engine here is Unicode-aware by default, so the shape has to
+/// say ASCII rather than remember a flag. `bytes()` also means no `^…$`
+/// anchor question — there is no line for a newline to start.
 pub fn assert_kill_name(name: &str) -> Result<(), BadRequest> {
-    if kill_name_re().is_match(name) {
+    let ok = name.strip_prefix("cdash-").is_some_and(|rest| {
+        !rest.is_empty()
+            && rest.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    });
+    if ok {
         Ok(())
     } else {
         Err(BadRequest("bad name".to_string()))
     }
 }
 
-/// Mirrors `assertValidSid` (`lib/collect.js:168-170`). Rust's `regex` has no
-/// implicit multiline anchors, so `^…$` cannot be escaped by a newline.
+/// Mirrors `assertValidSid` (`lib/collect.js:168-170`). A fixed length over
+/// bytes, so no anchor can be escaped by a newline and no Unicode digit
+/// widens the class.
 pub fn assert_valid_sid(sid: &str) -> Result<(), BadRequest> {
-    if sid_re().is_match(sid) {
+    if sid.len() == 36 && sid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
         Ok(())
     } else {
         Err(BadRequest(format!("bad sid: {sid}")))

@@ -1,9 +1,11 @@
 //! Spec assertions 1–5. Assertions 7–12 arrive with the password guard (6b).
+mod common;
+use common::send;
+
 use cdash_agent::auth::config::{AuthConfig, GuardKind};
 use cdash_agent::http::serve::{serve, Config, GUARDED_PATHS};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn tempdir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("cdash-authit-{tag}-{}", std::process::id()));
@@ -43,25 +45,8 @@ async fn req(
     headers: &[&str],
     body: Option<&str>,
 ) -> (u16, String) {
-    let mut r = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
-    for h in headers {
-        r.push_str(h);
-        r.push_str("\r\n");
-    }
-    if let Some(b) = body {
-        r.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n", b.len()));
-    }
-    r.push_str("\r\n");
-    if let Some(b) = body {
-        r.push_str(b);
-    }
-    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
-    s.write_all(r.as_bytes()).await.unwrap();
-    let mut raw = Vec::new();
-    s.read_to_end(&mut raw).await.unwrap();
-    let text = String::from_utf8_lossy(&raw).into_owned();
-    let status = text.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
-    (status, text.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+    let res = send(addr, method, path, headers, body.map(|b| ("application/json", b))).await;
+    (res.status().as_u16(), res.text().await.unwrap_or_default())
 }
 
 #[tokio::test]

@@ -43,16 +43,8 @@ fn prompt_hidden(prompt: &str) -> Result<String, String> {
 #[tokio::main]
 async fn main() {
     match std::env::args().nth(1).as_deref() {
-        None | Some("set-password") => {}
-        // Without this, `cdash-agent --version` binds a port and parks forever.
-        Some(other) => {
-            eprintln!("unknown argument: {other}\nusage: cdash-agent [set-password]");
-            std::process::exit(2);
-        }
-    }
-
-    if std::env::args().nth(1).as_deref() == Some("set-password") {
-        match read_password_twice() {
+        None => {}
+        Some("set-password") => match read_password_twice() {
             Ok(hash) => {
                 println!("{hash}");
                 return;
@@ -61,6 +53,11 @@ async fn main() {
                 eprintln!("{e}");
                 std::process::exit(2);
             }
+        },
+        // Without this, `cdash-agent --version` binds a port and parks forever.
+        Some(other) => {
+            eprintln!("unknown argument: {other}\nusage: cdash-agent [set-password]");
+            std::process::exit(2);
         }
     }
 

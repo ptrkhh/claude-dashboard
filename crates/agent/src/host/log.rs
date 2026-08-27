@@ -6,14 +6,9 @@ const MAX_LINES: usize = 200;
 
 /// A 200-entry ring of `HH:MM:SS`-prefixed lines, mirroring
 /// `logBuffer` in `lib/collect.js:21-27`. Also echoes to stderr.
+#[derive(Default)]
 pub struct LogBuffer {
     lines: Mutex<VecDeque<String>>,
-}
-
-impl Default for LogBuffer {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl LogBuffer {

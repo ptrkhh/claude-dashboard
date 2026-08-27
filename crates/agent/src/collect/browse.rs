@@ -1,3 +1,4 @@
+use super::validate::BadRequest;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -19,21 +20,9 @@ pub struct Listing {
     pub truncated: bool,
 }
 
-/// A browse failure is always a 400 with a fixed message. Mirrors the errno
-/// mapping in `server.js:47`, kept next to the function that produces the
-/// errors so the HTTP layer cannot forget it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct BrowseError {
-    pub message: String,
-}
-
-impl BrowseError {
-    pub fn status(&self) -> u16 {
-        400
-    }
-}
-
-fn map_err(e: &std::io::Error) -> BrowseError {
+/// A browse failure is always a 400 with a fixed message (the errno mapping in
+/// `server.js:47`), which is exactly what `BadRequest` already means.
+fn map_err(e: &std::io::Error) -> BadRequest {
     use std::io::ErrorKind;
     let message = match e.kind() {
         ErrorKind::PermissionDenied => "Permission denied",
@@ -41,12 +30,12 @@ fn map_err(e: &std::io::Error) -> BrowseError {
         ErrorKind::NotADirectory => "Not a folder",
         _ => "Cannot read folder",
     };
-    BrowseError { message: message.to_string() }
+    BadRequest(message.to_string())
 }
 
 /// Folders only — a project directory is what is being chosen — plus symlinks,
 /// which commonly point at directories. Sorted case-insensitively.
-pub async fn list_dirs(target: &str, show_hidden: bool) -> Result<Listing, BrowseError> {
+pub async fn list_dirs(target: &str, show_hidden: bool) -> Result<Listing, BadRequest> {
     let abs = if target.is_empty() {
         PathBuf::from("/")
     } else {
@@ -154,8 +143,8 @@ mod tests {
     async fn a_nonexistent_path_yields_a_400_with_a_fixed_message() {
         // A7: the raw OS error must not reach the client.
         let e = list_dirs("/no/such/dir/cdash-xyz", false).await.unwrap_err();
-        assert_eq!(e.message, "No such folder");
-        assert_eq!(e.status(), 400);
+        // BadRequest is the 400 — the HTTP layer maps it in one place.
+        assert_eq!(e, BadRequest("No such folder".into()));
     }
 
     #[tokio::test]
@@ -163,6 +152,6 @@ mod tests {
         let root = fixture("notdir");
         let f = root.join("a-file.txt");
         let e = list_dirs(f.to_str().unwrap(), false).await.unwrap_err();
-        assert_eq!(e.message, "Not a folder");
+        assert_eq!(e, BadRequest("Not a folder".into()));
     }
 }

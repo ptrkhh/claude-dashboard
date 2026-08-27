@@ -1,13 +1,15 @@
 //! Spec assertions 7–12, plus assertion 5 with its exact `bearer,password` pair.
+mod common;
+use common::send;
+
 use cdash_agent::auth::boot::decide;
 use cdash_agent::auth::config::{AuthConfig, GuardKind};
 use cdash_agent::auth::login::PasswordState;
 use cdash_agent::auth::password::hash_password;
 use cdash_agent::auth::throttle::DEFAULT_PENDING_MAX;
-use cdash_agent::http::serve::{serve, Config};
+use cdash_agent::http::serve::{serve, Config, GUARDED_PATHS, UNAUTH_PATHS};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const PW: &str = "a good long password";
 
@@ -63,33 +65,19 @@ async fn req(
     content_type: Option<&str>,
     body: Option<&str>,
 ) -> Resp {
-    let mut r = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
-    for h in headers {
-        r.push_str(h);
-        r.push_str("\r\n");
-    }
-    if let Some(b) = body {
-        if let Some(ct) = content_type {
-            r.push_str(&format!("Content-Type: {ct}\r\n"));
-        }
-        r.push_str(&format!("Content-Length: {}\r\n", b.len()));
-    }
-    r.push_str("\r\n");
-    if let Some(b) = body {
-        r.push_str(b);
-    }
-    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
-    s.write_all(r.as_bytes()).await.unwrap();
-    let mut raw = Vec::new();
-    s.read_to_end(&mut raw).await.unwrap();
-    let text = String::from_utf8_lossy(&raw).into_owned();
-    let status = text.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
-    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+    let res = send(addr, method, path, headers, body.map(|b| (content_type.unwrap_or(""), b))).await;
+    let status = res.status().as_u16();
+    let head = res
+        .headers()
+        .iter()
+        .map(|(k, v)| format!("{k}: {}", String::from_utf8_lossy(v.as_bytes())))
+        .collect::<Vec<_>>()
+        .join("\r\n");
     Resp {
         status,
         headers: head.to_lowercase(),
-        raw_headers: head.to_string(),
-        body: body.to_string(),
+        raw_headers: head,
+        body: res.text().await.unwrap_or_default(),
     }
 }
 
@@ -147,6 +135,36 @@ async fn assertion_7_login_page_wrong_password_and_the_cookie_round_trip() {
     let nav = req(&a, "GET", "/", &[], None, None).await;
     assert_eq!(nav.status, 302);
     assert!(nav.headers.contains("location: /login"));
+}
+
+#[tokio::test]
+async fn the_unauthenticated_surface_is_exactly_the_three_exceptions() {
+    // The old version of this asserted `UNAUTH_PATHS.len() <= 3` against the
+    // const it also owned, which is not a check. This probes a live server:
+    // every listed exception answers without credentials, and every guarded
+    // path does not — so the list is the surface, not a description of it.
+    let b = serve(password_cfg(tempdir("surface"), vec![GuardKind::Password], None)).await.unwrap();
+    let a = b.addr.to_string();
+
+    for p in UNAUTH_PATHS {
+        // Each probe is chosen so the handler's answer differs from the
+        // guard's: /api/login answers 401 to a wrong password too, so it is
+        // probed with a content-type its own extractor refuses (415).
+        let r = match *p {
+            "/api/login" => req(&a, "POST", p, &[], Some("text/plain"), Some("x")).await,
+            _ => req(&a, "GET", p, &[], None, None).await,
+        };
+        assert_ne!(r.status, 401, "{p} is listed as an exception but the guard rejected it");
+        assert_ne!(r.status, 404, "{p} is listed as an exception but is not routed");
+    }
+    for (_, p) in GUARDED_PATHS {
+        let r = req(&a, "GET", p, &[], None, None).await;
+        assert!(
+            r.status == 401 || r.status == 302,
+            "{p} is guarded but answered {} unauthenticated",
+            r.status
+        );
+    }
 }
 
 #[tokio::test]
