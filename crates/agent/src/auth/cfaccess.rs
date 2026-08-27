@@ -196,18 +196,24 @@ mod tests {
     const AUD: &str = "aud-tag-for-this-app";
 
     /// A 2048-bit RSA keypair generated once per test process. `openssl` keeps
-    /// a private key out of the repository.
+    /// a private key out of the repository. `LazyLock` is load-bearing: tests
+    /// run in parallel threads, and an `exists()` check would let one thread
+    /// read the file while `openssl -out` is still writing it.
+    static KEYPAIR: std::sync::LazyLock<(Vec<u8>, Jwks)> = std::sync::LazyLock::new(gen_keypair);
+
     fn keypair() -> (Vec<u8>, Jwks) {
+        KEYPAIR.clone()
+    }
+
+    fn gen_keypair() -> (Vec<u8>, Jwks) {
         let dir = std::env::temp_dir().join(format!("cdash-cf-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let priv_path = dir.join("k.pem");
-        if !priv_path.exists() {
-            let out = std::process::Command::new("openssl")
-                .args(["genrsa", "-out", priv_path.to_str().unwrap(), "2048"])
-                .output()
-                .expect("openssl must be available for this test");
-            assert!(out.status.success(), "openssl genrsa failed");
-        }
+        let out = std::process::Command::new("openssl")
+            .args(["genrsa", "-out", priv_path.to_str().unwrap(), "2048"])
+            .output()
+            .expect("openssl must be available for this test");
+        assert!(out.status.success(), "openssl genrsa failed");
         let modulus = std::process::Command::new("openssl")
             .args(["rsa", "-in", priv_path.to_str().unwrap(), "-noout", "-modulus"])
             .output()

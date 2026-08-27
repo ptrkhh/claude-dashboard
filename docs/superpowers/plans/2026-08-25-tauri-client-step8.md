@@ -36,7 +36,7 @@
 - Consumes: nothing from other tasks.
 - Produces: a Tauri app whose builder compiles; later tasks register commands on it.
 
-- [ ] **Step 1: Workspace member**
+- [x] **Step 1: Workspace member**
 
 In the root `Cargo.toml`, add `"crates/tauri-app"` to `[workspace] members`.
 
@@ -65,7 +65,7 @@ tokio = { version = "1", features = ["full"] }
 fn main() { tauri_build::build() }
 ```
 
-- [ ] **Step 2: Configuration**
+- [x] **Step 2: Configuration**
 
 `crates/tauri-app/tauri.conf.json`:
 
@@ -95,7 +95,7 @@ fn main() { tauri_build::build() }
 
 Notes for the reviewer: `withGlobalTauri: true` is load-bearing twice — it is the predicate confirmation for `public/app.js`'s transport branch (the runtime injects `window.__TAURI__`; `__TAURI_INTERNALS__` is present regardless), and it keeps the no-build-step property (classic scripts call `window.__TAURI__` directly, no bundler). `frontendDist` points at the shared `public/` — one copy of the UI across all delivery modes.
 
-- [ ] **Step 3: Minimal main**
+- [x] **Step 3: Minimal main**
 
 `crates/tauri-app/src/main.rs`:
 
@@ -110,12 +110,12 @@ fn main() {
 }
 ```
 
-- [ ] **Step 4: Compile gate**
+- [x] **Step 4: Compile gate**
 
 Run: `cargo check --locked -p cdash-tauri`
 Expected: PASS. First run pulls the Tauri tree; webkit2gtk-4.1 must be present (`pkg-config --exists webkit2gtk-4.1`).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add Cargo.toml crates/tauri-app
@@ -166,15 +166,15 @@ fn server_start(state: tauri::State<ServerState>) -> Result<String, String> {
 
 The contract, regardless of exact plumbing: the caller learns the bound address synchronously after `serve` resolves; readiness is that resolution (nothing polls); a bind error propagates as `Err(String)` naming the reason — the spec's "held port is a diagnosed condition".
 
-- [ ] **Step 1: Read the real signature, then implement**
+- [x] **Step 1: Read the real signature, then implement**
 
 Run `grep -n 'pub async fn serve\|pub struct Bound\|pub fn router' crates/agent/src/http/*.rs` and adapt.
 
-- [ ] **Step 2: A test proves the lifecycle**
+- [x] **Step 2: A test proves the lifecycle**
 
 Add `crates/tauri-app/src/server_test.rs` (`#[cfg(test)]`) that calls the same internal start function the command wraps — not through Tauri — asserting: returns an `Ok(addr)` where addr starts `http://127.0.0.1:`; a second start returns the same address (idempotent); stop clears it. Run: `cargo test -p cdash-tauri`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add crates/tauri-app
@@ -192,7 +192,7 @@ git commit -m "feat: in-process agent served on a tokio task with start/stop/sta
 - Consumes: the running server's address (Task 2 state).
 - Produces: `api_request(method: String, path: String, body: Option<serde_json::Value>) -> Result<{status: u16, body: serde_json::Value}, String>`.
 
-- [ ] **Step 1: Implement**
+- [x] **Step 1: Implement**
 
 One `reqwest::Client` built once (no cookie jar — explicit per spec), stored in Tauri state. Attach `Authorization: Bearer …` only if the active profile carries a token (profiles arrive in Task 4; structure the code so credential attachment is a single function `attach_auth(&Profile, &mut RequestParts)` that is currently a no-op passthrough).
 
@@ -228,11 +228,11 @@ async fn api_request(
 }
 ```
 
-- [ ] **Step 2: Test**
+- [x] **Step 2: Test**
 
 Extend the test module: boot the in-process server, call the internal request function against `/api/health`, assert `status == 200` and `body.ok == true`; assert a relative path (`"api/x"`) is rejected.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add crates/tauri-app
@@ -254,10 +254,10 @@ git commit -m "feat: api_request command, loopback-bound, no cookie jar"
 
 Storage: one JSON document under the store key `"profiles"`. `profile_activate` records the chosen name under key `"active"`. All commands operate through the store plugin's Rust API; nothing here touches disk outside the app-config dir.
 
-- [ ] **Step 1: Implement the four commands + `host_platform`** (`std::env::consts::OS`)
-- [ ] **Step 2: Register every command on the builder; compile**
-- [ ] **Step 3: Round-trip test** for save/list/delete/activate against a temp store dir
-- [ ] **Step 4: Commit**
+- [x] **Step 1: Implement the four commands + `host_platform`** (`std::env::consts::OS`)
+- [x] **Step 2: Register every command on the builder; compile**
+- [x] **Step 3: Round-trip test** for save/list/delete/activate against a temp store dir
+- [x] **Step 4: Commit**
 
 ```bash
 git add crates/tauri-app
@@ -272,23 +272,28 @@ git commit -m "feat: profile store and the narrowed command surface"
 - Modify: `public/app.js` (comment only)
 - Modify: `README.md`
 
-- [ ] **Step 1: Record the confirmed predicate**
+- [x] **Step 1: Record the confirmed predicate**
 
 Update the `ponytail:` comment at `public/app.js:111` and the index.html registration gate comment: with `withGlobalTauri: true` (set in Task 1's conf), the runtime injects `window.__TAURI__` (and `__TAURI_INTERNALS__` unconditionally); the existing OR-predicate therefore fires correctly in the Tauri webview and never on the web. Remove "unconfirmed" wording.
 
 Note: `invokeTauri`'s provisional `invoke('api', { path, body })` must now name the real command: `api_request`, invoked as
 `window.__TAURI__.core.invoke('api_request', { method, path, body })` (Tauri v2 global API shape — verify against https://tauri.app/develop/calling-rust/ at execution time and adapt; args are passed camelCase-mapped). Update `api()`'s Tauri branch accordingly, mapping GET/POST and JSON body per Task 3's signature.
 
-- [ ] **Step 2: README section**
+- [x] **Step 2: README section**
 
 Short "Desktop client (Linux)" paragraph: `cargo run -p cdash-tauri`, in-process agent, profiles stored in app config, secrets arrive in step 10.
 
-- [ ] **Step 3: Full gate**
+- [x] **Step 3: Full gate**
 
 Run: `npm test && cargo clippy --all-targets --locked -- -D warnings -D clippy::disallowed_types && cargo test --all --locked`
 Expected: PASS everywhere.
 
-- [ ] **Step 4: Commit**
+Ran green only after the follow-up review: `cargo test --all` builds `cdash-tauri`,
+which needs webkit2gtk and libappindicator — absent on `ubuntu-latest`, so CI had
+been failing in a build script before a single test ran, masking a racing
+cf-access test fixture underneath. Both fixed; the gate is now honest.
+
+- [x] **Step 4: Commit**
 
 ```bash
 git add public/app.js public/index.html README.md
@@ -296,6 +301,15 @@ git commit -m "docs: confirm the Tauri detection predicate and name api_request"
 ```
 
 ---
+
+## Found after the fact
+
+Every task above shipped, but nothing ever called `server_start` — not the
+builder, not `public/app.js` — so `api_request` answered `server not running`
+for every request and the desktop client was inert on launch. The client *is*
+the server on Linux and macOS, so it now starts the agent in Tauri's `setup`
+hook. The plan never named an owner for that call; a future step that adds the
+external/VPS profile has to decide when *not* to start one.
 
 ## What this plan does not cover
 
