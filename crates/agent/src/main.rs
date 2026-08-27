@@ -42,6 +42,15 @@ fn prompt_hidden(prompt: &str) -> Result<String, String> {
 
 #[tokio::main]
 async fn main() {
+    match std::env::args().nth(1).as_deref() {
+        None | Some("set-password") => {}
+        // Without this, `cdash-agent --version` binds a port and parks forever.
+        Some(other) => {
+            eprintln!("unknown argument: {other}\nusage: cdash-agent [set-password]");
+            std::process::exit(2);
+        }
+    }
+
     if std::env::args().nth(1).as_deref() == Some("set-password") {
         match read_password_twice() {
             Ok(hash) => {
@@ -65,6 +74,23 @@ async fn main() {
         }
     };
     let (bind, port) = (cfg.bind, cfg.port);
+
+    // Both exposures are undiagnosable from their symptom, so they are named
+    // here rather than left for the operator to infer.
+    if !bind.is_loopback() && cfg.auth.is_open() {
+        eprintln!(
+            "warning: CDASH_BIND={bind} with CDASH_AUTH=none — every session runs with \
+             --dangerously-skip-permissions, so anyone who can reach this port has \
+             remote code execution on this host"
+        );
+    }
+    if cfg.password.as_ref().is_some_and(|p| !p.policy.secure_cookie) {
+        eprintln!(
+            "warning: CDASH_ALLOW_INSECURE_COOKIE=1 — the session cookie has lost Secure \
+             and the __Host- prefix and now crosses the wire in clear; anyone on the path \
+             can steal a logged-in session"
+        );
+    }
 
     match serve(cfg).await {
         Ok(b) => {

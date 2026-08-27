@@ -45,10 +45,13 @@ impl Config {
     pub fn from_env() -> Result<Self, String> {
         let auth = crate::auth::config::config_from_env()?;
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-        let bind: IpAddr = std::env::var("CDASH_BIND")
-            .ok()
-            .and_then(|b| b.parse().ok())
-            .unwrap_or_else(|| "127.0.0.1".parse().expect("literal is a valid IP"));
+        // Same principle as CDASH_AUTH below: a typo is refused, not defaulted.
+        // `CDASH_BIND=0.0.0..1` silently becoming loopback also flips the
+        // cookie policy `boot::decide` derives from this value.
+        let bind: IpAddr = match std::env::var("CDASH_BIND") {
+            Err(_) => "127.0.0.1".parse().expect("literal is a valid IP"),
+            Ok(b) => b.parse().map_err(|_| format!("CDASH_BIND: not an IP address: {b:?}"))?,
+        };
 
         let password = if auth.guards.contains(&crate::auth::config::GuardKind::Password) {
             let policy = crate::auth::boot::decide(
@@ -57,10 +60,15 @@ impl Config {
                 std::env::var("CDASH_PUBLIC_URL").ok().as_deref(),
                 std::env::var("CDASH_ALLOW_INSECURE_COOKIE").as_deref() == Ok("1"),
             )?;
-            let pending_max = std::env::var("CDASH_LOGIN_PENDING_MAX")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(crate::auth::throttle::DEFAULT_PENDING_MAX);
+            // A bound of 0 admits nothing: every login would 503 forever
+            // while the page advises trying again shortly.
+            let pending_max = match std::env::var("CDASH_LOGIN_PENDING_MAX") {
+                Err(_) => crate::auth::throttle::DEFAULT_PENDING_MAX,
+                Ok(v) => match v.parse::<usize>() {
+                    Ok(n) if n > 0 => n,
+                    _ => return Err(format!("CDASH_LOGIN_PENDING_MAX: not a positive integer: {v:?}")),
+                },
+            };
             Some(crate::auth::login::PasswordState::new(policy, pending_max))
         } else {
             None
@@ -69,7 +77,10 @@ impl Config {
         Ok(Self {
             password,
             bind,
-            port: std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080),
+            port: match std::env::var("PORT") {
+                Err(_) => 8080,
+                Ok(p) => p.parse().map_err(|_| format!("PORT: not a port number: {p:?}"))?,
+            },
             claude_dir: std::env::var("CLAUDE_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from(&home).join(".claude")),
@@ -102,6 +113,13 @@ impl Bound {
     pub async fn stop(self) {
         let _ = self.stop.send(true);
         let _ = self.task.await;
+    }
+
+    /// Whether the serving task has ended. An embedder that caches `addr` needs
+    /// this: an accept loop that panicked leaves the address string valid-looking
+    /// while every request to it is refused.
+    pub fn is_finished(&self) -> bool {
+        self.task.is_finished()
     }
 }
 

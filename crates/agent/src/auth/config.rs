@@ -12,20 +12,22 @@ pub enum GuardKind {
 /// Parse the comma-composable `CDASH_AUTH`. An unrecognised leg is an error,
 /// never a silent fall back to `none`: this origin runs every session with
 /// `--dangerously-skip-permissions`.
+///
+/// An *empty* leg is unrecognised too. Dropping empties instead would make
+/// `CDASH_AUTH=" "` and `CDASH_AUTH=","` — what a compose file renders when the
+/// variable it interpolates came back empty — boot silently open, which is the
+/// one outcome this function exists to prevent. Only an absent `CDASH_AUTH`
+/// means `none`, and that decision belongs to `config_from_env`.
 pub fn parse_auth(spec: &str) -> Result<Vec<GuardKind>, String> {
-    let legs: Vec<&str> = spec.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-    if legs.is_empty() {
-        return Ok(vec![GuardKind::None]);
-    }
     let mut out = Vec::new();
-    for leg in &legs {
-        out.push(match *leg {
+    for leg in spec.split(',').map(str::trim) {
+        out.push(match leg {
             "none" => GuardKind::None,
             "bearer" => GuardKind::Bearer,
             "cf-access" => GuardKind::CfAccess,
             "trusted-proxy" => GuardKind::TrustedProxy,
             "password" => GuardKind::Password,
-            other => return Err(format!("unknown CDASH_AUTH value: {other}")),
+            other => return Err(format!("unknown CDASH_AUTH value: {other:?}")),
         });
     }
     if out.len() > 1 && out.contains(&GuardKind::None) {
@@ -87,7 +89,11 @@ impl AuthConfig {
 }
 
 pub fn config_from_env() -> Result<AuthConfig, String> {
-    let guards = parse_auth(&std::env::var("CDASH_AUTH").unwrap_or_default())?;
+    // Absent means `none`; present-but-empty is a misconfiguration, not a default.
+    let guards = match std::env::var("CDASH_AUTH") {
+        Err(_) => vec![GuardKind::None],
+        Ok(spec) => parse_auth(&spec)?,
+    };
     let proxy_allow = std::env::var("CDASH_PROXY_ALLOW")
         .unwrap_or_default()
         .split(',')
@@ -119,8 +125,11 @@ mod tests {
 
     #[test]
     fn an_empty_or_absent_setting_is_the_local_default() {
-        assert_eq!(parse_auth("").unwrap(), vec![GuardKind::None]);
         assert_eq!(parse_auth("none").unwrap(), vec![GuardKind::None]);
+        // A spec that is only separators is refused, not read as `none`.
+        for empty in ["", " ", ",", ",,", " , "] {
+            assert!(parse_auth(empty).is_err(), "{empty:?} must not boot the origin open");
+        }
     }
 
     #[test]
