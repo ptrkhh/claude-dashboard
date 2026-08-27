@@ -175,7 +175,15 @@ pub async fn post_purge(
 }
 
 /// Behind the guard: revoking a session requires holding one.
-pub async fn post_logout(State(ctx): State<Arc<Ctx>>, headers: axum::http::HeaderMap) -> Response {
+///
+/// The unused `Json` extractor is the CSRF control, not decoration: it is what
+/// answers 415 to the three CORS-simple content types, so a sibling origin's
+/// auto-submitting form cannot revoke a live session. Callers send `{}`.
+pub async fn post_logout(
+    State(ctx): State<Arc<Ctx>>,
+    headers: axum::http::HeaderMap,
+    Json(_body): Json<serde_json::Value>,
+) -> Response {
     match ctx.password.get() {
         Some(pw) => crate::auth::login::post_logout(pw, &headers).await,
         // Reachable only under a chain without `password`, where there is no

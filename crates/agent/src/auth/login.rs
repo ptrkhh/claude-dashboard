@@ -56,7 +56,16 @@ pub struct PasswordState {
     pub policy: Arc<PasswordPolicy>,
     pub sessions: Arc<Sessions>,
     pub throttle: Arc<Throttle>,
+    /// scrypt at N=16384, r=8 allocates 16 MiB *per concurrent verify*. The
+    /// pending bound was sized against socket cost, and Rule B hands a
+    /// repeated wrong password a delay of zero, so nothing else stops 1024
+    /// admitted attempts from asking for 16 GiB at once.
+    verifiers: Arc<tokio::sync::Semaphore>,
 }
+
+/// ponytail: a flat 4. Raise it only with a memory budget in hand — each
+/// permit is 16 MiB of scrypt working set.
+const MAX_CONCURRENT_VERIFIES: usize = 4;
 
 impl PasswordState {
     pub fn new(policy: PasswordPolicy, pending_max: usize) -> Self {
@@ -64,6 +73,7 @@ impl PasswordState {
             policy: Arc::new(policy),
             sessions: Arc::new(Sessions::new()),
             throttle: Arc::new(Throttle::new(pending_max)),
+            verifiers: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_VERIFIES)),
         }
     }
 
@@ -114,7 +124,9 @@ pub async fn post_login(State(st): State<PasswordState>, Json(body): Json<LoginB
         tokio::time::sleep(delay).await;
     }
 
-    // scrypt is deliberately expensive: never run it on a reactor thread.
+    // scrypt is deliberately expensive: never run it on a reactor thread, and
+    // never more than a handful at a time.
+    let _permit = st.verifiers.acquire().await;
     let hash = st.policy.hash.clone();
     let attempt = body.password.clone();
     let ok = tokio::task::spawn_blocking(move || verify_password(&attempt, &hash))

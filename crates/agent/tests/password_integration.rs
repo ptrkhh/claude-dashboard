@@ -188,6 +188,21 @@ async fn assertion_8_csrf_invariants_distinguish_415_400_and_422() {
     // And nothing loosens CORS server-side.
     let s = req(&a, "GET", "/api/sessions", &[&ck], None, None).await;
     assert!(!s.headers.contains("access-control-allow-origin"));
+
+    // Logout is state-changing too: a sibling origin that can revoke the
+    // session denies service as effectively as one that can kill a pane.
+    // Last, because the successful call at the end revokes `ck`.
+    for ct in ["text/plain", "application/x-www-form-urlencoded", "multipart/form-data"] {
+        let r = req(&a, "POST", "/api/logout", &[&ck], Some(ct), Some("x=1")).await;
+        assert_eq!(r.status, 415, "a cross-site form must not be able to log the user out");
+    }
+    let alive = req(&a, "GET", "/api/sessions", &[&ck], None, None).await;
+    assert_eq!(alive.status, 200, "the rejected logout attempts must not have revoked anything");
+
+    let out = req(&a, "POST", "/api/logout", &[&ck], Some("application/json"), Some("{}")).await;
+    assert_eq!(out.status, 200, "the real thing still works");
+    let dead = req(&a, "GET", "/api/sessions", &[&ck], None, None).await;
+    assert_eq!(dead.status, 401, "logout revokes");
 }
 
 #[tokio::test]
