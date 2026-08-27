@@ -15,8 +15,18 @@ PATH="$HOME/.local/opt/aarch64-linux-musl-cross/bin:$PATH" \
 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc \
   cargo build --release --locked -p cdash-agent --target aarch64-unknown-linux-musl
 
+# A binary that dies instantly must not pass. `timeout`'s 124 IS the pass
+# here — it means the agent served until killed — so the gate is the boot
+# banner, not the exit status.
+boots() {
+  out=$(PORT=0 timeout 5 "$@" 2>&1 || true)
+  echo "$out" | grep -q "cdash-agent .* on http://127.0.0.1:" || {
+    echo "FAILED to boot: $*" >&2; echo "$out" >&2; exit 1
+  }
+}
+
 echo "--- executing both ---"
-PORT=0 ./target/x86_64-unknown-linux-musl/release/cdash-agent & p1=$!; sleep 1; kill $p1
-PORT=0 timeout 5 qemu-aarch64 -L "$HOME/.local/opt/aarch64-linux-musl-cross" \
-  ./target/aarch64-unknown-linux-musl/release/cdash-agent || true # timeout's exit 124 is the expected kill after a successful boot
-echo "both targets built"
+boots ./target/x86_64-unknown-linux-musl/release/cdash-agent
+boots qemu-aarch64 -L "$HOME/.local/opt/aarch64-linux-musl-cross" \
+  ./target/aarch64-unknown-linux-musl/release/cdash-agent
+echo "both targets built and booted"

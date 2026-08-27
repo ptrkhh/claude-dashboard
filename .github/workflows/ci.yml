@@ -8,35 +8,44 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.94.1
         with:
           components: clippy
+      # cdash-tauri links webkit2gtk and libappindicator; ubuntu-latest ships
+      # neither, so without this `--all` dies in a build script before a single
+      # test runs.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
+      - run: node --test
       - run: cargo test --all --locked
       - run: cargo clippy --all-targets --locked -- -D warnings -D clippy::disallowed_types
 
   release-matrix:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.1
+      # aws-lc-sys needs a musl C cross-compiler, which Ubuntu does not package.
+      # This action supplies one and registers a qemu-user runner, replacing a
+      # hand-rolled fetch from musl.cc — a host that has since stopped
+      # responding and took every release build down with it.
+      - uses: taiki-e/setup-cross-toolchain-action@v1
         with:
-          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
-      - run: sudo apt-get update && sudo apt-get install -y musl-tools qemu-user
-      # aarch64 musl C cross-compilation (ring/aws-lc-sys) needs an
-      # aarch64-linux-musl-gcc, which Ubuntu does not package — musl.cc does.
-      - name: Fetch the aarch64 musl cross-toolchain
+          target: ${{ matrix.target }}
+      - run: cargo build --release --locked -p cdash-agent
+      # Building is not the gate; booting is. `cargo run` goes through the
+      # runner the action registered, so aarch64 executes under qemu here.
+      # timeout's 124 means it served until killed, which is the pass — so
+      # assert on the banner instead of the exit status.
+      - name: Execute the binary
         run: |
-          curl -fsSL https://musl.cc/aarch64-linux-musl-cross.tgz | tar xz -C ~
-          echo ~/aarch64-linux-musl-cross/bin >> "$GITHUB_PATH"
-      - name: Build and execute both targets
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-musl-gcc
-        run: |
-          cargo build --release --locked -p cdash-agent --target x86_64-unknown-linux-musl
-          cargo build --release --locked -p cdash-agent --target aarch64-unknown-linux-musl
-          PORT=0 ./target/x86_64-unknown-linux-musl/release/cdash-agent & p=$!; sleep 1; kill $p
-          PORT=0 timeout 5 qemu-aarch64 -L ~/aarch64-linux-musl-cross \
-            ./target/aarch64-unknown-linux-musl/release/cdash-agent || true
+          PORT=0 timeout 5 cargo run --release --locked -p cdash-agent > boot.log 2>&1 || true
+          cat boot.log
+          grep -q "cdash-agent .* on http://127.0.0.1:" boot.log
       - uses: actions/upload-artifact@v4
         with:
-          name: cdash-agent-musl
-          path: |
-            target/x86_64-unknown-linux-musl/release/cdash-agent
-            target/aarch64-unknown-linux-musl/release/cdash-agent
+          name: cdash-agent-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/cdash-agent
