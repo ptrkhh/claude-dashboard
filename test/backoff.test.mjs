@@ -45,3 +45,15 @@ test('next never mutates the state it is given', () => {
   b.next(s, 'fail');
   assert.equal(b.delay(s), 4000);
 });
+
+test('only 401 and 403 halt; throttling and transport failures back off', () => {
+  // The rule this pins: a 429 that halted the poll would need a user action to
+  // clear, turning a transient rate limit into a dead dashboard.
+  assert.equal(b.outcomeFor(401), 'auth');
+  assert.equal(b.outcomeFor(403), 'auth');
+  for (const s of [429, 500, 502, 503, 400, 404, undefined]) {
+    assert.equal(b.outcomeFor(s), 'fail', `${s} must not halt the poll`);
+  }
+  assert.equal(b.next(b.initial(), b.outcomeFor(429)).halted, false);
+  assert.equal(b.next(b.initial(), b.outcomeFor(401)).halted, true);
+});

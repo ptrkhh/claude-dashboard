@@ -116,11 +116,15 @@ const isTauri = typeof window !== 'undefined' &&
 
 async function api(path, body) {
   if (isTauri) {
-    const res = await window.__TAURI__.core.invoke('api_request', {
-      method: body ? 'POST' : 'GET',
-      path,
-      body,
-    });
+    const invoke = window.__TAURI__?.core?.invoke;
+    if (!invoke) throw new Error('Tauri IPC unavailable (withGlobalTauri off?)');
+    let res;
+    try {
+      res = await invoke('api_request', { method: body ? 'POST' : 'GET', path, body });
+    } catch (e) {
+      // invoke rejects with the command's Err(String), not an Error.
+      throw new Error(String(e?.message ?? e));
+    }
     // api_request returns { status, body } without throwing on non-2xx;
     // re-raise as an Error to keep api()'s fetch-style contract.
     if (res.status >= 400) {
@@ -238,7 +242,7 @@ document.body.addEventListener('click', async e => {
   if (!el) return;
   try {
     if (el.dataset.kill) {
-      if (el.dataset.arm) { armedKill = null; await api('/api/kill', { name: el.dataset.kill }); poll(); }
+      if (armedKill === el.dataset.kill) { armedKill = null; await api('/api/kill', { name: el.dataset.kill }); poll(); }
       else {
         armedKill = el.dataset.kill; el.dataset.arm = '1'; el.textContent = 'Sure?';
         setTimeout(() => { if (armedKill === el.dataset.kill) armedKill = null; delete el.dataset.arm; el.innerHTML = ICONS.x; }, 3000);
@@ -411,15 +415,18 @@ async function tick() {
   if (document.hidden) { arm(); return; }
   let outcome;
   try {
-    render(await api('/api/sessions'));
+    const data = await api('/api/sessions');
+    if (g !== gen) return; // superseded mid-flight: never paint the old snapshot
+    render(data);
     $('#health').className = 'dot ok';
     $('#health-label').textContent = 'Connected';
     outcome = 'ok';
   } catch (err) {
+    if (g !== gen) return;
     // Only transport errors and 401/403 reach here as distinct things;
     // everything non-auth backs off. A halt is cleared only by poll(),
     // which is user-initiated.
-    outcome = err.status === 401 || err.status === 403 ? 'auth' : 'fail';
+    outcome = cdashBackoff.outcomeFor(err.status);
     $('#health').className = 'dot bad';
     $('#health-label').textContent = 'Disconnected';
   }

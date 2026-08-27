@@ -17,7 +17,10 @@ self.addEventListener('fetch', e => {
   }
   e.respondWith(caches.match(e.request).then(hit => {             // stale-while-revalidate
     const fresh = fetch(e.request)
-      .then(r => { if (r.ok) caches.open(CACHE).then(c => c.put(e.request, r.clone())); return r; })
+      // !r.redirected is load-bearing: the guard answers an unauthenticated
+      // sub-resource with 302 -> /login, not 401, and a followed redirect is a
+      // 200 login page that would be cached as app.js.
+      .then(r => { if (r.ok && !r.redirected) caches.open(CACHE).then(c => c.put(e.request, r.clone())).catch(() => {}); return r; })
       .catch(() => hit);
     return hit || fresh;
   }));
