@@ -75,3 +75,16 @@ tunnel, or a firewall allowing only Cloudflare's addresses. Anyone who can reach
 the origin directly skips Access entirely and lands on an agent that launches
 sessions with `--dangerously-skip-permissions`. If the origin might be
 reachable, use `CDASH_AUTH=password,cf-access`, which requires both.
+
+**Behind a `cloudflared` tunnel, `CDASH_AUTH=none` is enough.** The tunnel dials
+outward and proxies to loopback, so there is no inbound port to bypass and
+nothing for a guard to protect; Cloudflare's own documentation says a tunnelled
+origin need not validate the token. Keep `cf-access` on anyway if **other users
+or services share the box** — with `none`, any local user reaching
+`127.0.0.1:8080` gets code execution as *you*, which is a real escalation rather
+than a no-op. `bearer` does not substitute here: browsers do not send
+`Authorization` headers.
+
+The JWKS fetch is gated on `cf-access` being in the chain, not on the two
+`CDASH_CF_*` variables being set, so leaving them in a unit file after switching
+to `none` does not couple boot to Cloudflare's availability.

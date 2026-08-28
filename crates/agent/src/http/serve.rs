@@ -1,5 +1,5 @@
 use super::routes;
-use crate::auth::config::AuthConfig;
+use crate::auth::config::{AuthConfig, GuardKind};
 use crate::auth::layer::{guard_mw, GuardState};
 use crate::collect::ctx::Ctx;
 use crate::host;
@@ -180,8 +180,13 @@ pub async fn serve(cfg: Config) -> std::io::Result<Bound> {
     // Fetched before binding: a cf-access origin that cannot verify anything
     // must fail as a service that did not start, with a named reason, rather
     // than as a successful SSO followed by 401 on every request.
+    // Gated on the guard chain, not on the config being present. Leftover
+    // CDASH_CF_* variables in a unit file must not couple boot to Cloudflare's
+    // availability for a guard that is not in the chain — that turned a switch
+    // to `CDASH_AUTH=none` behind a tunnel into an agent that exits 2 whenever
+    // Cloudflare is unreachable.
     let cf = match cfg.auth.cf.clone() {
-        Some(cfcfg) => {
+        Some(cfcfg) if cfg.auth.guards.contains(&GuardKind::CfAccess) => {
             let url = crate::auth::cfaccess::certs_url(&cfcfg.team_domain);
             let jwks = crate::auth::cfaccess::fetch_jwks(&url).await.map_err(|e| {
                 std::io::Error::new(
@@ -193,7 +198,7 @@ pub async fn serve(cfg: Config) -> std::io::Result<Bound> {
             cache.install(jwks);
             Some(Arc::new(crate::auth::cfaccess::CfState { cfg: cfcfg, jwks: cache }))
         }
-        None => None,
+        _ => None,
     };
 
     let listener = tokio::net::TcpListener::bind((cfg.bind, cfg.port)).await?;
@@ -233,6 +238,28 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sessions")).unwrap();
         dir
+    }
+
+    /// An unreachable team domain: if the fetch were attempted, `serve` would
+    /// return InvalidData and this would fail. Booting proves it was skipped.
+    #[tokio::test]
+    async fn cf_config_without_the_cf_access_guard_does_not_fetch_jwks() {
+        let mut cfg = cfg_for(tempdir("cf-unused"));
+        cfg.auth = Arc::new(
+            AuthConfig::build_with_cf(
+                vec![GuardKind::None],
+                None,
+                "X-Forwarded-Email".into(),
+                vec![],
+                Some(crate::auth::cfaccess::CfConfig {
+                    team_domain: "https://team.cloudflareaccess.invalid".into(),
+                    aud: "tag".into(),
+                }),
+            )
+            .expect("none is always buildable"),
+        );
+        let b = serve(cfg).await.expect("a guard chain without cf-access must not need Cloudflare");
+        b.stop().await;
     }
 
     pub(crate) fn cfg_for(dir: PathBuf) -> Config {
