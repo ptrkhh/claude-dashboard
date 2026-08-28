@@ -2,7 +2,7 @@ use crate::collect::browse::list_dirs;
 use crate::collect::ctx::Ctx;
 use crate::collect::places::read_places;
 use crate::collect::sessions::collect_sessions;
-use crate::collect::validate::BadRequest;
+use crate::collect::validate::{BadRequest, Refused};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -25,6 +25,15 @@ impl IntoResponse for ApiError {
 impl From<BadRequest> for ApiError {
     fn from(e: BadRequest) -> Self {
         Self { status: StatusCode::BAD_REQUEST, message: e.0 }
+    }
+}
+
+impl From<Refused> for ApiError {
+    fn from(e: Refused) -> Self {
+        match e {
+            Refused::BadRequest(m) => Self { status: StatusCode::BAD_REQUEST, message: m },
+            Refused::Failed(m) => Self { status: StatusCode::INTERNAL_SERVER_ERROR, message: m },
+        }
     }
 }
 

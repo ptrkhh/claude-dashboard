@@ -3,6 +3,23 @@
 #[derive(Debug, Clone, PartialEq)]
 pub struct BadRequest(pub String);
 
+/// How a mutating route fails. The distinction is the point: `BadRequest` is
+/// the caller's input (400), `Failed` is a subprocess we ran on their behalf
+/// (500). Node got this for free — its mutating routes used the *throwing*
+/// `run`, not the swallowing `sh` — and collapsing the two is how a `tmux
+/// kill-session` that never ran came back as `200 {"ok":true}`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Refused {
+    BadRequest(String),
+    Failed(String),
+}
+
+impl From<BadRequest> for Refused {
+    fn from(e: BadRequest) -> Self {
+        Self::BadRequest(e.0)
+    }
+}
+
 /// Mirrors `MODELS` (`lib/collect.js:108`).
 pub const MODELS: &[&str] = &["sonnet", "opus", "haiku", "fable"];
 /// Mirrors `EFFORTS` (`lib/collect.js:109`).

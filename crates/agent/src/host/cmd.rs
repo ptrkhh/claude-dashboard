@@ -23,6 +23,9 @@ impl Runner {
         Self { path, log, failed: Mutex::new(HashSet::new()) }
     }
 
+    /// Swallowing: failure is an empty string. Correct for the 4-second poll,
+    /// where a broken `git status` must not fail the whole request — and wrong
+    /// for anything that changes state, which is what `run_checked` is for.
     pub async fn run(&self, program: &str, args: &[&str], key: &str) -> String {
         self.run_with_timeout(program, args, key, DEFAULT_TIMEOUT).await
     }
@@ -34,6 +37,28 @@ impl Runner {
         key: &str,
         timeout: Duration,
     ) -> String {
+        self.run_checked_with_timeout(program, args, key, timeout).await.unwrap_or_default()
+    }
+
+    /// Fallible: the caller learns the command failed. Every mutating route
+    /// uses this, because reporting a kill that did not happen is worse than
+    /// reporting an error.
+    pub async fn run_checked(
+        &self,
+        program: &str,
+        args: &[&str],
+        key: &str,
+    ) -> Result<String, String> {
+        self.run_checked_with_timeout(program, args, key, DEFAULT_TIMEOUT).await
+    }
+
+    async fn run_checked_with_timeout(
+        &self,
+        program: &str,
+        args: &[&str],
+        key: &str,
+        timeout: Duration,
+    ) -> Result<String, String> {
         #[allow(clippy::disallowed_types)]
         let fut = tokio::process::Command::new(program)
             .args(args)
@@ -42,24 +67,16 @@ impl Runner {
             .kill_on_drop(true) // the timeout must actually kill the child
             .output();
 
-        match tokio::time::timeout(timeout, fut).await {
-            Err(_) => {
-                self.log_once(key, &format!("timed out after {}ms", timeout.as_millis()));
-                String::new()
-            }
-            Ok(Err(e)) => {
-                self.log_once(key, &e.to_string());
-                String::new()
-            }
+        let reason = match tokio::time::timeout(timeout, fut).await {
+            Err(_) => format!("timed out after {}ms", timeout.as_millis()),
+            Ok(Err(e)) => e.to_string(),
             Ok(Ok(out)) if !out.status.success() => {
-                self.log_once(
-                    key,
-                    &format!("exit {}", out.status.code().unwrap_or(-1)),
-                );
-                String::new()
+                format!("exit {}", out.status.code().unwrap_or(-1))
             }
-            Ok(Ok(out)) => String::from_utf8_lossy(&out.stdout).into_owned(),
-        }
+            Ok(Ok(out)) => return Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
+        };
+        self.log_once(key, &reason);
+        Err(format!("{key}: {reason}"))
     }
 
     /// Log a given failing key once per process lifetime. The KEY IS EXPLICIT:

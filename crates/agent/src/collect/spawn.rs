@@ -2,7 +2,7 @@ use super::ctx::{Ctx, Meta};
 use super::fsio::{read_if, write_atomic};
 use super::lookup::rc_link_for;
 use super::validate::{
-    assert_effort, assert_kill_name, assert_model, assert_valid_sid, BadRequest,
+    assert_effort, assert_kill_name, assert_model, assert_valid_sid, BadRequest, Refused,
 };
 use crate::parse::history::group_history;
 use std::path::{Path, PathBuf};
@@ -124,7 +124,7 @@ async fn spawn_claude(
     dir: &str,
     claude_args: &[&str],
     meta: Meta,
-) -> Result<String, BadRequest> {
+) -> Result<String, Refused> {
     if let Err(e) = trust_dir(&claude_json_path(&ctx.claude_dir), dir).await {
         ctx.host.log.push(format!("trust write failed for {dir}: {e}"));
     }
@@ -133,7 +133,11 @@ async fn spawn_claude(
     let mut args: Vec<&str> = vec!["new-session", "-d", "-s", &name, "-c", dir, "claude"];
     args.extend_from_slice(claude_args);
     args.extend_from_slice(&["--dangerously-skip-permissions", "--remote-control", &name]);
-    ctx.runner.run("tmux", &args, "tmux new-session").await;
+    // Checked: without this a failed `tmux new-session` still answered 200
+    // with a session name, and left a meta entry for a session that does not
+    // exist. The pid lookup below stays best-effort — losing it costs the
+    // rc-link poll, not the session.
+    ctx.runner.run_checked("tmux", &args, "tmux new-session").await.map_err(Refused::Failed)?;
 
     ctx.meta_set(&name, meta);
     ctx.host.log.push(format!(
@@ -172,13 +176,13 @@ pub async fn launch_session(
     dir: &str,
     model: &str,
     effort: &str,
-) -> Result<String, BadRequest> {
+) -> Result<String, Refused> {
     assert_model(model)?;
     assert_effort(effort)?;
     // A6: the directory must exist and be a directory before it reaches `-c`.
     let is_dir = tokio::fs::metadata(dir).await.map(|m| m.is_dir()).unwrap_or(false);
     if !is_dir {
-        return Err(BadRequest(format!("not a directory: {dir}")));
+        return Err(Refused::BadRequest(format!("not a directory: {dir}")));
     }
     spawn_claude(
         ctx,
@@ -189,7 +193,7 @@ pub async fn launch_session(
     .await
 }
 
-pub async fn resume_session(ctx: &Arc<Ctx>, sid: &str) -> Result<String, BadRequest> {
+pub async fn resume_session(ctx: &Arc<Ctx>, sid: &str) -> Result<String, Refused> {
     assert_valid_sid(sid)?;
     let hist = read_if(&ctx.claude_dir.join("history.jsonl")).await.unwrap_or_default();
     let cwd = group_history(&hist)
@@ -197,7 +201,7 @@ pub async fn resume_session(ctx: &Arc<Ctx>, sid: &str) -> Result<String, BadRequ
         .find(|g| g.sid == sid)
         .and_then(|g| g.cwd)
         .filter(|c| !c.is_empty())
-        .ok_or_else(|| BadRequest(format!("unknown session: {sid}")))?;
+        .ok_or_else(|| Refused::BadRequest(format!("unknown session: {sid}")))?;
 
     // D6: un-purge before spawning, so the resumed session is not filtered
     // straight back out of the resumable list it came from.
@@ -209,9 +213,15 @@ pub async fn resume_session(ctx: &Arc<Ctx>, sid: &str) -> Result<String, BadRequ
 /// Kill a session this dashboard owns. The name is guarded first — it becomes
 /// a `tmux` argument — and the meta entry is dropped whether or not tmux
 /// agreed, which is what stops a poll still in flight from resurrecting it.
-pub async fn kill_session(ctx: &Arc<Ctx>, name: &str) -> Result<(), BadRequest> {
+pub async fn kill_session(ctx: &Arc<Ctx>, name: &str) -> Result<(), Refused> {
     assert_kill_name(name)?;
-    ctx.runner.run("tmux", &["kill-session", "-t", name], "tmux kill-session").await;
+    // Checked, and the meta entry is dropped only after the kill succeeds:
+    // reporting a kill that did not happen removes the card from the UI while
+    // the session keeps running. Node's route threw here; ours swallowed.
+    ctx.runner
+        .run_checked("tmux", &["kill-session", "-t", name], "tmux kill-session")
+        .await
+        .map_err(Refused::Failed)?;
     ctx.meta_delete(name);
     ctx.host.log.push(format!("kill {name}"));
     Ok(())
@@ -241,6 +251,30 @@ mod tests {
     async fn ctx_for(claude_dir: PathBuf) -> Arc<Ctx> {
         let log = Arc::new(LogBuffer::new());
         let path = std::env::var("PATH").unwrap_or_default();
+        let host = crate::host::init::Host {
+            runner: Runner::new(path.clone(), Arc::clone(&log)),
+            log,
+            path,
+            sampler: std::sync::Mutex::new(crate::host::sample::Sampler::new()),
+        };
+        Arc::new(Ctx::new(host, claude_dir, None))
+    }
+
+    /// A stub `tmux` whose exit status the test chooses, so both sides of the
+    /// checked-subprocess branch are reachable without a real tmux server.
+    fn stub_tmux(dir: &Path, exit: i32) -> String {
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let p = bin.join("tmux");
+        std::fs::write(&p, format!("#!/bin/sh\necho 4242\nexit {exit}\n")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin.to_string_lossy().into_owned()
+    }
+
+    async fn ctx_with_tmux(claude_dir: PathBuf, exit: i32) -> Arc<Ctx> {
+        let path = stub_tmux(&claude_dir, exit);
+        let log = Arc::new(LogBuffer::new());
         let host = crate::host::init::Host {
             runner: Runner::new(path.clone(), Arc::clone(&log)),
             log,
@@ -408,24 +442,19 @@ mod tests {
         let ctx = ctx_for(d.clone()).await;
         tokio::fs::write(d.join("history.jsonl"), "").await.unwrap();
         let e = resume_session(&ctx, "2f8a1c94-3b7e-4d51-9a02-6c5f8e1b7d34").await.unwrap_err();
-        assert!(e.0.contains("unknown session"));
+        // An unknown sid is the caller's input, not our subprocess: 400, not 500.
+        assert!(matches!(&e, Refused::BadRequest(m) if m.contains("unknown session")), "got {e:?}");
     }
 
     #[tokio::test]
     async fn resume_un_purges_the_session_it_is_bringing_back() {
         // D6: without this the resumed session is filtered straight back out
         // of the list it was resumed from, and the row never reappears.
-        // PATH is pointed at nothing so the tmux call is a no-op — this test
-        // must not start a real session.
+        // A stub tmux that exits 0, so this test never starts a real session.
+        // It cannot point PATH at nothing any more: resume is checked now, and
+        // a tmux that fails to spawn is a failed resume rather than a no-op.
         let d = tempdir("resume-unpurge");
-        let log = Arc::new(LogBuffer::new());
-        let host = crate::host::init::Host {
-            runner: Runner::new("/nonexistent-for-test".into(), Arc::clone(&log)),
-            log,
-            path: "/nonexistent-for-test".into(),
-            sampler: std::sync::Mutex::new(crate::host::sample::Sampler::new()),
-        };
-        let ctx = Arc::new(Ctx::new(host, d.clone(), None));
+        let ctx = ctx_with_tmux(d.clone(), 0).await;
 
         let sid = "2f8a1c94-3b7e-4d51-9a02-6c5f8e1b7d34";
         tokio::fs::write(
@@ -457,13 +486,39 @@ mod tests {
     async fn kill_forgets_the_session_meta() {
         // D7: a stale meta entry would let the RC poll write a link back for a
         // session that no longer exists.
-        let d = tempdir("kill-meta");
-        let ctx = ctx_for(d).await;
+        let ctx = ctx_with_tmux(tempdir("kill-meta"), 0).await;
         ctx.meta_set("cdash-gone-1200-abc", Meta::default());
-        // tmux is not running a session by this name; the kill fails and the
-        // meta must be dropped anyway, exactly as Node's route did.
-        let _ = kill_session(&ctx, "cdash-gone-1200-abc").await;
+        kill_session(&ctx, "cdash-gone-1200-abc").await.unwrap();
         assert!(!ctx.meta_has("cdash-gone-1200-abc"));
+    }
+
+    #[tokio::test]
+    async fn a_kill_that_failed_is_reported_and_keeps_the_session() {
+        // The regression this exists for: `Runner::run` returns an empty string
+        // on a non-zero exit, so the route answered 200 {"ok":true} while the
+        // session kept running and the card vanished from the UI. Node's route
+        // used the throwing `run` and returned 500.
+        let ctx = ctx_with_tmux(tempdir("kill-fails"), 1).await;
+        ctx.meta_set("cdash-alive-1200-abc", Meta::default());
+
+        let e = kill_session(&ctx, "cdash-alive-1200-abc").await.unwrap_err();
+        assert!(matches!(&e, Refused::Failed(m) if m.contains("kill-session")), "got {e:?}");
+        assert!(
+            ctx.meta_has("cdash-alive-1200-abc"),
+            "a session we failed to kill must not be forgotten"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_launch_whose_tmux_failed_leaves_no_phantom_session() {
+        let d = tempdir("launch-fails");
+        let ctx = ctx_with_tmux(d.clone(), 1).await;
+        let e = launch_session(&ctx, d.to_str().unwrap(), "sonnet", "medium").await.unwrap_err();
+        assert!(matches!(&e, Refused::Failed(m) if m.contains("new-session")), "got {e:?}");
+        assert!(
+            ctx.meta.lock().unwrap().is_empty(),
+            "a session that was never created must leave no meta entry"
+        );
     }
 
     #[tokio::test]
