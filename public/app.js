@@ -1,3 +1,13 @@
+/* Wrapped so a second evaluation in the same page is harmless. Top-level
+   `const`s are instantiated before any statement runs, so a re-run of this
+   file threw "Identifier 'isTauri' has already been declared" at parse time —
+   which then masked the error that had actually broken the first run. Inside a
+   function scope, a re-run just redoes the setup. */
+(() => {
+// A second evaluation should also not start a second poll loop over the same
+// DOM, so the boot is claimed once per page.
+if (window.__cdashBooted) return;
+window.__cdashBooted = true;
 const $ = s => document.querySelector(s);
 const MODELS = ['sonnet', 'opus', 'haiku', 'fable'];
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -553,3 +563,4 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) poll
 // Both of sw.js's assumptions (same-origin /api/, http-cache semantics) break
 // in the Tauri webview.
 if (!isTauri && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+})();

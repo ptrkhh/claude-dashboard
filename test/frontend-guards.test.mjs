@@ -6,6 +6,18 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
+test('app.js is wrapped so a second evaluation cannot throw', () => {
+  // The page evaluated app.js twice on Android. Top-level `const`s are
+  // instantiated before any statement runs, so the re-run died at parse time
+  // with "already been declared" — and that masked whatever broke the first
+  // run. Inside a function scope, with a boot claimed once, a re-run is inert.
+  const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const body = src.replace(/^\s*\/\*[\s\S]*?\*\//, '').trimStart();
+  assert.ok(body.startsWith('(() => {'), 'app.js opens with an IIFE');
+  assert.ok(src.trimEnd().endsWith('})();'), 'and closes it');
+  assert.ok(src.includes('window.__cdashBooted'), 'and claims the boot once');
+});
+
 test('localStorage is reached only through the guarded store wrapper', () => {
   const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const start = src.indexOf('const store = {');

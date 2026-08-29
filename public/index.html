@@ -130,12 +130,26 @@
      leaves a dead shell reading "Connecting…", and a phone has no console to
      ask. Registered here, the header reports it instead. -->
 <script>
-  addEventListener('error', e => {
-    var dot = document.getElementById('health');
-    var label = document.getElementById('health-label');
-    if (dot) dot.className = 'dot bad';
-    if (label) label.textContent = 'Error: ' + (e.message || 'script failed');
-  });
+  (function () {
+    // The FIRST error, with where it came from: a later failure is usually a
+    // consequence of the first one, and overwriting the label loses the cause.
+    var first = null, seen = 0;
+    addEventListener('error', function (e) {
+      seen++;
+      if (!first) {
+        first = e.message || 'script failed';
+        if (e.filename) {
+          first += ' @ ' + e.filename.split('/').pop() + ':' + e.lineno + ':' + e.colno;
+        }
+      }
+      var dot = document.getElementById('health');
+      var label = document.getElementById('health-label');
+      if (dot) dot.className = 'dot bad';
+      if (label) {
+        label.textContent = 'Error: ' + first + (seen > 1 ? ' (+' + (seen - 1) + ' more)' : '');
+      }
+    });
+  })();
 </script>
 <script src="transport/backoff.js"></script>
 <script src="app.js"></script>
