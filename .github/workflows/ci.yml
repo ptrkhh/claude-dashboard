@@ -1,0 +1,51 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          components: clippy
+      # cdash-tauri links webkit2gtk and libappindicator; ubuntu-latest ships
+      # neither, so without this `--all` dies in a build script before a single
+      # test runs.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
+      - run: node --test
+      - run: cargo test --all --locked
+      - run: cargo clippy --all-targets --locked -- -D warnings -D clippy::disallowed_types
+
+  release-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.1
+      # aws-lc-sys needs a musl C cross-compiler, which Ubuntu does not package.
+      # This action supplies one and registers a qemu-user runner, replacing a
+      # hand-rolled fetch from musl.cc — a host that has since stopped
+      # responding and took every release build down with it.
+      - uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+      - run: cargo build --release --locked -p cdash-agent
+      # Building is not the gate; booting is. `cargo run` goes through the
+      # runner the action registered, so aarch64 executes under qemu here.
+      # timeout's 124 means it served until killed, which is the pass — so
+      # assert on the banner instead of the exit status.
+      - name: Execute the binary
+        run: |
+          PORT=0 timeout 5 cargo run --release --locked -p cdash-agent > boot.log 2>&1 || true
+          cat boot.log
+          grep -q "cdash-agent .* on http://127.0.0.1:" boot.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cdash-agent-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/cdash-agent

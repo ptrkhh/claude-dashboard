@@ -1,0 +1,31 @@
+[package]
+name = "cdash-agent"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94.1"
+
+[lib]
+name = "cdash_agent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cdash-agent"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sysinfo = "=0.38.4"
+rustix = { version = "1", features = ["fs", "termios"] }
+tokio = { version = "1", features = ["process", "time", "rt", "rt-multi-thread", "macros", "fs", "io-util"] }
+time = { version = "0.3", features = ["formatting", "local-offset"] }
+axum = "0.8.9"
+tower-http = { version = "0.7.0", features = ["fs"] }
+subtle = "2.6.1"
+scrypt = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+getrandom = "0.4"
+base64 = "0.22"
+jsonwebtoken = "9"
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json", "http2"] }

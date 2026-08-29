@@ -108,10 +108,42 @@ function toast(msg) {
   setTimeout(() => t.classList.remove('show'), 4000);
 }
 
+// Confirmed: tauri.conf.json sets withGlobalTauri, so the runtime injects
+// window.__TAURI__ (and __TAURI_INTERNALS__ unconditionally) in the webview
+// and neither on the web.
+const isTauri = typeof window !== 'undefined' &&
+  ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+
 async function api(path, body) {
-  const res = await fetch(path, body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : undefined);
+  if (isTauri) {
+    const invoke = window.__TAURI__?.core?.invoke;
+    if (!invoke) throw new Error('Tauri IPC unavailable (withGlobalTauri off?)');
+    let res;
+    try {
+      res = await invoke('api_request', { method: body ? 'POST' : 'GET', path, body });
+    } catch (e) {
+      // invoke rejects with the command's Err(String), not an Error.
+      throw new Error(String(e?.message ?? e));
+    }
+    // api_request returns { status, body } without throwing on non-2xx;
+    // re-raise as an Error to keep api()'s fetch-style contract.
+    if (res.status >= 400) {
+      const err = new Error(res.body?.error || res.body?.message || `HTTP ${res.status}`);
+      err.status = res.status;
+      throw err;
+    }
+    return res.body;
+  }
+  const opts = body
+    ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
+    : undefined;
+  const res = await fetch(path, opts);
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || res.statusText);
+  if (!res.ok) {
+    const err = new Error(data.error || res.statusText);
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }
 
@@ -159,7 +191,7 @@ function runningCard(r) {
         <span class="status ${r.working ? 'on' : 'off'}"><span class="dot"></span>${r.working ? 'Working' : 'Waiting'}</span>
       </div>
       <div class="session-meta">
-        ${chipHtml}<span>cpu ${r.cpu}%</span><span class="sep">·</span><span>${fmtKb(r.rssKb)}</span>
+        ${chipHtml}<span>cpu ${r.cpu ?? '—'}%</span><span class="sep">·</span><span>${fmtKb(r.rssKb)}</span>
         <span class="time">${fmtUp(r.uptimeSec)}</span>
       </div>
       ${peek}
@@ -210,7 +242,7 @@ document.body.addEventListener('click', async e => {
   if (!el) return;
   try {
     if (el.dataset.kill) {
-      if (el.dataset.arm) { armedKill = null; await api('/api/kill', { name: el.dataset.kill }); poll(); }
+      if (armedKill === el.dataset.kill) { armedKill = null; await api('/api/kill', { name: el.dataset.kill }); poll(); }
       else {
         armedKill = el.dataset.kill; el.dataset.arm = '1'; el.textContent = 'Sure?';
         setTimeout(() => { if (armedKill === el.dataset.kill) armedKill = null; delete el.dataset.arm; el.innerHTML = ICONS.x; }, 3000);
@@ -221,7 +253,7 @@ document.body.addEventListener('click', async e => {
     } else if (el.dataset.purge) {
       await api('/api/purge', { sid: el.dataset.purge }); poll();
     }
-  } catch (err) { toast(err.message); }
+  } catch (err) { toast(err.message); poll(); } // re-arm even when the action failed
 });
 
 // Launch: submitting the command bar (button or Enter in the directory field).
@@ -233,7 +265,7 @@ $('#launcher').addEventListener('submit', async e => {
   const model = modelDD.value, effort = effortDD.value;
   btn.disabled = true; btn.innerHTML = `${ICONS.play}<span>Launching…</span>`;
   try { await api('/api/launch', { dir, model, effort }); $('#dir').value = ''; poll(); }
-  catch (err) { toast(err.message); }
+  catch (err) { toast(err.message); poll(); } // re-arm even when the launch failed
   finally { btn.disabled = false; btn.innerHTML = `${ICONS.play}<span>Launch</span>`; }
 });
 
@@ -342,13 +374,10 @@ function renderCrumbs(path) {
   pkCrumbs.scrollLeft = pkCrumbs.scrollWidth; // keep the deepest crumb in view
 }
 
+// starBtn is the one place that decides how a star looks; querySelectorAll
+// returns a static list, so replacing during iteration is safe.
 function refreshStars() {
-  pkList.querySelectorAll('.pk-star').forEach(btn => {
-    const on = favorites.includes(btn.dataset.fav);
-    btn.classList.toggle('on', on);
-    btn.innerHTML = on ? ICONS.starFilled : ICONS.star;
-    btn.setAttribute('aria-label', on ? 'Remove favorite' : 'Add favorite');
-  });
+  pkList.querySelectorAll('.pk-star').forEach(b => { b.outerHTML = starBtn(b.dataset.fav); });
 }
 async function toggleFav(path) {
   try {
@@ -368,21 +397,61 @@ pkList.addEventListener('click', e => {
 });
 pkCrumbs.addEventListener('click', e => { const c = e.target.closest('[data-nav]'); if (c) { pkPath = c.dataset.nav; browseTo(pkPath); } });
 
-async function poll() {
+let bk = cdashBackoff.initial();
+let timer = null;
+let gen = 0; // stale-tick guard: a superseded tick's result is dropped
+
+function arm() {
+  clearTimeout(timer);
+  timer = setTimeout(tick, cdashBackoff.delay(bk));
+}
+
+async function tick() {
+  const g = gen;
+  if (document.hidden) { arm(); return; }
+  let outcome;
   try {
-    render(await api('/api/sessions'));
+    const data = await api('/api/sessions');
+    if (g !== gen) return; // superseded mid-flight: never paint the old snapshot
+    render(data);
     $('#health').className = 'dot ok';
     $('#health-label').textContent = 'Connected';
-    if ($('#logbox').open) $('#logs').textContent = (await api('/api/logs')).lines.join('\n');
-  } catch {
+    outcome = 'ok';
+  } catch (err) {
+    if (g !== gen) return;
+    // Only transport errors and 401/403 reach here as distinct things;
+    // everything non-auth backs off. A halt is cleared only by poll(),
+    // which is user-initiated.
+    outcome = cdashBackoff.outcomeFor(err.status);
     $('#health').className = 'dot bad';
-    $('#health-label').textContent = 'Offline';
+    $('#health-label').textContent = 'Disconnected';
   }
+  // Logs are secondary: their failure must not flip the indicator or
+  // advance the ladder once sessions have rendered.
+  if ($('#logbox').open && outcome === 'ok') {
+    try { $('#logs').textContent = (await api('/api/logs')).lines.join('\n'); } catch {}
+  }
+  if (g !== gen) return;
+  bk = cdashBackoff.next(bk, outcome);
+  if (!bk.halted) arm();
+}
+
+// Any user-initiated action (launch, kill, resume, purge) calls poll():
+// reset the ladder and try immediately.
+function poll() {
+  clearTimeout(timer);
+  gen++;
+  bk = cdashBackoff.initial();
+  tick();
 }
 
 // Give the launch button its resting icon + label.
 $('#launch').innerHTML = `${ICONS.play}<span>Launch</span>`;
 
 poll();
-setInterval(() => { if (!document.hidden) poll(); }, 4000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+
+// Registration lives here, not in an inline script, so it shares one isTauri.
+// Both of sw.js's assumptions (same-origin /api/, http-cache semantics) break
+// in the Tauri webview.
+if (!isTauri && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});

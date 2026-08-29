@@ -1,3 +1,15 @@
 node_modules/
 .superpowers/
-docs/
+target/
+
+# Local planning docs stay out of the repo, but reviewed specs and plans are
+# tracked. Written as "exclude contents, re-include a path" because git cannot
+# re-include anything under an excluded parent directory.
+docs/*
+!docs/superpowers/
+docs/superpowers/*
+!docs/superpowers/specs/
+!docs/superpowers/plans/
+
+# Tauri build-time generated schemas
+crates/tauri-app/gen/schemas/

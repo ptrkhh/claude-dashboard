@@ -19,7 +19,7 @@
 </script>
 <link rel="stylesheet" href="style.css">
 <link rel="icon" href="icon.svg">
-<link rel="manifest" href="manifest.json">
+<link rel="manifest" href="manifest.json" crossorigin="use-credentials">
 </head>
 <body>
 <div class="app">
@@ -102,7 +102,7 @@
 </dialog>
 
 <div id="toast" role="status" aria-live="polite"></div>
+<script src="transport/backoff.js"></script>
 <script src="app.js"></script>
-<script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');</script>
 </body>
 </html>
