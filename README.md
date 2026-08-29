@@ -30,6 +30,8 @@ cargo run -p cdash-agent     # http://127.0.0.1:8080
 
 CI gates the same two targets but sources its cross-toolchain from `taiki-e/setup-cross-toolchain-action` rather than musl.cc, which stopped responding from GitHub's runners and took every release build down with it. Use the same action if the local prereq above fails.
 
+The `aarch64` binary is confirmed working on-device under Termux (Android, 2026-08-29): UI, host stats and live session data all functional.
+
 Requires `tmux`, `claude` and `git` on `PATH`; the agent reports any that are missing at startup.
 
 ## Configuration

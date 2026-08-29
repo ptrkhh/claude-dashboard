@@ -188,6 +188,11 @@ corrections; one is conditionally refuted.
   anywhere, and no WSL was available**, so the WSL and Termux *runtime* claims
   remain reasoned. The Termux claim is **not unconditional**: see
   [the Android artifact fork](#android--the-artifact-fork).
+  **Update 2026-08-29 — Termux runtime CONFIRMED on-device:** an
+  `aarch64-unknown-linux-musl` binary was executed under Termux on Android;
+  it served the UI, `/api/hostinfo` reported no missing tools, and
+  `/api/sessions` returned live pid/cpu/rss data. The WSL runtime claim
+  remains reasoned.
 - **`keyring` covers macOS, Windows and Linux Secret Service — CONFIRMED; the
   "documented fallbacks" clause is REFUTED.** `keyring = "4"` is the entire
   required manifest: `default = ["v1"]` enables all three target-conditional
