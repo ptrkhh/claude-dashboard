@@ -101,6 +101,30 @@
   </div>
 </dialog>
 
+<dialog id="setup" class="dialog" aria-label="Set up the agent">
+  <div class="dialog-body">
+    <div class="dialog-head">
+      <h2 class="dialog-title">Can’t reach the agent</h2>
+      <button id="setup-close" class="icon-btn" type="button" aria-label="Close"></button>
+    </div>
+    <div class="setup-body">
+      <p class="setup-lede">cdash-agent isn’t answering on <code>localhost:8080</code>.</p>
+      <ul class="setup-cases">
+        <li><b>First time here?</b> Paste the command below into Termux.</li>
+        <li><b>Installed already?</b> Just open Termux — it starts the agent for you.</li>
+        <li><b>Termux already open?</b> Paste it again to reinstall.</li>
+      </ul>
+      <pre id="setup-script" class="setup-script" tabindex="0"></pre>
+      <p class="setup-note">One paste is enough: it also teaches Termux to start the
+        agent every time you open it.</p>
+    </div>
+    <div class="setup-foot">
+      <button id="setup-copy" class="btn-launch" type="button">Copy</button>
+      <button id="setup-retry" class="btn-ghost" type="button">Try again</button>
+    </div>
+  </div>
+</dialog>
+
 <div id="toast" role="status" aria-live="polite"></div>
 <script src="transport/backoff.js"></script>
 <script src="app.js"></script>

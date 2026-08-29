@@ -25,6 +25,27 @@ run `PORT=8080 ./cdash-agent` inside WSL, then start `cdash-tauri.exe`. With no
 profile saved it defaults to `http://localhost:8080`; a profile overrides that.
 Launching the distro for you is step 6 — for now the distro is yours to start.
 
+## Android client
+
+An APK thin client for the phone. It links no agent either — Android cannot
+spawn the processes the agent drives, so the agent runs in **F-Droid Termux**
+(the Play-store build cannot `exec` from its own data directory; see the design
+doc's Android section) and the app talks to it on `localhost:8080`, which
+Android does not isolate between apps.
+
+The point of the app over "Add to home screen" is onboarding: the PWA is served
+*by* the agent, so it cannot tell anyone how to install one. The APK carries its
+own UI, so when the agent is unreachable it shows a setup screen with a
+copy-paste command for Termux. The command downloads the agent — bundled in the
+APK and served over loopback, since every route through shared storage needs
+MediaStore or a permission Termux cannot hold on Android 11+ — and appends a
+guard to `~/.bashrc` so the agent starts itself whenever Termux is opened. After
+one paste the only thing to remember is to open Termux.
+
+`test/install-script.test.mjs` runs that command in a scratch `$HOME` — it is
+pasted into a shell we never see, so it is tested as one, against the template
+read out of `app.js` rather than a copy.
+
 ## Run
 
 ```
@@ -40,15 +61,33 @@ cargo run -p cdash-agent     # http://127.0.0.1:8080
 | `cdash-agent` | `x86_64-unknown-linux-musl` | VPS, WSL |
 | `cdash-agent` | `aarch64-unknown-linux-musl` | VPS, Termux on Android (F-Droid Termux — see the design doc's Android section) |
 | `cdash-tauri.exe` | `x86_64-pc-windows-msvc` | Windows desktop client |
+| `cdash-dashboard-android-arm64.apk` | `aarch64-linux-android` | Android thin client |
 
 Both agents are **booted** as the release gate — the gate is the startup banner,
 since a binary that dies instantly would otherwise pass. The Windows client
 cannot run on a Linux builder, so its gate is that it links, which is also the
 gate on the `cfg(not(windows))` split that keeps the agent out of it.
 
+The APK step is skipped unless `ANDROID_HOME` and `NDK_HOME` are set, and
+`gen/android/` is regenerated on every run rather than tracked. Two things about
+it are worth knowing:
+
+- It builds **release**, then signs with the SDK's debug key. Android refuses to
+  install an unsigned APK at all, so "unsigned" is not a shippable state — the
+  debug key is a local test signature, not a distribution one. The debug *build*
+  is not the answer: its unstripped `.so` makes a 138 MB APK, against 21 MB for
+  release.
+- Gradle enables cleartext HTTP for debug only, so the script patches the
+  release build type to allow it. Without that the client cannot reach the agent
+  at `http://localhost:8080`, which is its entire job.
+
 Prereqs: `rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-msvc`,
 `pip install ziglang && cargo install cargo-zigbuild`,
-`cargo install cargo-xwin`, `sudo apt install clang lld qemu-user-static`.
+`cargo install cargo-xwin`, `sudo apt install clang lld qemu-user-static`, and
+for the APK `cargo install tauri-cli --version "^2"` plus an Android SDK and
+NDK. Use the **Rust** Tauri CLI, not the npm one: the npm CLI templates
+`node tauri` into the generated gradle, which only resolves in an npm-layout
+project, and this is a Rust workspace.
 
 `cargo-zigbuild` supplies musl libc and a cross C compiler for `aws-lc-sys` from
 one download, replacing both `musl-tools` and the [musl.cc](https://musl.cc)

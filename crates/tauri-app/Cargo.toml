@@ -3,6 +3,14 @@ name = "cdash-tauri"
 version = "0.1.0"
 edition = "2021"
 
+# Android loads the app as a shared object, so the code lives in a lib target;
+# `cdylib` is what the generated Kotlin activity loads, `rlib` is what
+# `src/main.rs` and the tests link.
+[lib]
+name = "cdash_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+path = "src/lib.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -14,9 +22,12 @@ serde_json = "1"
 # One destination, http://127.0.0.1:<port>, redirects disabled: no TLS, no h2.
 reqwest = { version = "0.13.4", default-features = false, features = ["json"] }
 
-# The Windows client links no agent: tmux and `claude` live in a WSL distro, so
-# the agent runs there too and the client reaches it over WSL2's loopback relay.
-[target.'cfg(not(windows))'.dependencies]
+# Two platforms link no agent, for the same reason: what the agent drives —
+# tmux, `claude`, /proc — lives somewhere else on them. On Windows that is a
+# WSL distro, reached over WSL2's loopback relay; on Android it is Termux,
+# reached over loopback, which Android does not isolate between apps. Keep this
+# in step with `inproc_agent` in build.rs.
+[target.'cfg(all(not(windows), not(target_os = "android")))'.dependencies]
 cdash-agent = { path = "../agent" }
 
 # "test" only unifies into dev/test builds; release binaries never see it.

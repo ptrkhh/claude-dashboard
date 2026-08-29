@@ -114,10 +114,14 @@ function toast(msg) {
 const isTauri = typeof window !== 'undefined' &&
   ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
 
+const invoke = (...a) => {
+  const f = window.__TAURI__?.core?.invoke;
+  if (!f) throw new Error('Tauri IPC unavailable (withGlobalTauri off?)');
+  return f(...a);
+};
+
 async function api(path, body) {
   if (isTauri) {
-    const invoke = window.__TAURI__?.core?.invoke;
-    if (!invoke) throw new Error('Tauri IPC unavailable (withGlobalTauri off?)');
     let res;
     try {
       res = await invoke('api_request', { method: body ? 'POST' : 'GET', path, body });
@@ -416,6 +420,7 @@ async function tick() {
     render(data);
     $('#health').className = 'dot ok';
     $('#health-label').textContent = 'Connected';
+    markConnected();
     outcome = 'ok';
   } catch (err) {
     if (g !== gen) return;
@@ -425,6 +430,9 @@ async function tick() {
     outcome = cdashBackoff.outcomeFor(err.status);
     $('#health').className = 'dot bad';
     $('#health-label').textContent = 'Disconnected';
+    // Only Android has a story the user can act on from here; every other
+    // platform's agent is either in-process or somewhere this app cannot reach.
+    if (host === 'android') showSetup();
   }
   // Logs are secondary: their failure must not flip the indicator or
   // advance the ladder once sessions have rendered.
@@ -445,8 +453,74 @@ function poll() {
   tick();
 }
 
+
+/* ---------- Termux setup (the Android app only) ----------
+   The app carries its own UI, so — unlike the PWA, which the agent itself
+   serves — it can say how to install the agent before one exists. The bundled
+   binary is handed over loopback, which Android does not isolate between apps,
+   so Termux curls it straight out of this process.
+
+   The pasted block also appends a guard to ~/.bashrc, so the agent comes back
+   by itself every time Termux opens. That is what keeps the reminder down to
+   "open Termux" instead of "run this again". */
+let host = null;          // 'android' | 'windows' | 'linux' | … once known
+let setupDismissed = false;
+
+const installScript = url => `curl -fsS -o "$HOME/cdash-agent" ${url}
+chmod +x "$HOME/cdash-agent"
+grep -q cdash-agent "$HOME/.bashrc" 2>/dev/null || cat >> "$HOME/.bashrc" <<'CDASH'
+
+# claude-dashboard: start the agent whenever Termux opens, unless it is up
+if ! curl -fsS -m 1 http://127.0.0.1:8080/api/health >/dev/null 2>&1; then
+  termux-wake-lock 2>/dev/null
+  nohup "$HOME/cdash-agent" >"$HOME/cdash-agent.log" 2>&1 </dev/null &
+fi
+CDASH
+. "$HOME/.bashrc"`;
+
+async function showSetup() {
+  const dlg = $('#setup');
+  if (dlg.open || setupDismissed) return;
+  try {
+    const { url } = await invoke('agent_handoff');
+    $('#setup-script').textContent = installScript(url);
+  } catch (e) {
+    // No bundled agent (a build without CDASH_AGENT_BIN): say so rather than
+    // showing a curl of nothing.
+    $('#setup-script').textContent = String(e?.message ?? e);
+  }
+  if (!dlg.open) dlg.showModal();
+}
+
+/// A reconnect retires the dialog and re-arms it for the next outage.
+function markConnected() {
+  setupDismissed = false;
+  if ($('#setup').open) $('#setup').close();
+}
+
+$('#setup-close').innerHTML = ICONS.x;
+$('#setup-close').onclick = () => { setupDismissed = true; $('#setup').close(); };
+$('#setup-retry').onclick = () => { $('#setup').close(); poll(); };
+$('#setup-copy').onclick = async () => {
+  const text = $('#setup-script').textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('Copied \u2014 paste it into Termux');
+  } catch {
+    // Android WebView can refuse the async clipboard; selecting the block at
+    // least makes a long-press copy one gesture.
+    const r = document.createRange();
+    r.selectNodeContents($('#setup-script'));
+    getSelection().removeAllRanges();
+    getSelection().addRange(r);
+    toast('Long-press the command to copy');
+  }
+};
+
 // Give the launch button its resting icon + label.
 $('#launch').innerHTML = `${ICONS.play}<span>Launch</span>`;
+
+if (isTauri) invoke('host_platform').then(p => { host = p; }).catch(() => {});
 
 poll();
 document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
