@@ -456,9 +456,9 @@ async function tick() {
     outcome = cdashBackoff.outcomeFor(err.status);
     $('#health').className = 'dot bad';
     $('#health-label').textContent = 'Disconnected';
-    // Only Android has a story the user can act on from here; every other
-    // platform's agent is either in-process or somewhere this app cannot reach.
-    if (isTauri) hostPlatform().then(p => { if (p === 'android') showSetup(); });
+    // Only the thin clients have a story the user can act on from here; on
+    // every other platform the agent is in-process and already running.
+    if (isTauri) hostPlatform().then(p => { if (SHELL[p]) showSetup(); });
   }
   // Logs are secondary: their failure must not flip the indicator or
   // advance the ladder once sessions have rendered.
@@ -481,15 +481,18 @@ function poll() {
 }
 
 
-/* ---------- Termux setup (the Android app only) ----------
-   The app carries its own UI, so — unlike the PWA, which the agent itself
-   serves — it can say how to install the agent before one exists. The bundled
-   binary is handed over loopback, which Android does not isolate between apps,
-   so Termux curls it straight out of this process.
+/* ---------- Agent setup (the thin clients: Android and Windows) ----------
+   These builds carry their own UI, so — unlike the PWA, which the agent itself
+   serves — they can say how to install an agent before one exists.
 
-   The pasted block also appends a guard to ~/.bashrc, so the agent comes back
-   by itself every time Termux opens. That is what keeps the reminder down to
-   "open Termux" instead of "run this again". */
+   Android curls the bundled binary out of this process over loopback, which
+   Android does not isolate between apps. Windows cannot: under WSL2's default
+   NAT networking the distro's 127.0.0.1 is its own, not the host's, so the app
+   writes the binary out and WSL reads it through /mnt/c instead.
+
+   Either way the pasted block appends a guard to ~/.bashrc, so the agent comes
+   back by itself every time that shell opens. That is what keeps the reminder
+   down to "open Termux" (or WSL) instead of "run this again". */
 let host = null;          // 'android' | 'windows' | 'linux' | … once resolved
 let setupDismissed = false;
 
@@ -502,34 +505,55 @@ async function hostPlatform() {
   return host;
 }
 
-const installScript = (url, port) => `curl -fsS -o "$HOME/cdash-agent" ${url}
+/// The shell the agent lives in, per platform — and the only thing that
+/// differs in the dialog's wording.
+const SHELL = { android: 'Termux', windows: 'WSL' };
+
+/// Fetching the binary is the only part that differs; everything after it —
+/// the executable bit, the startup guard, sourcing it — is identical, so it
+/// lives here once.
+const setupScript = (fetch, port, keepAwake) => `${fetch}
 chmod +x "$HOME/cdash-agent"
 grep -q cdash-agent "$HOME/.bashrc" 2>/dev/null || cat >> "$HOME/.bashrc" <<'CDASH'
 
-# claude-dashboard: start the agent whenever Termux opens, unless it is up
-if ! curl -fsS -m 1 http://127.0.0.1:${port}/api/health >/dev/null 2>&1; then
-  termux-wake-lock 2>/dev/null
+# claude-dashboard: start the agent whenever this shell opens, unless it is up
+if ! curl -fsS -m 1 http://127.0.0.1:${port}/api/health >/dev/null 2>&1; then${keepAwake}
   nohup "$HOME/cdash-agent" >"$HOME/cdash-agent.log" 2>&1 </dev/null &
 fi
 CDASH
 . "$HOME/.bashrc"`;
 
+/// `curl` out of the app's own loopback server, or `cp` from the Windows
+/// filesystem that WSL already mounts. The source is quoted: a Windows path
+/// runs through the user's name, and names have spaces in them.
+const fetchLine = (kind, source) => kind === 'copy'
+  ? `cp "${source}" "$HOME/cdash-agent"`
+  : `curl -fsS -o "$HOME/cdash-agent" ${source}`;
+
+/// Android kills background processes that hold no wake lock. Nothing on
+/// Windows needs this, and a stray termux-* line in a WSL .bashrc is a puzzle
+/// for whoever reads it later.
+const keepAwakeLine = kind => kind === 'copy' ? '' : '\n  termux-wake-lock 2>/dev/null';
+
 async function showSetup() {
   const dlg = $('#setup');
   if (dlg.open || setupDismissed) return;
+  document.querySelectorAll('.shell-name').forEach(el => {
+    el.textContent = SHELL[host] || 'your shell';
+  });
   try {
-    const { url, port } = await invoke('agent_handoff');
+    const { kind, source, port } = await invoke('agent_handoff');
     $('#setup-addr').textContent = `localhost:${port}`;
-    $('#setup-script').textContent = installScript(url, port);
+    $('#setup-script').textContent =
+      setupScript(fetchLine(kind, source), port, keepAwakeLine(kind));
   } catch (e) {
     // No bundled agent (a build without CDASH_AGENT_BIN): say so rather than
-    // showing a curl of nothing.
+    // showing a command that fetches nothing.
     $('#setup-script').textContent = String(e?.message ?? e);
   }
   if (!dlg.open) dlg.showModal();
 }
 
-/// A reconnect retires the dialog and re-arms it for the next outage.
 function markConnected() {
   setupDismissed = false;
   if ($('#setup').open) $('#setup').close();

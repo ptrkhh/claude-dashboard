@@ -20,10 +20,31 @@ A Tauri desktop wrapper around the same UI. The agent runs in-process (no separa
 
 **On Windows the client links no agent at all** — `cdash-agent` is a
 `cfg(not(windows))` dependency. tmux, `claude` and `/proc` live in a WSL distro,
-so the agent runs there and the client talks to it over WSL2's loopback relay:
-run `./cdash-agent` inside WSL, then start `cdash-tauri.exe`. With no profile
-saved it defaults to `http://localhost:23274`; a profile overrides that.
-Launching the distro for you is step 6 — for now the distro is yours to start.
+so the agent runs there and the client talks to it over WSL2's loopback relay.
+With no profile saved it defaults to `http://localhost:23274`; a profile
+overrides that. Launching the distro for you is step 6 — for now the distro is
+yours to start.
+
+There are two Windows builds, x64 and ARM64, because Snapdragon machines run
+Windows natively and an x64 build only gets there under Prism emulation. Each
+bundles the agent for its own architecture — WSL is native to the host, so an
+ARM64 host means an ARM64 distro. Running the wrong one copies an agent the
+distro cannot exec; the reason lands in `~/cdash-agent.log`, not at copy time.
+
+When the agent is unreachable the client shows the same setup dialog the
+Android app does, with a command to paste into WSL. It hands the binary over
+**through the filesystem, not a socket**: the app writes the bundled agent into
+`%TEMP%\cdash` and the command copies it from `/mnt/c/…`, which WSL mounts by
+default. Temp rather than app data because the copy is staging — dead once the
+distro has it — and the dialog re-exports it every time it opens, so a cleaned
+temp heals itself. A loopback handoff would not work —
+under WSL2's default NAT networking the distro's `127.0.0.1` is its own, not
+the host's, and that only changes under `networkingMode=mirrored`. Binding a
+routable interface instead would serve the binary to the whole network.
+
+Note the asymmetry: Windows→WSL loopback *does* work by default, which is why
+the client reaches the agent on `localhost:23274` with no configuration. It is
+only the reverse direction that needs `/mnt/c`.
 
 ## Android client
 
@@ -60,7 +81,8 @@ cargo run -p cdash-agent     # http://127.0.0.1:23274
 |---|---|---|
 | `cdash-agent` | `x86_64-unknown-linux-musl` | VPS, WSL |
 | `cdash-agent` | `aarch64-unknown-linux-musl` | VPS, Termux on Android (F-Droid Termux — see the design doc's Android section) |
-| `cdash-tauri.exe` | `x86_64-pc-windows-msvc` | Windows desktop client |
+| `cdash-tauri.exe` | `x86_64-pc-windows-msvc` | Windows desktop client (x64), bundling the x86_64 agent |
+| `cdash-tauri.exe` | `aarch64-pc-windows-msvc` | Windows desktop client (ARM64), bundling the aarch64 agent |
 | `cdash-dashboard-android-arm64.apk` | `aarch64-linux-android` | Android thin client |
 
 Both agents are **booted** as the release gate — the gate is the startup banner,

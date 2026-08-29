@@ -2,7 +2,8 @@
 # Every local artifact:
 #   x86_64-unknown-linux-musl   cdash-agent      VPS / WSL
 #   aarch64-unknown-linux-musl  cdash-agent      VPS / Termux (Android)
-#   x86_64-pc-windows-msvc      cdash-tauri.exe  Windows desktop client
+#   x86_64-pc-windows-msvc      cdash-tauri.exe  Windows desktop client (x64)
+#   aarch64-pc-windows-msvc     cdash-tauri.exe  Windows desktop client (ARM64)
 #   aarch64-linux-android       *.apk            Android thin client (Termux)
 #
 # The two Linux binaries must be EXECUTED after building (spec: release
@@ -12,7 +13,7 @@
 #
 # Prereqs:
 #   rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
-#                     x86_64-pc-windows-msvc
+#                     x86_64-pc-windows-msvc aarch64-pc-windows-msvc
 #   pip install ziglang && cargo install cargo-zigbuild   # musl libc + a cross
 #       C compiler for aws-lc-sys, replacing musl-tools and the musl.cc
 #       toolchain that stopped responding
@@ -28,7 +29,19 @@ cd "$(dirname "$0")/.."
 
 cargo zigbuild --release --locked -p cdash-agent --target x86_64-unknown-linux-musl
 cargo zigbuild --release --locked -p cdash-agent --target aarch64-unknown-linux-musl
-cargo xwin build --release --locked -p cdash-tauri --target x86_64-pc-windows-msvc
+# Two Windows clients, because Snapdragon machines run Windows natively and an
+# x64 build only gets there through Prism emulation. Each bundles the agent for
+# its own architecture: the client is on the host, but WSL is native to the
+# host, so an ARM64 host means an ARM64 distro. Pick the wrong installer and the
+# copied agent will not exec in the distro — the reason lands in
+# ~/cdash-agent.log, not at copy time.
+#
+# CDASH_AGENT_BIN embeds it; the setup screen writes it out for WSL to copy
+# from /mnt/c. Same mechanism as the APK, different binary.
+CDASH_AGENT_BIN="$PWD/target/x86_64-unknown-linux-musl/release/cdash-agent" \
+  cargo xwin build --release --locked -p cdash-tauri --target x86_64-pc-windows-msvc
+CDASH_AGENT_BIN="$PWD/target/aarch64-unknown-linux-musl/release/cdash-agent" \
+  cargo xwin build --release --locked -p cdash-tauri --target aarch64-pc-windows-msvc
 
 # The APK, only where the Android toolchain is set up — everything above builds
 # without it. `android init` runs every time because gen/android is generated,
@@ -86,7 +99,8 @@ boots ./target/x86_64-unknown-linux-musl/release/cdash-agent
 boots qemu-aarch64-static ./target/aarch64-unknown-linux-musl/release/cdash-agent
 
 test -s ./target/x86_64-pc-windows-msvc/release/cdash-tauri.exe
-echo "both agents booted; windows client linked"
+test -s ./target/aarch64-pc-windows-msvc/release/cdash-tauri.exe
+echo "both agents booted; both windows clients linked"
 
 APK=crates/tauri-app/gen/android/app/build/outputs/apk/universal/release/cdash-dashboard-android-arm64.apk
 [ -f "$APK" ] && echo "apk: $APK"

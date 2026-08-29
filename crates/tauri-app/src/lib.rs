@@ -344,22 +344,28 @@ fn profile_activate<R: tauri::Runtime>(
 /// the phone, so this starts only when the setup screen asks for it — not at
 /// launch.
 mod handoff {
+    #[cfg(any(not(windows), test))]
     use std::io::{Read, Write};
+    #[cfg(any(not(windows), test))]
     use std::net::{TcpListener, TcpStream};
+    #[cfg(any(not(windows), test))]
     use std::sync::Mutex;
 
     /// The `aarch64-unknown-linux-musl` agent, embedded when `CDASH_AGENT_BIN`
     /// named one at build time; empty otherwise.
     pub const AGENT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cdash-agent.bin"));
 
+    #[cfg(not(windows))]
     static URL: Mutex<Option<String>> = Mutex::new(None);
 
+    #[cfg(not(windows))]
     pub fn start() -> Result<String, String> {
         start_serving(AGENT)
     }
 
     /// Idempotent: the second call returns the first listener's URL rather than
     /// binding a second port.
+    #[cfg(any(not(windows), test))]
     pub fn start_serving(body: &'static [u8]) -> Result<String, String> {
         if body.is_empty() {
             return Err("this build bundles no agent: rebuild with CDASH_AGENT_BIN set".into());
@@ -385,6 +391,7 @@ mod handoff {
     /// The request is read and discarded: one file, one response, whatever was
     /// asked for. Reading it at all is what keeps the client from seeing a
     /// reset instead of the body.
+    #[cfg(any(not(windows), test))]
     fn respond(mut conn: TcpStream, body: &[u8]) -> std::io::Result<()> {
         let mut scratch = [0u8; 1024];
         let _ = conn.read(&mut scratch)?;
@@ -398,13 +405,74 @@ mod handoff {
     }
 }
 
-/// The URL Termux should `curl`, the byte count so the UI can show it, and the
-/// port the setup command has to health-check — the number lives here, not in
-/// the JavaScript.
+/// Where WSL can read a Windows path: `C:\x\y` and the verbatim `\\?\C:\x\y`
+/// both become `/mnt/c/x/y`, since WSL mounts the drives there by default.
+/// A copy needs no network, which is the point — under WSL2's default NAT
+/// networking the distro's `127.0.0.1` is its own, not the host's.
+#[cfg(any(windows, test))] // Windows calls it; the tests pin it on every platform
+fn wsl_path(windows_path: &str) -> Option<String> {
+    // `canonicalize` hands back verbatim paths on Windows; strip that prefix
+    // first or the drive letter is never found.
+    let p = windows_path.strip_prefix(r"\\?\").unwrap_or(windows_path);
+    let (drive, rest) = p.split_once(':')?;
+    let mut letters = drive.chars();
+    let letter = letters.next()?;
+    if letters.next().is_some() || !letter.is_ascii_alphabetic() {
+        return None; // a UNC share or "CD:" is nothing WSL mounts under /mnt
+    }
+    let rest = rest.trim_start_matches(['\\', '/']).replace('\\', "/");
+    Some(format!("/mnt/{}/{}", letter.to_ascii_lowercase(), rest))
+}
+
+/// Writes the bundled agent where the other side can read it, and only when it
+/// is not already there byte for byte: the setup command is pasted more than
+/// once by design, and rewriting a running binary fails on Windows.
+#[cfg(any(windows, test))] // as above
+fn export_agent(dir: &std::path::Path, body: &[u8]) -> Result<std::path::PathBuf, String> {
+    if body.is_empty() {
+        return Err("this build bundles no agent: rebuild with CDASH_AGENT_BIN set".into());
+    }
+    let path = dir.join("cdash-agent");
+    if std::fs::read(&path).is_ok_and(|on_disk| on_disk == body) {
+        return Ok(path);
+    }
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    std::fs::write(&path, body).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(path)
+}
+
+/// How this platform hands the agent over, plus the port the setup command
+/// health-checks — the number lives here, not in the JavaScript.
+///
+/// Android curls it out of this process over loopback, which Android does not
+/// isolate between apps. Windows cannot do that: binding a routable interface
+/// so the distro could reach it would serve the binary to the whole network.
+/// So Windows writes the file and lets WSL read it through `/mnt/c`.
 #[tauri::command]
-fn agent_handoff() -> Result<serde_json::Value, String> {
+fn agent_handoff(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let _ = &app;
+    #[cfg(windows)]
+    {
+        // %TEMP%, not app data: the copy is staging, dead the moment WSL has
+        // it, and leaving 9 MB in AppData for an app with no uninstaller is
+        // rude. Re-exported whenever the dialog opens, so a cleaned temp heals
+        // itself.
+        let dir = std::env::temp_dir().join("cdash");
+        let path = export_agent(&dir, handoff::AGENT)?;
+        let win = path.to_string_lossy().to_string();
+        let wsl = wsl_path(&win)
+            .ok_or_else(|| format!("cannot map {win} into WSL; copy it across yourself"))?;
+        return Ok(serde_json::json!({
+            "kind": "copy",
+            "source": wsl,
+            "bytes": handoff::AGENT.len(),
+            "port": LOCAL_AGENT_PORT,
+        }));
+    }
+    #[cfg(not(windows))]
     Ok(serde_json::json!({
-        "url": handoff::start()?,
+        "kind": "curl",
+        "source": handoff::start()?,
         "bytes": handoff::AGENT.len(),
         "port": LOCAL_AGENT_PORT,
     }))
@@ -544,6 +612,57 @@ mod tests {
             managed: "in-process".into(),
             auth: "none".into(),
         }
+    }
+
+    #[test]
+    fn wsl_paths_are_mapped_under_mnt() {
+        assert_eq!(
+            wsl_path(r"C:\Users\me\AppData\Local\dev.cdash.app\cdash-agent").as_deref(),
+            Some("/mnt/c/Users/me/AppData/Local/dev.cdash.app/cdash-agent")
+        );
+        // what canonicalize actually returns on Windows
+        assert_eq!(
+            wsl_path(r"\\?\C:\Users\me\cdash-agent").as_deref(),
+            Some("/mnt/c/Users/me/cdash-agent")
+        );
+        // a lowercase drive, and one already using forward slashes
+        assert_eq!(wsl_path(r"d:\tools\x").as_deref(), Some("/mnt/d/tools/x"));
+        assert_eq!(wsl_path("E:/tools/x").as_deref(), Some("/mnt/e/tools/x"));
+        // spaces survive: the command quotes the path, and usernames have them
+        assert_eq!(
+            wsl_path(r"C:\Users\Ada Lovelace\x").as_deref(),
+            Some("/mnt/c/Users/Ada Lovelace/x")
+        );
+
+        // nothing WSL mounts under /mnt
+        assert_eq!(wsl_path(r"\\server\share\x"), None);
+        assert_eq!(wsl_path(r"CD:\x"), None);
+        assert_eq!(wsl_path("/already/unix"), None);
+        assert_eq!(wsl_path(""), None);
+    }
+
+    #[test]
+    fn export_writes_once_and_refuses_an_empty_bundle() {
+        let dir = std::env::temp_dir().join(format!("cdash-export-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(export_agent(&dir, b"").unwrap_err().contains("CDASH_AGENT_BIN"));
+        assert!(!dir.exists(), "an empty bundle writes nothing at all");
+
+        let path = export_agent(&dir, b"agent v1").expect("writes");
+        assert_eq!(std::fs::read(&path).unwrap(), b"agent v1");
+
+        // Pasting the command again must not rewrite an identical file — on
+        // Windows the copy source may be locked by a running agent.
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(export_agent(&dir, b"agent v1").unwrap(), path);
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before);
+
+        // a new version does replace it
+        export_agent(&dir, b"agent v2").expect("rewrites");
+        assert_eq!(std::fs::read(&path).unwrap(), b"agent v2");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
