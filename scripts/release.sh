@@ -43,7 +43,7 @@ if [ -n "${ANDROID_HOME:-}" ] && [ -n "${NDK_HOME:-}" ]; then
     cargo tauri android init
 
     # Gradle enables cleartext HTTP for debug only, and reaching the agent at
-    # http://localhost:8080 is this client's entire job — a release APK without
+    # http://localhost:23274 is this client's entire job — a release APK without
     # this cannot talk to Termux at all.
     sed -i '/getByName("release")/a\        manifestPlaceholders["usesCleartextTraffic"] = "true"' \
       gen/android/app/build.gradle.kts

@@ -21,8 +21,8 @@ A Tauri desktop wrapper around the same UI. The agent runs in-process (no separa
 **On Windows the client links no agent at all** — `cdash-agent` is a
 `cfg(not(windows))` dependency. tmux, `claude` and `/proc` live in a WSL distro,
 so the agent runs there and the client talks to it over WSL2's loopback relay:
-run `PORT=8080 ./cdash-agent` inside WSL, then start `cdash-tauri.exe`. With no
-profile saved it defaults to `http://localhost:8080`; a profile overrides that.
+run `./cdash-agent` inside WSL, then start `cdash-tauri.exe`. With no profile
+saved it defaults to `http://localhost:23274`; a profile overrides that.
 Launching the distro for you is step 6 — for now the distro is yours to start.
 
 ## Android client
@@ -30,7 +30,7 @@ Launching the distro for you is step 6 — for now the distro is yours to start.
 An APK thin client for the phone. It links no agent either — Android cannot
 spawn the processes the agent drives, so the agent runs in **F-Droid Termux**
 (the Play-store build cannot `exec` from its own data directory; see the design
-doc's Android section) and the app talks to it on `localhost:8080`, which
+doc's Android section) and the app talks to it on `localhost:23274`, which
 Android does not isolate between apps.
 
 The point of the app over "Add to home screen" is onboarding: the PWA is served
@@ -49,7 +49,7 @@ read out of `app.js` rather than a copy.
 ## Run
 
 ```
-cargo run -p cdash-agent     # http://127.0.0.1:8080
+cargo run -p cdash-agent     # http://127.0.0.1:23274
 ```
 
 ### Release builds
@@ -79,7 +79,7 @@ it are worth knowing:
   release.
 - Gradle enables cleartext HTTP for debug only, so the script patches the
   release build type to allow it. Without that the client cannot reach the agent
-  at `http://localhost:8080`, which is its entire job.
+  at `http://localhost:23274`, which is its entire job.
 
 Prereqs: `rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-msvc`,
 `pip install ziglang && cargo install cargo-zigbuild`,
@@ -101,7 +101,7 @@ Requires `tmux`, `claude` and `git` on `PATH`; the agent reports any that are mi
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PORT` | `8080` | Port to listen on. `0` picks any free port. |
+| `PORT` | `23274` | Port to listen on. `0` picks any free port. The default is CDASH on a phone keypad, picked to collide with nothing: below the 32768 ephemeral range so the kernel never hands it out, and clear of 3000/5000/8000/8080/8888. |
 | `CDASH_BIND` | `127.0.0.1` | Address to bind. **Breaking change:** the Node agent bound every interface. LAN access now requires setting `CDASH_BIND=0.0.0.0` explicitly. |
 | `CLAUDE_DIR` | `~/.claude` | Path to the Claude config/projects directory. |
 | `DISK_EXTRA` | — | Optional second mount to report alongside `/`, e.g. `/mnt/d`. |
@@ -146,7 +146,7 @@ outward and proxies to loopback, so there is no inbound port to bypass and
 nothing for a guard to protect; Cloudflare's own documentation says a tunnelled
 origin need not validate the token. Keep `cf-access` on anyway if **other users
 or services share the box** — with `none`, any local user reaching
-`127.0.0.1:8080` gets code execution as *you*, which is a real escalation rather
+`127.0.0.1:23274` gets code execution as *you*, which is a real escalation rather
 than a no-op. `bearer` does not substitute here: browsers do not send
 `Authorization` headers.
 

@@ -502,12 +502,12 @@ async function hostPlatform() {
   return host;
 }
 
-const installScript = url => `curl -fsS -o "$HOME/cdash-agent" ${url}
+const installScript = (url, port) => `curl -fsS -o "$HOME/cdash-agent" ${url}
 chmod +x "$HOME/cdash-agent"
 grep -q cdash-agent "$HOME/.bashrc" 2>/dev/null || cat >> "$HOME/.bashrc" <<'CDASH'
 
 # claude-dashboard: start the agent whenever Termux opens, unless it is up
-if ! curl -fsS -m 1 http://127.0.0.1:8080/api/health >/dev/null 2>&1; then
+if ! curl -fsS -m 1 http://127.0.0.1:${port}/api/health >/dev/null 2>&1; then
   termux-wake-lock 2>/dev/null
   nohup "$HOME/cdash-agent" >"$HOME/cdash-agent.log" 2>&1 </dev/null &
 fi
@@ -518,8 +518,9 @@ async function showSetup() {
   const dlg = $('#setup');
   if (dlg.open || setupDismissed) return;
   try {
-    const { url } = await invoke('agent_handoff');
-    $('#setup-script').textContent = installScript(url);
+    const { url, port } = await invoke('agent_handoff');
+    $('#setup-addr').textContent = `localhost:${port}`;
+    $('#setup-script').textContent = installScript(url, port);
   } catch (e) {
     // No bundled agent (a build without CDASH_AGENT_BIN): say so rather than
     // showing a curl of nothing.

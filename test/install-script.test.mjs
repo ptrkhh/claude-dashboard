@@ -16,12 +16,12 @@ const run = promisify(execFile);
 
 const AGENT = '#!/bin/sh\ntouch "$HOME/agent-started"\nsleep 2\n';
 
-/** The shipped template with `${url}` filled in — never a second copy of it. */
-function installScript(url) {
+/** The shipped template, filled in — never a second copy of it. */
+function installScript(url, port) {
   const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
-  const m = src.match(/const installScript = url => `([\s\S]*?)`;\n/);
+  const m = src.match(/const installScript = \(url, port\) => `([\s\S]*?)`;\n/);
   assert.ok(m, 'app.js still defines installScript as a template literal');
-  return m[1].replaceAll('${url}', url);
+  return m[1].replaceAll('${url}', url).replaceAll('${port}', String(port));
 }
 
 /** Stands in for the app's loopback handoff of the bundled agent. */
@@ -39,7 +39,10 @@ test('the pasted command installs the agent and arms Termux to start it', async 
   const HOME = mkdtempSync(join(tmpdir(), 'cdash-home-'));
   const dir = mkdtempSync(join(tmpdir(), 'cdash-paste-'));
   const script = join(dir, 'install.sh');
-  writeFileSync(script, installScript(url));
+  // A port nothing else on the build machine is using: the guard must decide
+  // "down" from the agent's own port, not from whatever else is listening.
+  const port = 23274;
+  writeFileSync(script, installScript(url, port));
   const paste = () => run('bash', [script], { env: { ...process.env, HOME } });
 
   try {
@@ -54,6 +57,8 @@ test('the pasted command installs the agent and arms Termux to start it', async 
     const blocks = () =>
       readFileSync(join(HOME, '.bashrc'), 'utf8').split('claude-dashboard: start the agent').length - 1;
     assert.equal(blocks(), 1, 'one startup block');
+    assert.match(readFileSync(join(HOME, '.bashrc'), 'utf8'), new RegExp(`127\\.0\\.0\\.1:${port}/api/health`),
+      'the guard checks the agent on its own port');
 
     // Pasting again — the "reinstall" case the dialog offers — must not stack a
     // second copy into .bashrc.
@@ -61,7 +66,7 @@ test('the pasted command installs the agent and arms Termux to start it', async 
     assert.equal(blocks(), 1, 'still one startup block after a second paste');
 
     // Opening Termux with the agent down must start it. curl is stubbed to fail
-    // so "down" does not depend on port 8080 being free on this machine.
+    // so "down" does not depend on that port being free on this machine.
     const bin = mkdtempSync(join(tmpdir(), 'cdash-bin-'));
     writeFileSync(join(bin, 'curl'), '#!/bin/sh\nexit 1\n');
     chmodSync(join(bin, 'curl'), 0o755);

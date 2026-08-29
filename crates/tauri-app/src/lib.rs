@@ -14,19 +14,20 @@ use std::sync::{Arc, Mutex};
 #[cfg(not(inproc_agent))]
 pub enum Bound {}
 
-/// What a thin client says instead of starting a server. Everything the agent
-/// drives — tmux, `claude`, `/proc` — lives in the WSL distro or in Termux;
-/// `host_platform` tells the UI which setup instructions to show.
-#[cfg(not(inproc_agent))]
-const NO_AGENT_HINT: &str = "this build has no in-process agent: run cdash-agent \
-    in WSL or Termux on port 8080, and the client will reach it at \
-    http://localhost:8080";
+/// The agent's own default, duplicated because the thin-client platforms do
+/// not link the agent at all. The assertion below keeps the copy honest: on
+/// every platform that *does* link it, a mismatch fails the build.
+const LOCAL_AGENT_PORT: u16 = 23274;
+#[cfg(inproc_agent)]
+const _: () = assert!(LOCAL_AGENT_PORT == cdash_agent::http::serve::DEFAULT_PORT);
 
 /// Where a thin client looks when no profile names another agent. WSL2 relays a
 /// loopback listener in the distro to the Windows host on the same port, and
 /// Android does not isolate loopback between apps, so on both the agent's own
 /// port is simply reachable.
-const LOCAL_AGENT_BASE: &str = "http://localhost:8080";
+fn local_agent_base() -> String {
+    format!("http://localhost:{LOCAL_AGENT_PORT}")
+}
 
 #[derive(Default)]
 pub struct ServerState(Mutex<Option<Bound>>);
@@ -89,9 +90,16 @@ fn addr_locked(state: &Mutex<Option<Bound>>) -> Result<Option<String>, String> {
     Ok(guard.as_ref().map(url))
 }
 
+/// What a thin client says instead of starting a server. Everything the agent
+/// drives — tmux, `claude`, `/proc` — lives in the WSL distro or in Termux;
+/// `host_platform` tells the UI which setup instructions to show.
 #[cfg(not(inproc_agent))]
 fn start_locked(_state: &Mutex<Option<Bound>>) -> Result<String, String> {
-    Err(NO_AGENT_HINT.into())
+    Err(format!(
+        "this build has no in-process agent: run cdash-agent in WSL or Termux on port \
+         {LOCAL_AGENT_PORT}, and the client will reach it at {}",
+        local_agent_base()
+    ))
 }
 
 #[cfg(not(inproc_agent))]
@@ -240,7 +248,7 @@ fn active_record<R: tauri::Runtime>(store: &tauri_plugin_store::Store<R>) -> Opt
 fn base_url(inproc: Option<String>, active: Option<&ProfileRecord>) -> Option<String> {
     inproc
         .or_else(|| active.map(|p| p.base_url.trim_end_matches('/').to_string()))
-        .or_else(|| (!cfg!(inproc_agent)).then(|| LOCAL_AGENT_BASE.to_string()))
+        .or_else(|| (!cfg!(inproc_agent)).then(local_agent_base))
 }
 
 /// The entire data path: JS names a path, we resolve it against the bound
@@ -390,10 +398,16 @@ mod handoff {
     }
 }
 
-/// The URL Termux should `curl`, and the byte count so the UI can show it.
+/// The URL Termux should `curl`, the byte count so the UI can show it, and the
+/// port the setup command has to health-check — the number lives here, not in
+/// the JavaScript.
 #[tauri::command]
 fn agent_handoff() -> Result<serde_json::Value, String> {
-    Ok(serde_json::json!({ "url": handoff::start()?, "bytes": handoff::AGENT.len() }))
+    Ok(serde_json::json!({
+        "url": handoff::start()?,
+        "bytes": handoff::AGENT.len(),
+        "port": LOCAL_AGENT_PORT,
+    }))
 }
 
 #[tauri::command]

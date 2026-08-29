@@ -9,6 +9,12 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// CDASH on a phone keypad. Chosen to be unmemorable to everything else: it is
+/// below the 32768 ephemeral range, so the kernel never hands it out to a
+/// random client socket, and clear of 3000/5000/8000/8080/8888, where every
+/// other dev server already lives. `PORT` overrides it.
+pub const DEFAULT_PORT: u16 = 23274;
+
 pub struct Config {
     pub bind: IpAddr,
     pub port: u16,
@@ -78,7 +84,7 @@ impl Config {
             password,
             bind,
             port: match std::env::var("PORT") {
-                Err(_) => 8080,
+                Err(_) => DEFAULT_PORT,
                 Ok(p) => p.parse().map_err(|_| format!("PORT: not a port number: {p:?}"))?,
             },
             claude_dir: std::env::var("CLAUDE_DIR")
