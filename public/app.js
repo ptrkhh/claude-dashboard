@@ -404,6 +404,7 @@ pkCrumbs.addEventListener('click', e => { const c = e.target.closest('[data-nav]
 let bk = cdashBackoff.initial();
 let timer = null;
 let gen = 0; // stale-tick guard: a superseded tick's result is dropped
+let polled = false; // has any tick actually run to completion?
 
 function arm() {
   clearTimeout(timer);
@@ -412,7 +413,11 @@ function arm() {
 
 async function tick() {
   const g = gen;
-  if (document.hidden) { arm(); return; }
+  // Skip background polls, but never the first one. An Android WebView is
+  // hidden until its activity resumes, and `visibilitychange` can fire before
+  // the listener below is attached — which left the app arming forever on
+  // "Connecting…", with no request ever sent.
+  if (document.hidden && polled) { arm(); return; }
   let outcome;
   try {
     const data = await api('/api/sessions');
@@ -432,7 +437,7 @@ async function tick() {
     $('#health-label').textContent = 'Disconnected';
     // Only Android has a story the user can act on from here; every other
     // platform's agent is either in-process or somewhere this app cannot reach.
-    if (host === 'android') showSetup();
+    if (isTauri) hostPlatform().then(p => { if (p === 'android') showSetup(); });
   }
   // Logs are secondary: their failure must not flip the indicator or
   // advance the ladder once sessions have rendered.
@@ -440,6 +445,7 @@ async function tick() {
     try { $('#logs').textContent = (await api('/api/logs')).lines.join('\n'); } catch {}
   }
   if (g !== gen) return;
+  polled = true;
   bk = cdashBackoff.next(bk, outcome);
   if (!bk.halted) arm();
 }
@@ -463,8 +469,17 @@ function poll() {
    The pasted block also appends a guard to ~/.bashrc, so the agent comes back
    by itself every time Termux opens. That is what keeps the reminder down to
    "open Termux" instead of "run this again". */
-let host = null;          // 'android' | 'windows' | 'linux' | … once known
+let host = null;          // 'android' | 'windows' | 'linux' | … once resolved
 let setupDismissed = false;
+
+/// Resolved on first use rather than at load: a throw at the top level of this
+/// file would take `poll()` down with it, and the whole UI with that.
+async function hostPlatform() {
+  if (host === null) {
+    try { host = await invoke('host_platform'); } catch { host = 'unknown'; }
+  }
+  return host;
+}
 
 const installScript = url => `curl -fsS -o "$HOME/cdash-agent" ${url}
 chmod +x "$HOME/cdash-agent"
@@ -520,7 +535,12 @@ $('#setup-copy').onclick = async () => {
 // Give the launch button its resting icon + label.
 $('#launch').innerHTML = `${ICONS.play}<span>Launch</span>`;
 
-if (isTauri) invoke('host_platform').then(p => { host = p; }).catch(() => {});
+// There is no console on a phone. An uncaught error used to leave the header
+// reading "Connecting…" forever with nothing to go on.
+addEventListener('error', e => {
+  $('#health').className = 'dot bad';
+  $('#health-label').textContent = `Error: ${e.message || 'script failed'}`;
+});
 
 poll();
 document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });

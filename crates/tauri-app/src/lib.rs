@@ -411,9 +411,14 @@ pub fn run() {
         .manage(ServerState::default())
         // No redirects: this client has exactly one destination, and a
         // redirect is the only way a request pinned to loopback could leave it.
+        // Timeouts because a request that never returns leaves the UI reading
+        // "Connecting…" with no way back — the poll ladder only advances when a
+        // tick finishes, whether it succeeded or failed.
         .manage(ReqwestState(
             reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(std::time::Duration::from_secs(3))
+                .timeout(std::time::Duration::from_secs(15))
                 .build()
                 .expect("a client with no TLS roots to load always builds"),
         ))
