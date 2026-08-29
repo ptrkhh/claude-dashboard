@@ -126,6 +126,17 @@
 </dialog>
 
 <div id="toast" role="status" aria-live="polite"></div>
+<!-- Before app.js, deliberately: an error thrown while app.js is still loading
+     leaves a dead shell reading "Connecting…", and a phone has no console to
+     ask. Registered here, the header reports it instead. -->
+<script>
+  addEventListener('error', e => {
+    var dot = document.getElementById('health');
+    var label = document.getElementById('health-label');
+    if (dot) dot.className = 'dot bad';
+    if (label) label.textContent = 'Error: ' + (e.message || 'script failed');
+  });
+</script>
 <script src="transport/backoff.js"></script>
 <script src="app.js"></script>
 </body>

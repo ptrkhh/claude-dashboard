@@ -28,9 +28,20 @@ const ICONS = {
    'system' (the default, no stored value) follows the OS via prefers-color-scheme
    and stays live if the OS setting changes. */
 const THEME_KEY = 'cdash-theme';
+
+/* An Android WebView can have DOM storage disabled, where *reading*
+   `window.localStorage` throws rather than returning null. Unguarded, that
+   killed this file on its first line of theme code — before the launcher, the
+   dropdowns or the poll loop existed — and the app came up as a dead shell on
+   "Connecting…". A theme that does not persist is the acceptable cost. */
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* not persisted */ } },
+  remove(k) { try { localStorage.removeItem(k); } catch { /* nothing to clear */ } },
+};
 const MODES = ['system', 'light', 'dark'];
 const systemDark = () => matchMedia('(prefers-color-scheme: dark)').matches;
-const themeMode = () => { const s = localStorage.getItem(THEME_KEY); return s === 'light' || s === 'dark' ? s : 'system'; };
+const themeMode = () => { const s = store.get(THEME_KEY); return s === 'light' || s === 'dark' ? s : 'system'; };
 const resolved = mode => mode === 'system' ? (systemDark() ? 'dark' : 'light') : mode;
 
 function applyMode(mode) {
@@ -49,8 +60,8 @@ function applyMode(mode) {
 }
 $('#theme-toggle').onclick = () => {
   const next = MODES[(MODES.indexOf(themeMode()) + 1) % MODES.length];
-  if (next === 'system') localStorage.removeItem(THEME_KEY);
-  else localStorage.setItem(THEME_KEY, next);
+  if (next === 'system') store.remove(THEME_KEY);
+  else store.set(THEME_KEY, next);
   applyMode(next);
 };
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
@@ -534,13 +545,6 @@ $('#setup-copy').onclick = async () => {
 
 // Give the launch button its resting icon + label.
 $('#launch').innerHTML = `${ICONS.play}<span>Launch</span>`;
-
-// There is no console on a phone. An uncaught error used to leave the header
-// reading "Connecting…" forever with nothing to go on.
-addEventListener('error', e => {
-  $('#health').className = 'dot bad';
-  $('#health-label').textContent = `Error: ${e.message || 'script failed'}`;
-});
 
 poll();
 document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
