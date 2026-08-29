@@ -10,7 +10,7 @@ or 403 halts the poll until you act; throttling never does. The service worker
 caches at runtime (network-first navigations, stale-while-revalidate assets), so
 offline works from the second visit; there is no precache manifest to maintain.
 
-## Desktop client (Linux)
+## Desktop client (Linux, Windows)
 
 ```
 cargo run -p cdash-tauri
@@ -18,17 +18,43 @@ cargo run -p cdash-tauri
 
 A Tauri desktop wrapper around the same UI. The agent runs in-process (no separate server, no port to remember), started at app setup on a tokio task. The HTTP boundary is kept even in-process: the same `/api/*` calls still speak HTTP to loopback, tunnelled through the `api_request` Tauri command rather than webview `fetch`. Connection profiles are stored in the app's config directory via `tauri-plugin-store`. Secrets handling arrives in step 10.
 
+**On Windows the client links no agent at all** — `cdash-agent` is a
+`cfg(not(windows))` dependency. tmux, `claude` and `/proc` live in a WSL distro,
+so the agent runs there and the client talks to it over WSL2's loopback relay:
+run `PORT=8080 ./cdash-agent` inside WSL, then start `cdash-tauri.exe`. With no
+profile saved it defaults to `http://localhost:8080`; a profile overrides that.
+Launching the distro for you is step 6 — for now the distro is yours to start.
+
 ## Run
 
 ```
 cargo run -p cdash-agent     # http://127.0.0.1:8080
 ```
 
-### Static release builds
+### Release builds
 
-`scripts/release.sh` builds static musl binaries for VPS/WSL (`x86_64`) and VPS/Termux (`aarch64`) and boots both as the release gate — the gate is the startup banner, since a binary that dies instantly would otherwise pass. Prereqs: `rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl`, `sudo apt install musl-tools qemu-user`, and the [musl.cc](https://musl.cc) `aarch64-linux-musl-cross` toolchain unpacked at `~/.local/opt/`.
+`scripts/release.sh` builds all three artifacts:
 
-CI gates the same two targets but sources its cross-toolchain from `taiki-e/setup-cross-toolchain-action` rather than musl.cc, which stopped responding from GitHub's runners and took every release build down with it. Use the same action if the local prereq above fails.
+| Artifact | Target | Runs on |
+|---|---|---|
+| `cdash-agent` | `x86_64-unknown-linux-musl` | VPS, WSL |
+| `cdash-agent` | `aarch64-unknown-linux-musl` | VPS, Termux on Android (F-Droid Termux — see the design doc's Android section) |
+| `cdash-tauri.exe` | `x86_64-pc-windows-msvc` | Windows desktop client |
+
+Both agents are **booted** as the release gate — the gate is the startup banner,
+since a binary that dies instantly would otherwise pass. The Windows client
+cannot run on a Linux builder, so its gate is that it links, which is also the
+gate on the `cfg(not(windows))` split that keeps the agent out of it.
+
+Prereqs: `rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-msvc`,
+`pip install ziglang && cargo install cargo-zigbuild`,
+`cargo install cargo-xwin`, `sudo apt install clang lld qemu-user-static`.
+
+`cargo-zigbuild` supplies musl libc and a cross C compiler for `aws-lc-sys` from
+one download, replacing both `musl-tools` and the [musl.cc](https://musl.cc)
+toolchain that stopped responding and took every release build down with it. CI
+gates the two musl targets through `taiki-e/setup-cross-toolchain-action`
+instead, which serves the same purpose on a runner.
 
 Requires `tmux`, `claude` and `git` on `PATH`; the agent reports any that are missing at startup.
 

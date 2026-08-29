@@ -1,18 +1,40 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(not(windows))]
 use cdash_agent::auth::config::{AuthConfig, GuardKind};
+#[cfg(not(windows))]
 use cdash_agent::http::serve::Bound;
+#[cfg(not(windows))]
 use std::net::IpAddr;
+#[cfg(not(windows))]
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-#[derive(Default)]
-pub struct ServerState(Mutex<Option<cdash_agent::http::serve::Bound>>);
+/// Windows links no agent, so nothing there can construct a `Bound`. The
+/// commands keep their signatures across platforms; only the bodies differ.
+#[cfg(windows)]
+pub enum Bound {}
 
-fn url(b: &cdash_agent::http::serve::Bound) -> String {
+/// What the Windows client says instead of starting a server. Everything the
+/// agent drives — tmux, `claude`, `/proc` — lives in the WSL distro.
+#[cfg(windows)]
+const WSL_HINT: &str = "this build has no in-process agent: run cdash-agent inside WSL \
+    (PORT=8080), and the client will reach it at http://localhost:8080";
+
+/// Where the Windows client looks when no profile names another agent. WSL2
+/// relays a loopback listener in the distro to the Windows host on the same
+/// port.
+const WSL_DEFAULT_BASE: &str = "http://localhost:8080";
+
+#[derive(Default)]
+pub struct ServerState(Mutex<Option<Bound>>);
+
+#[cfg(not(windows))]
+fn url(b: &Bound) -> String {
     format!("http://{}", b.addr)
 }
 
+#[cfg(not(windows))]
 /// The in-process trust shape: loopback only, no auth guard, ephemeral port.
 /// Mirrors the agent crate's own test config.
 fn server_config() -> cdash_agent::http::serve::Config {
@@ -31,6 +53,7 @@ fn server_config() -> cdash_agent::http::serve::Config {
     }
 }
 
+#[cfg(not(windows))]
 fn start_locked(state: &Mutex<Option<Bound>>) -> Result<String, String> {
     let mut guard = state.lock().map_err(|_| "server state poisoned")?;
     if let Some(b) = guard.as_ref() {
@@ -43,6 +66,7 @@ fn start_locked(state: &Mutex<Option<Bound>>) -> Result<String, String> {
     Ok(addr)
 }
 
+#[cfg(not(windows))]
 fn stop_locked(state: &Mutex<Option<Bound>>) -> Result<(), String> {
     let mut guard = state.lock().map_err(|_| "server state poisoned")?;
     if let Some(b) = guard.take() {
@@ -51,6 +75,7 @@ fn stop_locked(state: &Mutex<Option<Bound>>) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 /// `None` once the serving task is gone, not merely once `stop` was called:
 /// a panicked accept loop must not keep reporting a live address while every
 /// request to it is refused.
@@ -60,6 +85,21 @@ fn addr_locked(state: &Mutex<Option<Bound>>) -> Result<Option<String>, String> {
         *guard = None;
     }
     Ok(guard.as_ref().map(url))
+}
+
+#[cfg(windows)]
+fn start_locked(_state: &Mutex<Option<Bound>>) -> Result<String, String> {
+    Err(WSL_HINT.into())
+}
+
+#[cfg(windows)]
+fn stop_locked(_state: &Mutex<Option<Bound>>) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn addr_locked(_state: &Mutex<Option<Bound>>) -> Result<Option<String>, String> {
+    Ok(None)
 }
 
 #[tauri::command]
@@ -193,6 +233,14 @@ fn active_record<R: tauri::Runtime>(store: &tauri_plugin_store::Store<R>) -> Opt
     resolve_active(&profiles_doc(store), Some(&active))
 }
 
+/// Where API calls go: the in-process agent when there is one, else the active
+/// profile, else — on Windows, which has no in-process agent — the WSL default.
+fn base_url(inproc: Option<String>, active: Option<&ProfileRecord>) -> Option<String> {
+    inproc
+        .or_else(|| active.map(|p| p.base_url.trim_end_matches('/').to_string()))
+        .or_else(|| cfg!(windows).then(|| WSL_DEFAULT_BASE.to_string()))
+}
+
 /// The entire data path: JS names a path, we resolve it against the bound
 /// loopback address only. No cookie jar; the client is built once.
 async fn request_inner(
@@ -226,8 +274,9 @@ async fn api_request(
     path: String,
     body: Option<serde_json::Value>,
 ) -> Result<ApiResponse, String> {
-    let addr = addr_locked(&state.0)?;
+    let inproc = addr_locked(&state.0)?;
     let active = open_store(&app).ok().and_then(|s| active_record(&s));
+    let addr = base_url(inproc, active.as_ref());
     request_inner(&http.0, addr, active.as_ref(), method, path, body).await
 }
 
@@ -297,9 +346,12 @@ fn main() {
         // it, so without this every api_request answers "server not running".
         // Runs on the main thread before the event loop, which is what makes
         // start_locked's block_on legal.
-        .setup(|app| {
-            use tauri::Manager;
-            start_locked(&app.state::<ServerState>().0).map_err(std::io::Error::other)?;
+        .setup(|_app| {
+            #[cfg(not(windows))]
+            {
+                use tauri::Manager;
+                start_locked(&_app.state::<ServerState>().0).map_err(std::io::Error::other)?;
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -397,6 +449,25 @@ mod tests {
             managed: "in-process".into(),
             auth: "none".into(),
         }
+    }
+
+    #[test]
+    fn base_url_prefers_the_in_process_agent_then_the_active_profile() {
+        let mut doc = ProfilesDoc::new();
+        let mut trailing = input("remote");
+        trailing.base_url = "http://192.168.1.9:8080/".into();
+        profile_upsert(&mut doc, trailing).unwrap();
+        let rec = resolve_active(&doc, Some("remote")).unwrap();
+
+        let inproc = Some("http://127.0.0.1:41234".to_string());
+        assert_eq!(base_url(inproc.clone(), Some(&rec)).as_deref(), Some("http://127.0.0.1:41234"));
+        assert_eq!(base_url(inproc, None).as_deref(), Some("http://127.0.0.1:41234"));
+        // the profile is the fallback, and its trailing slash must not survive
+        // into "http://host:8080//api/health"
+        assert_eq!(base_url(None, Some(&rec)).as_deref(), Some("http://192.168.1.9:8080"));
+        // nothing to talk to: only the Windows client, which never has an
+        // in-process agent, has a default worth guessing.
+        assert_eq!(base_url(None, None).is_some(), cfg!(windows));
     }
 
     #[test]
