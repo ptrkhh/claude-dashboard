@@ -76,6 +76,7 @@ impl Sampler {
             .map(|p| ProcRow {
                 pid: p.pid().as_u32() as i32,
                 ppid: p.parent().map(|x| x.as_u32() as i32).unwrap_or(0),
+                name: p.name().to_string_lossy().into_owned(),
                 cpu: p.cpu_usage(),
                 rss_kb: p.memory() / 1024, // sysinfo reports bytes; Node reported KiB
             })
