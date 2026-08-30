@@ -150,19 +150,32 @@ pub async fn fetch_jwks(url: &str) -> Result<Jwks, String> {
     Ok(jwks)
 }
 
+/// Retry cadence after a failed refresh. Waiting the full `JWKS_TTL` instead
+/// would stretch a rotation-during-outage lockout by up to an extra hour.
+pub const JWKS_RETRY: Duration = Duration::from_secs(60);
+
 /// Refresh the key set in the background for the process's lifetime.
 /// Cloudflare rotates keys; a cache that never refreshed would lock every user
-/// out at the rotation. A failed refresh keeps the last good set.
+/// out at the rotation. A failed refresh keeps the last good set and retries
+/// on the shorter `JWKS_RETRY` cadence until a fetch succeeds.
 pub fn spawn_refresh(state: std::sync::Arc<CfState>, log: std::sync::Arc<crate::host::log::LogBuffer>) {
     tokio::spawn(async move {
         let url = certs_url(&state.cfg.team_domain);
+        let mut delay = JWKS_TTL;
         loop {
-            tokio::time::sleep(JWKS_TTL).await;
+            tokio::time::sleep(delay).await;
             match fetch_jwks(&url).await {
-                Ok(j) => state.jwks.install(j),
+                Ok(j) => {
+                    state.jwks.install(j);
+                    delay = JWKS_TTL;
+                }
                 Err(e) => {
                     // Nothing is evicted: the last good key set keeps serving.
-                    log.push(format!("cf-access: JWKS refresh failed, keeping last keys: {e}"));
+                    delay = JWKS_RETRY;
+                    log.push(format!(
+                        "cf-access: JWKS refresh failed, keeping last keys, retrying in {}s: {e}",
+                        JWKS_RETRY.as_secs()
+                    ));
                 }
             }
         }
