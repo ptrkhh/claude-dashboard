@@ -478,6 +478,31 @@ fn agent_handoff(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     }))
 }
 
+/// The trust boundary for [`open_external`]. `a.href` comes from our own page,
+/// but it is built from `bridgeSessionId` — a value read off disk in
+/// `~/.claude/sessions/*.json` — so `file://`, `javascript:` and `intent://`
+/// must not be reachable through the opener.
+fn is_web_url(url: &str) -> bool {
+    url.starts_with("https://") || url.starts_with("http://")
+}
+
+/// Hand a URL to the OS instead of the webview. `target="_blank"` is inert in
+/// wry — an Android app link like `https://claude.ai/code/<id>` loads inside
+/// the webview (signed out, no intent resolution) rather than reaching the
+/// Claude app. Only the opener sees the OS.
+///
+/// An app command, not a direct `opener` plugin call from JS: plugin commands
+/// need a capabilities file, app commands do not, so this stays a three-line
+/// change instead of a new permissions tree.
+#[tauri::command]
+fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    if !is_web_url(&url) {
+        return Err(format!("refusing to open non-http(s) url: {url:?}"));
+    }
+    app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn host_platform() -> String {
     std::env::consts::OS.to_string()
@@ -490,6 +515,7 @@ fn host_platform() -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_opener::init())
         .manage(ServerState::default())
         // No redirects: this client has exactly one destination, and a
         // redirect is the only way a request pinned to loopback could leave it.
@@ -526,7 +552,8 @@ pub fn run() {
             profile_delete,
             profile_activate,
             agent_handoff,
-            host_platform
+            host_platform,
+            open_external
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -612,6 +639,20 @@ mod tests {
             managed: "in-process".into(),
             auth: "none".into(),
         }
+    }
+
+    #[test]
+    fn open_external_only_accepts_http_and_https() {
+        assert!(is_web_url("https://claude.ai/code/session_01ABC"));
+        assert!(is_web_url("http://127.0.0.1:8080/"));
+        // The href is built from a bridgeSessionId read off disk, so the
+        // schemes that would turn the opener into a local-exec primitive
+        // must stay unreachable.
+        assert!(!is_web_url("file:///etc/passwd"));
+        assert!(!is_web_url("javascript:alert(1)"));
+        assert!(!is_web_url("intent://claude.ai/code/x#Intent;end"));
+        assert!(!is_web_url("HTTPS://claude.ai"), "scheme match is case-sensitive by design");
+        assert!(!is_web_url(""));
     }
 
     #[test]

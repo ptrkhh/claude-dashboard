@@ -588,4 +588,23 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) poll
 // Both of sw.js's assumptions (same-origin /api/, http-cache semantics) break
 // in the Tauri webview.
 if (!isTauri && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+// A wry webview swallows target="_blank": the URL never reaches Android's
+// intent router, so https://claude.ai/code/<id> — a verified app link the
+// Claude app claims via pathAdvancedPattern "/code/[^/]+" — loads inside the
+// webview against its own empty cookie jar instead of handing off to the app.
+// open_external routes it through the OS, which is what makes the app link fire.
+// Delegated on body so it covers every external anchor, not just "Open in Claude".
+if (isTauri) document.body.addEventListener('click', e => {
+  const a = e.target.closest('a[target="_blank"]');
+  if (!a?.href) return;
+  e.preventDefault();
+  // `invoke` throws synchronously when the IPC is missing, so the rejection
+  // path alone would not catch it.
+  try {
+    invoke('open_external', { url: a.href })
+      .catch(err => toast(String(err?.message ?? err)));
+  } catch (err) {
+    toast(String(err?.message ?? err));
+  }
+});
 })();
