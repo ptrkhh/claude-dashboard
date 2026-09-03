@@ -1,5 +1,6 @@
 use super::cache::TranscriptCache;
 use super::git::GitCache;
+use super::usage::UsageCache;
 use crate::host::cmd::Runner;
 use crate::host::init::Host;
 use std::collections::{HashMap, HashSet};
@@ -29,6 +30,8 @@ pub struct Ctx {
     pub purged: Mutex<HashSet<String>>,
     pub transcripts: TranscriptCache,
     pub git: Arc<GitCache>,
+    /// Claude subscription limits, refreshed off the poll path.
+    pub usage: Arc<UsageCache>,
     /// Set once at boot when `CDASH_AUTH` includes `password`. A `OnceLock`
     /// because `Ctx` is shared behind an `Arc` by the time the policy exists.
     pub password: std::sync::OnceLock<crate::auth::login::PasswordState>,
@@ -50,6 +53,7 @@ impl Ctx {
             purged: Mutex::new(HashSet::new()),
             transcripts: TranscriptCache::new(),
             git: Arc::new(GitCache::new()),
+            usage: Arc::new(UsageCache::new()),
             password: std::sync::OnceLock::new(),
         }
     }

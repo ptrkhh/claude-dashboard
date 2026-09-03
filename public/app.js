@@ -16,6 +16,7 @@ const ICONS = {
   sun: svg('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>'),
   moon: svg('<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>'),
   system: svg('<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>'),
+  send: svg('<path d="M21.5 2.5 11 13"/><path d="M21.5 2.5 15 21l-4-8-8-4z"/>'),
   folder: svg('<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>'),
   chevronRight: svg('<path d="M9 6l6 6-6 6"/>'),
   clock: svg('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'),
@@ -150,6 +151,7 @@ async function api(path, body) {
 const esc = s => (s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const fmtUp = s => s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m` : s >= 60 ? `${Math.floor(s / 60)}m` : `${s}s`;
 const fmtKb = k => k >= 1048576 ? `${(k / 1048576).toFixed(1)}G` : `${Math.round(k / 1024)}M`;
+const fmtReset = iso => { const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); };
 const fmtTs = t => new Date(t < 1e12 ? t * 1000 : t).toISOString().slice(5, 16).replace('T', ' '); // history.jsonl timestamps may be seconds or ms
 
 function gitBadge(g) {
@@ -161,11 +163,13 @@ function gitBadge(g) {
   return `<span class="branch">${s}</span>`;
 }
 
-function statTile({ label, value, pct }) {
+function statTile({ label, value, pct, sub, title }) {
   const cls = pct == null ? '' : pct >= 90 ? 'crit' : pct >= 75 ? 'warn' : '';
   const meter = pct == null ? ''
     : `<div class="meter"><div class="meter-fill ${cls}" style="width:${Math.min(100, Math.max(0, pct))}%"></div></div>`;
-  return `<div class="stat"><div class="stat-top"><span class="stat-label">${label}</span><span class="stat-value">${value}</span></div>${meter}</div>`;
+  const caption = sub ? `<div class="stat-sub">${esc(sub)}</div>` : '';
+  const tip = title ? ` title="${esc(title)}"` : '';
+  return `<div class="stat"${tip}><div class="stat-top"><span class="stat-label">${label}</span><span class="stat-value">${value}</span></div>${meter}${caption}</div>`;
 }
 
 function runningCard(r) {
@@ -181,6 +185,14 @@ function runningCard(r) {
     : `<span class="action pending">${ICONS.spinner}<span>Waiting for link…</span></span>`;
   const kill = r.external ? ''
     : `<button class="action danger" type="button" data-kill="${esc(r.name)}" ${r.name === armedKill ? 'data-arm="1"' : ''} aria-label="Kill session">${r.name === armedKill ? 'Sure?' : ICONS.x}</button>`;
+  // Types into the session's TUI — the thing the Claude app's remote control
+  // can't do. tmux-owned panes only; external sessions live elsewhere.
+  const send = r.external ? ''
+    : `<form class="send" data-send="${esc(r.name)}">
+         <input class="send-input" type="text" placeholder="! gcloud auth login" aria-label="Type into the Claude TUI"
+                autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
+         <button class="send-btn" type="submit" aria-label="Send to session">${ICONS.send}</button>
+       </form>`;
   return `
     <div class="session ${status} ${r.external ? 'external' : ''}">
       <div class="session-head">
@@ -196,6 +208,7 @@ function runningCard(r) {
       </div>
       ${peek}
       <div class="actions">${rc}${kill}</div>
+      ${send}
     </div>`;
 }
 
@@ -227,10 +240,22 @@ function render(d) {
     { label: 'CPU', value: `${st.cpuPct}<span class="unit">%</span>`, pct: st.cpuPct },
     { label: 'RAM', value: `${fmtKb(st.ramUsedKb)}<span class="unit"> / ${fmtKb(st.ramTotalKb)}</span>`, pct: st.ramTotalKb ? Math.round(st.ramUsedKb / st.ramTotalKb * 100) : null },
     ...st.disks.map(x => ({ label: esc(x.mount), value: `${fmtKb(x.freeKb)}<span class="unit"> free</span>`, pct: x.totalKb ? Math.round((x.totalKb - x.freeKb) / x.totalKb * 100) : null })),
+    // Absent for API-key users and until the first background refresh lands.
+    ...(st.claudeUsage || []).map(u => ({
+      label: esc(u.short),
+      value: `${u.pct}<span class="unit">% used</span>`,
+      pct: u.pct,
+      sub: u.resetsAt ? `Resets ${fmtReset(u.resetsAt)}` : null,
+      title: u.long,
+    })),
   ];
   $('#stats').innerHTML = tiles.map(statTile).join('');
 
-  $('#running').innerHTML = d.running.map(runningCard).join('') || '<div class="empty">No running sessions</div>';
+  // The poll replaces this grid wholesale, which would wipe a half-typed
+  // command (and drop the phone keyboard) mid-sentence. Leave it alone while
+  // someone is typing into a card; it refreshes on the next poll after blur.
+  if (!document.activeElement?.classList.contains('send-input'))
+    $('#running').innerHTML = d.running.map(runningCard).join('') || '<div class="empty">No running sessions</div>';
   $('#resumable').innerHTML = d.resumable.map(resumableCard).join('') || '<div class="empty">No resumable sessions</div>';
 
   const dirs = [...new Set(d.resumable.map(s => s.dir).filter(Boolean))];
@@ -254,6 +279,21 @@ document.body.addEventListener('click', async e => {
       await api('/api/purge', { sid: el.dataset.purge }); poll();
     }
   } catch (err) { toast(err.message); poll(); } // re-arm even when the action failed
+});
+
+// Send-to-TUI: delegated, because render() replaces the cards every poll.
+document.body.addEventListener('submit', async e => {
+  const form = e.target.closest('form.send');
+  if (!form) return;
+  e.preventDefault();
+  const input = form.querySelector('.send-input');
+  const btn = form.querySelector('.send-btn');
+  const text = input.value.trim();
+  if (!text) return;
+  btn.disabled = true;
+  try { await api('/api/keys', { name: form.dataset.send, text }); input.value = ''; toast('Sent to session'); }
+  catch (err) { toast(err.message); }
+  finally { btn.disabled = false; }
 });
 
 // Launch: submitting the command bar (button or Enter in the directory field).
