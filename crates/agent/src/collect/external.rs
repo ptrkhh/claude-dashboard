@@ -49,14 +49,18 @@ fn basename(p: &str) -> String {
 }
 
 /// Sessions this dashboard did not launch: every `~/.claude/sessions/<pid>.json`
-/// whose pid is still alive. Read-only — they live in terminals we do not own.
+/// whose pid still belongs to Claude. Read-only — they live in terminals we do not own.
 pub async fn external_sessions(
     ctx: &Arc<Ctx>,
     rows: &[ProcRow],
     pane_pids: &HashSet<i32>,
     now_ms: f64,
 ) -> Vec<Session> {
-    let alive: HashSet<i32> = rows.iter().map(|r| r.pid).collect();
+    let alive: HashSet<i32> = rows
+        .iter()
+        .filter(|r| r.name == "claude" || r.name == "claude.exe")
+        .map(|r| r.pid)
+        .collect();
     let dir = ctx.claude_dir.join("sessions");
     let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
         return Vec::new();
@@ -170,7 +174,13 @@ mod tests {
 
     fn rows(pids: &[i32]) -> Vec<ProcRow> {
         pids.iter()
-            .map(|p| ProcRow { pid: *p, ppid: 1, cpu: 1.0, rss_kb: 100 })
+            .map(|p| ProcRow {
+                pid: *p,
+                ppid: 1,
+                name: "claude".into(),
+                cpu: 1.0,
+                rss_kb: 100,
+            })
             .collect()
     }
 
@@ -222,6 +232,18 @@ mod tests {
         let d = tempdir("dead");
         write_session(&d, 504, CLI);
         let out = external_sessions(&ctx_for(d), &rows(&[999]), &HashSet::new(), 0.0).await;
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_recycled_pid_belonging_to_another_process_is_excluded() {
+        let d = tempdir("recycled");
+        write_session(&d, 504, CLI);
+        let mut live = rows(&[504]);
+        live[0].name = "bash".into();
+
+        let out = external_sessions(&ctx_for(d), &live, &HashSet::new(), 0.0).await;
+
         assert!(out.is_empty());
     }
 

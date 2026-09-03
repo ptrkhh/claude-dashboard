@@ -91,15 +91,27 @@ impl Config {
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from(&home).join(".claude")),
             disk_extra: std::env::var("DISK_EXTRA").ok().filter(|s| !s.is_empty()),
-            // Not in the spec: the Node agent resolved `public/` relative to
-            // `__dirname`. A Rust binary has no equivalent, so the location is
-            // configurable and defaults to the working directory.
             public_dir: std::env::var("CDASH_PUBLIC")
                 .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("public")),
+                .unwrap_or_else(|_| default_public_dir()),
             auth: Arc::new(auth),
         })
     }
+}
+
+/// `CDASH_PUBLIC` unset: `public/` under the working directory when it exists
+/// (`cargo run` from the repo root), else beside the binary. Without the
+/// fallback, a systemd unit with no `WorkingDirectory=` serves 404s for the
+/// whole UI.
+fn default_public_dir() -> PathBuf {
+    let cwd = PathBuf::from("public");
+    if cwd.is_dir() {
+        return cwd;
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join("public")))
+        .unwrap_or(cwd)
 }
 
 /// What `serve` hands back. The address is the readiness signal — an in-process
@@ -286,6 +298,16 @@ pub(crate) mod tests {
             ),
             password: None,
         }
+    }
+
+    #[test]
+    fn default_public_dir_falls_back_beside_the_binary() {
+        // Test cwd is `crates/agent`, which has no `public/`, so the cwd
+        // branch must not win: a bare relative path here is the systemd-unit
+        // 404 bug this function exists to prevent.
+        let d = super::default_public_dir();
+        assert!(d.is_absolute(), "expected exe-relative fallback, got {d:?}");
+        assert!(d.ends_with("public"), "got {d:?}");
     }
 
     #[tokio::test]
