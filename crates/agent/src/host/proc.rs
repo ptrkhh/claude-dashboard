@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 pub struct ProcRow {
     pub pid: i32,
     pub ppid: i32,
+    pub name: String,
     pub cpu: f32,
     pub rss_kb: u64,
 }
@@ -54,11 +55,11 @@ mod tests {
 
     fn rows() -> Vec<ProcRow> {
         vec![
-            ProcRow { pid: 1, ppid: 0, cpu: 0.0, rss_kb: 1000 },
-            ProcRow { pid: 100, ppid: 1, cpu: 5.0, rss_kb: 50000 },   // root
-            ProcRow { pid: 200, ppid: 100, cpu: 10.0, rss_kb: 20000 }, // child
-            ProcRow { pid: 300, ppid: 200, cpu: 1.5, rss_kb: 4000 },   // grandchild
-            ProcRow { pid: 400, ppid: 1, cpu: 9.9, rss_kb: 99999 },    // unrelated
+            ProcRow { pid: 1, ppid: 0, name: "init".into(), cpu: 0.0, rss_kb: 1000 },
+            ProcRow { pid: 100, ppid: 1, name: "claude".into(), cpu: 5.0, rss_kb: 50000 },   // root
+            ProcRow { pid: 200, ppid: 100, name: "child".into(), cpu: 10.0, rss_kb: 20000 }, // child
+            ProcRow { pid: 300, ppid: 200, name: "grandchild".into(), cpu: 1.5, rss_kb: 4000 }, // grandchild
+            ProcRow { pid: 400, ppid: 1, name: "other".into(), cpu: 9.9, rss_kb: 99999 },    // unrelated
         ]
     }
 
@@ -80,8 +81,8 @@ mod tests {
     fn a_parent_cycle_terminates() {
         // Defensive: /proc can race such that ppid chains form a loop.
         let cyclic = vec![
-            ProcRow { pid: 10, ppid: 11, cpu: 1.0, rss_kb: 10 },
-            ProcRow { pid: 11, ppid: 10, cpu: 2.0, rss_kb: 20 },
+            ProcRow { pid: 10, ppid: 11, name: "a".into(), cpu: 1.0, rss_kb: 10 },
+            ProcRow { pid: 11, ppid: 10, name: "b".into(), cpu: 2.0, rss_kb: 20 },
         ];
         let u = proc_tree_usage(&cyclic, 10);
         assert_eq!(u.rss_kb, 30);

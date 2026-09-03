@@ -130,7 +130,19 @@ async fn spawn_claude(
     }
     let name = tmux_name(dir);
 
-    let mut args: Vec<&str> = vec!["new-session", "-d", "-s", &name, "-c", dir, "claude"];
+    // The explicit Remote Control request must win over this user-level opt-out,
+    // but only for the dashboard child; the user's settings file stays untouched.
+    let mut args: Vec<&str> = vec![
+        "new-session",
+        "-d",
+        "-s",
+        &name,
+        "-c",
+        dir,
+        "claude",
+        "--settings",
+        r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":""}}"#,
+    ];
     args.extend_from_slice(claude_args);
     args.extend_from_slice(&["--dangerously-skip-permissions", "--remote-control", &name]);
     // Checked: without this a failed `tmux new-session` still answered 200
@@ -266,7 +278,14 @@ mod tests {
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let p = bin.join("tmux");
-        std::fs::write(&p, format!("#!/bin/sh\necho 4242\nexit {exit}\n")).unwrap();
+        std::fs::write(
+            &p,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}/tmux-args'\necho 4242\nexit {exit}\n",
+                dir.display()
+            ),
+        )
+        .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         bin.to_string_lossy().into_owned()
@@ -518,6 +537,22 @@ mod tests {
         assert!(
             ctx.meta.lock().unwrap().is_empty(),
             "a session that was never created must leave no meta entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn launch_overrides_the_setting_that_disables_remote_control() {
+        let d = tempdir("rc-setting");
+        let ctx = ctx_with_tmux(d.clone(), 0).await;
+
+        launch_session(&ctx, d.to_str().unwrap(), "sonnet", "medium").await.unwrap();
+
+        let args = std::fs::read_to_string(d.join("tmux-args")).unwrap();
+        assert!(
+            args.lines().next().unwrap().contains(
+                r#"--settings {"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":""}}"#
+            ),
+            "dashboard launches must keep their explicitly requested Remote Control enabled: {args}"
         );
     }
 
