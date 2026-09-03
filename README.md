@@ -1,6 +1,8 @@
 # claude-dashboard
 
-A small local web dashboard for launching, monitoring, resuming, and killing Claude Code sessions running in tmux, with basic system stats (CPU/mem/disk) and a live log panel. The agent is a single Rust binary; the UI is vanilla HTML/CSS/JS with no build step. There is no authentication yet — sessions are launched with `--dangerously-skip-permissions`, so run it only on a trusted LAN or behind Cloudflare Access.
+A small local web dashboard for launching, monitoring, resuming, and killing Claude Code sessions running in tmux, with basic system stats (CPU/mem/disk), your Claude subscription usage limits, and a live log panel. The agent is a single Rust binary; the UI is vanilla HTML/CSS/JS with no build step. There is no authentication yet — sessions are launched with `--dangerously-skip-permissions`, so run it only on a trusted LAN or behind Cloudflare Access.
+
+The stats strip mirrors the `claude /usage` limit bars: session and weekly usage percentages, each with its reset time beneath the meter. These read the same OAuth-only `/api/oauth/usage` endpoint the CLI uses, so they appear only when you're signed in with a Claude subscription — API-key users see just CPU/RAM/disk. The lookup is refreshed in the background on a 60s TTL, so the 4s poll never waits on the network, and a transient failure keeps the last good numbers rather than blanking the tiles.
 
 The launcher has a touch-friendly folder picker (the folder button in the directory field) that browses the server's filesystem from `/`, with server-backed **Recents** (auto-recorded on launch) and **Favorites**. Since it can enumerate any directory, keep the "trusted LAN / behind Cloudflare Access" caveat above in mind. Recents and favorites persist to `$CLAUDE_DIR/cdash-places.json`.
 
@@ -40,8 +42,9 @@ Requires `tmux`, `claude` and `git` on `PATH`; the agent reports any that are mi
 |---|---|---|
 | `PORT` | `8080` | Port to listen on. `0` picks any free port. |
 | `CDASH_BIND` | `127.0.0.1` | Address to bind. **Breaking change:** the Node agent bound every interface. LAN access now requires setting `CDASH_BIND=0.0.0.0` explicitly. |
-| `CLAUDE_DIR` | `~/.claude` | Path to the Claude config/projects directory. |
+| `CLAUDE_DIR` | `~/.claude` | Path to the Claude config/projects directory. The subscription token for usage limits is read from `$CLAUDE_DIR/.credentials.json`. |
 | `DISK_EXTRA` | — | Optional second mount to report alongside `/`, e.g. `/mnt/d`. |
+| `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | API base for the usage-limits lookup. |
 | `CDASH_PUBLIC` | `public` | Directory served as static files. |
 | `CDASH_AUTH` | `none` | Comma-composable guard chain, **AND** semantics: `none`, `bearer`, `password`, `trusted-proxy`, `cf-access`. An unknown value refuses to boot rather than falling back to `none`. |
 | `CDASH_TOKEN` | — | Required by `bearer`. |
