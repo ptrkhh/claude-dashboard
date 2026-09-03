@@ -1,7 +1,8 @@
 # Windows agent with WSL reach-through — design
 
 Date: 2026-09-03
-Status: approved in discussion, pending spec review
+Status: approved in discussion; spec review applied 2026-09-03 — see
+[`2026-09-03-windows-agent-design-review.md`](2026-09-03-windows-agent-design-review.md)
 Supersedes: the "Windows" paragraphs of
 [`2026-07-30-tauri-multi-host-design.md`](2026-07-30-tauri-multi-host-design.md)
 under *Managed server, per platform* and sequencing step 9. Everything else in
@@ -29,15 +30,15 @@ controls Claude Code sessions on **both** the Windows side and the WSL side.
 
 | Decision | Choice | Why |
 |---|---|---|
-| Topology | One native `cdash-agent.exe`; the WSL side is reached through `wsl.exe` and the `\\wsl.localhost` share | The user asked for the Linux agent to be replaced, not wrapped. One process, one port, no copy-in, no pidfile |
+| Topology | One native agent — two exes of one crate, §6 — and the WSL side is reached through `wsl.exe` and the `\\wsl.localhost` share | The user asked for the Linux agent to be replaced, not wrapped. One process, one port, no copy-in, no pidfile |
 | Trigger | Task Scheduler **logon** trigger for the current user, interactive token | A startup-triggered task runs in session 0: no `\\wsl.localhost` share, no user distro instance, no desktop for a console window. Both sides need the user's session |
 | Windows-side scope | Full: list, launch, resume, kill | Chosen by the user over monitor-only |
-| Windows launcher | `conhost.exe claude …` in a new console window; ownership by `--name cdash-…` | No tmux on Windows. `conhost` creates the console regardless of whether the agent has one; the name is the only durable identifier without tmux |
+| Windows launcher | `claude …` spawned with `CREATE_NEW_CONSOLE`; ownership by `--name cdash-…` | No tmux on Windows. The documented flag gives the session its own console whether or not the agent has one (a Windows Terminal tab when that is the default terminal); the name is the only durable identifier without tmux |
 | WSL file access | Direct reads over `\\wsl.localhost\<distro>\…` with the existing `tokio::fs` code | One spawn per file read through `wsl.exe` would make a poll take seconds |
 | WSL commands | `wsl.exe [-d D] --exec /usr/bin/env PATH=<probed> <program> <args>` | `--exec` bypasses the distro shell so arguments arrive unchanged; `env` applies the login-shell PATH without sourcing a profile per call |
 | WSL process rows | One `ps` per poll, parsed | `sysinfo` sees only the Windows kernel |
-| Distros | One: the default, or `CDASH_WSL_DISTRO` | Each distro would add a `wsl.exe` spawn per poll and wake stopped distros. Not needed yet |
-| Hidden window | Windows release binary is GUI-subsystem and attaches to a parent console when one exists | A console app started by Task Scheduler at logon opens a visible window. Every other route flashes one |
+| Distros | One: the default, or `CDASH_WSL_DISTRO`; `CDASH_WSL=0` turns the bridge off | Each distro would add a `wsl.exe` spawn per poll and wake stopped distros. Not needed yet. Polling keeps the one distro and the WSL VM resident, so a machine whose WSL has no Claude in it needs the switch |
+| Hidden window | Two binaries from one crate: `cdash-agent.exe` (console: serve, `set-password`, `install`, `uninstall`) and `cdash-agentw.exe` (GUI subsystem, serve only), which is what Task Scheduler runs | A console app started by a logon task opens a window — a Windows Terminal window when that is the default terminal. One GUI-subsystem binary would have to share the launching shell's console for its subcommands, which garbles `set-password` input and hides exit codes. `python`/`pythonw` is the idiom |
 | Verification | A `windows-latest` CI job; pure parsers tested on every host | No Windows machine is available to the implementer |
 
 ## Scope
@@ -72,10 +73,11 @@ pub enum Procs { Sampler, Ps }
 | Windows | `native`, Console, Sampler; plus `wsl`, Tmux, Ps when the probe in §2 succeeds |
 
 `Ctx` gains `sides: Vec<Side>` with the native side first. `Ctx::new` keeps
-its signature and builds the native side, so every existing test fixture
-still compiles; `serve` appends the WSL side on Windows. `ctx.claude_dir`,
-`ctx.runner` and `ctx.places_file` keep referring to the native side, so the
-places file and the majority of call sites do not move. Variants only Windows
+its signature and builds the native side, and `Host` gains no field, so every
+existing test fixture — they build `Host` by struct literal — still compiles;
+`serve` appends the WSL side on Windows. `ctx.claude_dir`, `ctx.runner` and
+`ctx.places_file` keep referring to the native side, so the places file and
+the majority of call sites do not move. Variants only Windows
 constructs — `Backend::Console`, `Procs::Ps` — are `cfg(windows)`-gated so
 `-D warnings` holds on Unix without dead arms. Shared state stays
 shared: `meta` is keyed by session name, `purged` by session id, the transcript
@@ -91,6 +93,13 @@ its three-turn filter, purge check and `RESUMABLE_MAX` cap included — then the
 per-side lists are merged by timestamp descending and truncated to
 `RESUMABLE_MAX` again. Machine stats and disks come from the native side only.
 
+The WSL side's share of `collect_sessions` runs under
+`tokio::time::timeout(DEFAULT_TIMEOUT)`: on expiry it contributes nothing to
+that poll and logs once (`wsl poll`). `tokio::fs` over `\\wsl.localhost` has
+no time-box of its own, and the 5-second rule exists because one 9P stall
+once froze every poll for a minute. Known ceiling: the blocking-pool thread
+stays parked until the redirector answers; the pool has 512 of them.
+
 `Procs::Sampler` uses `ctx.host.sampler` as today. `Procs::Ps` runs
 `ps -eo pid=,ppid=,%cpu=,rss=,comm=` through the side's runner once per poll
 and feeds the rows to the existing `proc_tree_usage`. Its CPU figure is the
@@ -99,7 +108,8 @@ returned as `Some`, with `cpu_sample_age_ms: 0`.
 
 ### 2. WSL bridge
 
-Windows only. At boot, after the native host is initialised:
+Windows only, and skipped entirely under `CDASH_WSL=0`. At boot, after the
+native host is initialised:
 
 1. Run, through the native runner with a **30 second** timeout because the
    first call may cold-start the distro:
@@ -130,6 +140,12 @@ with the native side alone. `/api/hostinfo` reports `"wsl": null`.
 `CDASH_WSL_DISTRO` unset means no `-d` flag and therefore the WSL default
 distro; no listing of distros is ever parsed.
 
+Every poll spawns two processes inside the distro, which resets WSL's idle
+timers (an instance stops about 15 s after its last process exits, the VM
+60 s after the last instance), so while the bridge is on the distro and its
+VM stay resident. That is the cost of watching it; `CDASH_WSL=0` is the
+switch for a machine whose WSL has no Claude in it.
+
 Path conversion, pure and tested:
 
 - `to_unc(unc_root, "/home/u/p")` → `\\wsl.localhost\Ubuntu\home\u\p`
@@ -158,18 +174,23 @@ wraps it:
 - **Tmux**: `tmux new-session -d -s <name> -c <dir> <argv…>` through the
   side's runner, checked, exactly as today. `--name <name>` is the one addition,
   so the session file carries the same name on every backend.
-- **Console**: `conhost.exe <argv…>` with the working directory set to `dir`,
+- **Console**: `claude <argv…>` with the working directory set to `dir`,
   through a new `Runner::spawn_detached(program, args, cwd) -> Result<(), String>`
   that spawns without waiting, without `kill_on_drop`, without stdio
-  overrides and without `CREATE_NO_WINDOW`. `conhost` creates the console
-  window itself, so the launch works whether the agent has a console or not,
-  and on Windows 11 with Windows Terminal as the default terminal it opens as
-  a tab there. The spawned pid is `conhost`'s and is not used.
+  overrides, and with `creation_flags(CREATE_NEW_CONSOLE)` — the documented
+  flag for "a new console instead of the parent's", which works whether the
+  agent has a console or not, and on Windows 11 with Windows Terminal as the
+  default terminal opens as a tab there. `CREATE_NO_WINDOW` is ignored when
+  combined with it, so this is the one spawn that does not set it. The child
+  pid is not relied on: it may belong to a launcher shim rather than to
+  `claude`, and it is unknown after an agent restart, so ownership goes by
+  name.
 
-`claude` is resolved by `CreateProcess` through the `PATH` the runner sets,
-which is the composed PATH of §6. Only the native installer's `claude.exe` is
-supported; an npm `claude.cmd` cannot be started this way and is reported as
-missing by the binary check, which is the honest signal.
+`claude` is resolved by Rust's `Command`, which on Windows searches the
+child's `PATH` — the composed PATH of §7 — before the parent's. Only the
+native installer's `claude.exe` is supported; an npm `claude.cmd` is not an
+executable image and is reported as missing by the binary check, which is
+the honest signal.
 
 **Ownership.** The session-file scan in `external.rs` already reads every
 `<claude_dir>\sessions\<pid>.json` whose pid is a live `claude`/`claude.exe`
@@ -185,11 +206,15 @@ console launches, where it scans the sessions directory for a file with that
 
 **Kill.** `kill_session(ctx, name)` keeps `assert_kill_name` first, then:
 
-1. For each Console side, scan session files for `name`; on a match run
-   `taskkill /T /F /PID <pid>` through the native runner, checked.
+1. For each Console side, run the same session-file scan the list uses —
+   pid live, process named `claude`/`claude.exe`, `entrypoint == "cli"` —
+   and take the file whose `name` equals the target. Only that pid goes to
+   `taskkill /T /F /PID <pid>` through the native runner, checked. A stale
+   file whose pid has been recycled never matches, so nothing foreign is
+   ever killed.
 2. Otherwise, for each Tmux side, `tmux kill-session -t <name>`, checked.
 3. On success drop the meta entry and log, as today; the first failure's
-   message is the error.
+   message is the error. No match on any side is a 500 `no such session`.
 
 On Linux only step 2 exists, so the current behaviour and its tests hold.
 
@@ -230,29 +255,43 @@ platform's own, so both tables are tested on every host.
 
 ### 5. Task Scheduler
 
-Two Windows-only subcommands in `main.rs`, running `schtasks` through a
-`Runner` with a 30 second timeout so the time-box rule holds.
+Two Windows-only subcommands in `main.rs` — the console binary — running
+`schtasks` through a `Runner` with a 30 second timeout so the time-box rule
+holds.
 
 `cdash-agent install`:
 
-1. `task_xml(exe, working_dir, user) -> String`, pure, where `user` is
-   `USERDOMAIN\USERNAME` from the environment and `exe` is `current_exe()`.
-2. Write it UTF-16LE with BOM to `%TEMP%\cdash-agent-task.xml`, matching what
+1. `schtasks /End /TN cdash-agent`, failure ignored. An earlier instance must
+   stop first, or `IgnoreNew` below makes step 4's `/Run` a silent no-op and
+   an upgrade keeps running the old binary. This is also how `setx` changes
+   are applied: run `install` again.
+2. `task_xml(exe, working_dir, user) -> String`, pure, where `user` is
+   `USERDOMAIN\USERNAME` from the environment and `exe` is `cdash-agentw.exe`
+   beside `current_exe()`; its absence is an error before anything is written.
+3. Write it UTF-16LE with BOM to `%TEMP%\cdash-agent-task.xml`, matching what
    `schtasks /Query /XML` exports.
-3. `schtasks /Create /TN cdash-agent /XML <file> /F`, then
+4. `schtasks /Create /TN cdash-agent /XML <file> /F`, then
    `schtasks /Run /TN cdash-agent` so no re-login is needed; delete the file.
-4. Print what was registered; on failure print `schtasks`' output and exit 2.
+5. Print what was registered and the URL to open; on failure print
+   `schtasks`' output and exit 2. The scheduled instance's own exit status is
+   invisible to anyone, so the URL is the check.
 
 `cdash-agent uninstall`: `schtasks /End /TN cdash-agent` (ignored if not
 running), then `schtasks /Delete /TN cdash-agent /F`.
 
-The XML, with the settings that matter and why:
+The XML, with the settings that matter and why. Element order follows what
+`schtasks /Query /XML` exports, because the schema is a sequence:
 
 ```xml
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Triggers>
-    <LogonTrigger><Enabled>true</Enabled><UserId>DOMAIN\user</UserId></LogonTrigger>
+    <LogonTrigger>
+      <Repetition><Interval>PT5M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>
+                                                                <!-- the only restart the scheduler offers; see below -->
+      <Enabled>true</Enabled>
+      <UserId>DOMAIN\user</UserId>
+    </LogonTrigger>
   </Triggers>
   <Principals>
     <Principal id="Author">
@@ -262,16 +301,17 @@ The XML, with the settings that matter and why:
     </Principal>
   </Principals>
   <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>  <!-- one agent; a second logon trigger is a no-op -->
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>  <!-- one agent; a repetition tick or a second logon is a no-op -->
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>                 <!-- the default PT72H kills the agent after three days -->
-    <RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure>
     <Enabled>true</Enabled>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>                 <!-- the default PT72H kills the agent after three days -->
+    <Priority>4</Priority>                                        <!-- the default 7 is BELOW_NORMAL with low I/O and memory
+                                                                       priority, and every claude the agent spawns inherits it -->
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>C:\path\cdash-agent.exe</Command>
+      <Command>C:\path\cdash-agentw.exe</Command>
       <WorkingDirectory>C:\path</WorkingDirectory>                <!-- public/ beside the binary is found either way -->
     </Exec>
   </Actions>
@@ -284,26 +324,34 @@ user's environment block, so `setx PORT 8080`, `setx CDASH_BIND 0.0.0.0`,
 The README documents this.
 
 There is no pidfile. `MultipleInstancesPolicy=IgnoreNew` prevents a second
-instance from the scheduler, and a port held by anything else is the existing
-exit 3, which `RestartOnFailure` retries three times a minute apart before
-giving up.
+instance from the scheduler. `RestartOnFailure` is deliberately absent: Task
+Scheduler counts only an action it could not *start* as a failure, so it
+would never restart an agent that exited 3 on a held port or died on a
+panic. The five-minute repetition covers both: while the agent lives each
+tick is ignored, and once it is gone the next tick starts it again, so a
+crash or a port freed after logon costs at most five minutes, for as long as
+the user is logged on. A port held permanently is exit 3 every five minutes
+and nothing more; the line goes to stderr, which the scheduled instance
+discards, so the README's check is the URL.
 
-### 6. Hidden window, console and password prompt
+### 6. Two binaries, console and password prompt
 
-`main.rs` gets
-`#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]`.
-A release build started by Task Scheduler therefore opens no window. At the
-top of `main` on Windows, in every build, `AttachConsole(ATTACH_PARENT_PROCESS)`
-is called and its result ignored — a debug build that already owns a console
-gets an error and nothing changes. Started from a terminal, the agent's banner, warnings and
-log echo appear there; started by the scheduler, there is no parent console
-and output is discarded, which Rust's stdio does silently for a process with no
-console handles. `/api/logs` remains the log surface either way. Known
-cosmetic caveat, documented: a shell does not wait for a GUI-subsystem
-process, so its prompt returns before the banner prints.
+The crate gains a second `[[bin]]`, `cdash-agentw` (`src/main_w.rs`,
+`test = false` so no windowless test harness is built), whose `main` is
+`#![windows_subsystem = "windows"]` and calls the same `serve` and park code
+as the console binary; on other platforms it is an empty `main`, so the
+workspace builds everywhere and `-D warnings` holds. `default-run =
+"cdash-agent"` keeps `cargo run -p cdash-agent` meaning the console binary,
+which is what the Linux boot gate runs. Task Scheduler runs
+`cdash-agentw.exe`; a person runs `cdash-agent.exe`, which keeps its console
+for the banner, the warnings, the log echo and the three subcommands. Nothing
+attaches to a parent console: a shell waits for `install` and `set-password`
+as it does for any console program, exit codes are visible, and the password
+prompt is the only reader of its console.
 
-Debug builds keep the console subsystem, so `cargo run` and `cargo test` on
-Windows behave normally.
+A GUI-subsystem process has no stdout; Rust discards writes to a missing
+console silently, and `/api/logs` remains the log surface for the scheduled
+agent.
 
 `prompt_hidden` for `set-password` uses `rustix::termios` on Unix, as today,
 and on Windows clears `ENABLE_ECHO_INPUT` with `GetConsoleMode`/`SetConsoleMode`
@@ -311,23 +359,32 @@ on the stdin handle, restoring it afterwards. The pipe fallback is unchanged.
 
 Dependencies: `rustix` moves to `[target.'cfg(unix)'.dependencies]`, and its
 two uses — `statvfs` in `disk.rs` and termios in `main.rs` — sit under
-`cfg(unix)`; `windows-sys` with the `Win32_System_Console` feature is added under
-`[target.'cfg(windows)'.dependencies]`. Every `Runner` spawn on Windows sets
+`cfg(unix)`; `windows-sys` with the `Win32_System_Console` and
+`Win32_Storage_FileSystem` features is added under
+`[target.'cfg(windows)'.dependencies]`. The two creation flags are literals in
+`cmd.rs` with their documented values (`CREATE_NO_WINDOW = 0x0800_0000`,
+`CREATE_NEW_CONSOLE = 0x10`). Every `Runner` spawn on Windows sets
 `creation_flags(CREATE_NO_WINDOW)` so `wsl.exe`, `git`, `taskkill` and
-`schtasks` never flash a console; `spawn_detached` is the one exception.
+`schtasks` never open a console; `spawn_detached` is the one exception,
+because its flag is `CREATE_NEW_CONSOLE`.
 
 ### 7. Stats, disks and PATH on Windows
 
-- **CPU.** `System::load_average()` is all zeros on Windows, so `machine_stats`
-  there uses `global_cpu_usage()`. `refresh_if_due` also calls
-  `refresh_cpu_usage()`, under the same 200 ms rule and the same "first sample
-  is a baseline" logic, so the first poll reports 0 and the second onward is
-  real. The Unix formula is untouched.
-- **Disk.** `disk_usage(mount)` on Windows finds the entry in
-  `sysinfo::Disks::new_with_refreshed_list()` whose mount point equals `mount`
-  and reports its available and total space in KiB. The root mount is
-  `%SystemDrive%\`, typically `C:\`; `DISK_EXTRA` works as before, for example
-  `D:\`. The WSL virtual disk is not reported.
+- **CPU.** `System::load_average()` on Windows is sysinfo's own estimate from
+  the `\System\Processor Queue Length` counter, sampled every 5 s: it counts
+  threads *waiting* for a CPU, not running ones, so `load / cores` reads near
+  zero on a busy machine. `machine_stats` there uses `global_cpu_usage()`.
+  `refresh_if_due` also calls `refresh_cpu_usage()`, under the same 200 ms
+  rule and the same "first sample is a baseline" logic, so the first poll
+  reports 0 and the second onward is real. The Unix formula is untouched.
+- **Disk.** `disk_usage(mount)` on Windows is one `GetDiskFreeSpaceExW(mount)`
+  call — the same shape as `statvfs(mount)`: the caller names the mount,
+  nothing is listed or parsed — reporting free and total bytes in KiB. The
+  root mount is `%SystemDrive%\`, typically `C:\`; `DISK_EXTRA` works as
+  before, for example `D:\`, and a mapped or UNC path is answered by the same
+  call. `sysinfo::Disks` was considered and rejected: it opens every fixed
+  and removable volume with `DeviceIoControl` on each poll and skips network
+  drives. The WSL virtual disk is not reported.
 - **PATH.** `probe_path` on Windows skips the login-shell probe and composes
   the inherited PATH with a backstop of `%USERPROFILE%\.local\bin`, where the
   native Claude installer puts `claude.exe`. `compose_path` takes the separator
@@ -358,9 +415,13 @@ share root is `/`. `list_dirs` takes the roots from the route, which has the
 context. Linux behaviour is unchanged: `/` is the filesystem root as before,
 and its crumbs are what the client used to compute.
 
-The client change is confined to `renderCrumbs`, which renders `d.crumbs`
-instead of splitting `d.path` on `/`. Navigation, picking, favourites and the
-dead-end guard are untouched. The `parent` field stays in the response.
+The client change is confined to the picker: `renderCrumbs` renders
+`d.crumbs` instead of splitting `d.path` on `/`; `openPicker` seeds the browse
+from any non-empty field value instead of only a `/`-prefixed one (the
+dead-end guard already falls back to home on a bad path); `placeRow` takes
+the display name after the last `/` or `\`. Navigation, picking, favourites
+and the dead-end guard are untouched. The `parent` field stays in the
+response.
 
 ### 9. Error handling
 
@@ -369,12 +430,14 @@ dead-end guard are untouched. The `parent` field stays in the response.
 | `wsl.exe` missing, failing or timing out at boot | One log line; Windows side only; `hostinfo.wsl = null` |
 | A WSL command fails or times out during a poll | Swallowed per call as today; the session list for that side is empty for that poll |
 | A WSL command fails during launch, resume or kill | `run_checked` error → 500 with the reason, as today |
-| Share unreachable mid-run | File reads return `None`; sessions on that side drop out of the list until it returns. No panic, no crash |
-| `conhost` spawn fails | 500 with the OS error; no meta entry is written |
-| Kill of a session whose process is already gone | `taskkill` exits non-zero → 500, matching the tmux path |
+| Share unreachable mid-run | File reads return `None` and the side's collection is time-boxed (§1); sessions on that side drop out of the list until it returns. No panic, no crash |
+| The WSL side exceeds its time-box during a poll | Empty for that poll; one log line |
+| Trust write over the share fails | Logged as today; the launch proceeds and `claude` shows its own trust prompt in its window |
+| `claude` spawn fails | 500 with the OS error; no meta entry is written |
+| Kill of a session whose process is already gone | Console side: no live file matches → 500 `no such session`, and `taskkill` never runs on a pid the live filter did not confirm. Tmux side: `tmux` exits non-zero → 500, as today |
 | A path that routes to a missing WSL side | 400 `bad path` naming the reason |
 | `schtasks` fails | Its output on stderr, exit 2 |
-| Port held at logon | Exit 3 as today; the scheduler retries three times, one minute apart |
+| Port held at logon, or the agent crashes | Exit 3 as today, or the panic; the five-minute repetition (§5) starts it again once the port is free, for as long as the user is logged on |
 
 ### 10. Testing and verification
 
@@ -383,49 +446,59 @@ a space; `parse_wsl_probe` for both share prefixes and for garbage;
 `to_unc`/`from_unc` including the bare root and a foreign distro; `side_for`
 for every row of the routing table on both platforms, using string inputs;
 `task_xml` contains `PT0S`, `IgnoreNew`, `InteractiveToken`, a `LogonTrigger`
-and the exe path; `compose_path` with the platform separator; crumbs for a
+with a `PT5M` repetition, `<Priority>4`, no `RestartOnFailure`, and the
+`cdash-agentw.exe` path; `compose_path` with the platform separator; crumbs for a
 Unix path. The ownership split in the session-file scan is tested with the
 existing temp-dir fixtures: a `cdash-` name yields `external: false` and
 carries meta, another name yields `external: true`.
 
 **Existing tests that need a shell** — the stub `tmux` scripts in `spawn.rs`
 and `sessions.rs`, `false`/`sleep` in `cmd.rs`, `PermissionsExt` in `probe.rs`,
-`/` in `disk.rs`, the login-shell probe — are marked `#[cfg(unix)]`. Windows
-gains cheap equivalents where they exist: `cmd /c echo` for the runner's
-success path, `C:\` for disk, a `.exe` file for the binary check, and crumbs
-for a drive and a UNC path.
+`/` in `disk.rs` and the root-disk assertion in `sessions.rs`, the login-shell
+probe — are marked `#[cfg(unix)]`. Windows gains cheap equivalents where
+they exist: `cmd /c echo` for the runner's success path, `C:\` for disk, a
+`.exe` file for the binary check, and crumbs for a drive and a UNC path.
 
 **CI.** A `windows` job on `windows-latest` with the pinned toolchain:
 `cargo test -p cdash-agent --locked`, `cargo clippy -p cdash-agent --all-targets
 --locked -- -D warnings -D clippy::disallowed_types`, `cargo build --release
---locked -p cdash-agent`, then a boot gate that starts the release binary with
-`PORT=18080`, waits, requests `/api/health`, asserts `{"ok":true}` and stops the
-process. The gate is a health request rather than a banner grep because the
-release binary is GUI-subsystem. The exe is uploaded as
-`cdash-agent-x86_64-pc-windows-msvc`. The job adds NASM via
-`ilammy/setup-nasm` for `aws-lc-sys`; CMake is on the image. The Tauri crate
-is not built on Windows.
+--locked -p cdash-agent`, then two boot gates: `cdash-agent.exe` with `PORT=0`
+and the banner grep, exactly as on Linux; and `cdash-agentw.exe` with
+`PORT=18080`, a wait, a request to `/api/health` asserting `{"ok":true}`, then
+stopping the process — a health request because a GUI-subsystem binary has
+no banner. Both exes are uploaded as `cdash-agent-x86_64-pc-windows-msvc`.
+The job adds NASM via `ilammy/setup-nasm` for `aws-lc-sys`; CMake is on the
+image. The Tauri crate is not built on Windows.
 
 **Unverifiable here, listed so the first Windows run checks them in order:**
 
-1. `tokio::fs` reads and `read_dir` over `\\wsl.localhost\…` under a 4-second poll.
-2. `wsl.exe --exec` delivers the `--settings` JSON argument to `tmux` unchanged.
-3. `conhost.exe claude …` opens a window with a working `claude` in it, from a
-   GUI-subsystem parent.
-4. `schtasks /Create /XML` accepts the generated UTF-16 file and the task
-   fires at logon with an interactive token.
-5. `AttachConsole` makes the banner visible when run from a terminal.
-6. The `--name` value appears as `name` in `sessions\<pid>.json`.
+1. A running native session shows as `claude.exe` in Task Manager, not as a
+   versioned launcher: the scan keys on that name. If `.local\bin\claude.exe`
+   turns out to be a shim, the scan also accepts images under
+   `%USERPROFILE%\.local\share\claude\versions\`.
+2. `tokio::fs` reads and `read_dir` over `\\wsl.localhost\…` under a 4-second poll.
+3. `wsl.exe --exec` delivers the `--settings` JSON argument to `tmux` unchanged.
+4. A `CREATE_NEW_CONSOLE` spawn of `claude` from `cdash-agentw.exe` opens a
+   window with a working `claude` in it, the `--settings` JSON intact.
+5. `schtasks /Create /XML` accepts the generated UTF-16 file (element order
+   included), the task fires at logon with an interactive token, and the
+   five-minute repetition restarts a killed agent.
+6. `cdash-agentw.exe` opens no window when the task starts it.
+7. The `--name` value appears as `name` in `sessions\<pid>.json`.
+8. `GetDiskFreeSpaceExW` on `\\wsl.localhost\<distro>\` either answers or
+   fails cleanly, so `DISK_EXTRA` may name it.
 
 ### 11. Deployment
 
-The README gains a *Windows* section: download `cdash-agent.exe` and the
-`public/` directory from the CI artifact into one folder, run
-`cdash-agent.exe install` once, configure with `setx`, remove with
-`cdash-agent.exe uninstall`. Requirements: the native Claude Code installer,
-Git for Windows, and for the WSL side a WSL 2 distro with `tmux`, `claude` and
-`git` on its login-shell PATH. `scripts/release.sh` is unchanged; the Windows
-binary comes from CI.
+The README gains a *Windows* section: download `cdash-agent.exe`,
+`cdash-agentw.exe` and the `public/` directory from the CI artifact into one
+folder, run `cdash-agent.exe install` once and open the URL it prints;
+configure with `setx` and run `install` again to apply; upgrade by
+`uninstall`, replacing the files, `install`; remove with
+`cdash-agent.exe uninstall`; `CDASH_WSL=0` turns the WSL side off.
+Requirements: the native Claude Code installer, Git for Windows, and for the
+WSL side a WSL 2 distro with `tmux`, `claude` and `git` on its login-shell
+PATH. `scripts/release.sh` is unchanged; the Windows binaries come from CI.
 
 ## Out of scope
 
@@ -434,6 +507,8 @@ binary comes from CI.
 - Cross-compiling the Windows binary from Linux.
 - A startup trigger. Session 0 cannot reach either side; the nearest thing is
   Windows auto-logon, which is the user's choice.
+- A service or watchdog. The five-minute repetition is the whole restart
+  story; an agent that dies while the user is logged off comes back at logon.
 - npm-installed Claude Code (`claude.cmd`).
 - The Tauri client on Windows. Consequence worth recording: with this crate
   compiling natively, Tauri on Windows can link the agent in-process exactly as
