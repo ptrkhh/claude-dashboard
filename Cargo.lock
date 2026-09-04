@@ -382,6 +382,7 @@ dependencies = [
  "time",
  "tokio",
  "tower-http 0.7.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

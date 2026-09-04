@@ -4,6 +4,13 @@ use std::time::Duration;
 const PROBE_TIMEOUT: Duration = Duration::from_millis(2000);
 const KNOWN_LOCATIONS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin"];
 
+/// The user's home. `std::env::home_dir` reads `$HOME` on Unix and the
+/// profile directory on Windows, and is not deprecated on the pinned
+/// toolchain (verified: `rustc -D deprecated` accepts it on 1.94.1).
+pub fn home() -> std::path::PathBuf {
+    std::env::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"))
+}
+
 /// Compose the child PATH: probed value first (so a user's own ordering wins),
 /// then the known-location backstop, then whatever we inherited. Deduped,
 /// first occurrence kept, empty segments dropped.

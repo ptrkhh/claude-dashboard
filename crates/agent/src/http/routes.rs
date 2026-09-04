@@ -66,7 +66,7 @@ pub async fn get_places(State(ctx): State<Arc<Ctx>>) -> Response {
 }
 
 pub async fn get_browse(Query(q): Query<HashMap<String, String>>) -> Result<Response, ApiError> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    let home = crate::host::path::home().to_string_lossy().into_owned();
     let target = q.get("path").filter(|p| !p.is_empty()).cloned().unwrap_or(home);
     let hidden = q.get("hidden").map(|h| h == "1").unwrap_or(false);
     Ok(Json(list_dirs(&target, hidden).await?).into_response())

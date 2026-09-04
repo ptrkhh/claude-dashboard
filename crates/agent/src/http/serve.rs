@@ -44,7 +44,7 @@ impl Config {
     /// origin.
     pub fn from_env() -> Result<Self, String> {
         let auth = crate::auth::config::config_from_env()?;
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+        let home = crate::host::path::home();
         // Same principle as CDASH_AUTH below: a typo is refused, not defaulted.
         // `CDASH_BIND=0.0.0..1` silently becoming loopback also flips the
         // cookie policy `boot::decide` derives from this value.
@@ -83,7 +83,7 @@ impl Config {
             },
             claude_dir: std::env::var("CLAUDE_DIR")
                 .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from(&home).join(".claude")),
+                .unwrap_or_else(|_| home.join(".claude")),
             disk_extra: std::env::var("DISK_EXTRA").ok().filter(|s| !s.is_empty()),
             public_dir: std::env::var("CDASH_PUBLIC")
                 .map(PathBuf::from)

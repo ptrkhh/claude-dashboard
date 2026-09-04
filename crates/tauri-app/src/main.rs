@@ -16,11 +16,11 @@ fn url(b: &cdash_agent::http::serve::Bound) -> String {
 /// The in-process trust shape: loopback only, no auth guard, ephemeral port.
 /// Mirrors the agent crate's own test config.
 fn server_config() -> cdash_agent::http::serve::Config {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"));
     cdash_agent::http::serve::Config {
         bind: "127.0.0.1".parse::<IpAddr>().expect("literal is a valid IP"),
         port: 0, // OS chooses; the bound address is the readiness signal
-        claude_dir: PathBuf::from(home).join(".claude"),
+        claude_dir: home.join(".claude"),
         disk_extra: None,
         public_dir: PathBuf::from("public"),
         auth: Arc::new(

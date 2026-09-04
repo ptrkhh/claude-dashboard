@@ -49,15 +49,12 @@ pub async fn trust_dir(claude_json: &Path, dir: &str) -> std::io::Result<()> {
     write_atomic(claude_json, &json, ".cdash.tmp").await
 }
 
-/// `~/.claude.json` lives in `$HOME` even when `CLAUDE_DIR` is overridden, but
-/// for testability it is derived from `claude_dir`'s parent when the override
-/// is set — the same rule as `lib/collect.js:114-116`.
+/// `~/.claude.json` sits beside the Claude directory on every side: the
+/// native `~/.claude` and a WSL side's `\\wsl.localhost\…\home\u\.claude`
+/// alike. This resolves to the same file the old `HOME`-or-`CLAUDE_DIR` rule
+/// did in both of its cases, and reads nothing from the environment.
 pub fn claude_json_path(claude_dir: &Path) -> PathBuf {
-    if std::env::var("CLAUDE_DIR").is_ok() {
-        claude_dir.parent().unwrap_or(Path::new("/")).join(".claude.json")
-    } else {
-        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into())).join(".claude.json")
-    }
+    claude_dir.parent().unwrap_or(Path::new("/")).join(".claude.json")
 }
 
 /// `cdash-<base>-<HHMM>-<xxx>`. The shape is load-bearing: it is what the pane
@@ -325,6 +322,21 @@ mod tests {
         // C4: the attempt count and interval are separately adjustable, so the
         // product is what actually needs pinning.
         assert_eq!(RC_POLL_INTERVAL * RC_POLL_ATTEMPTS, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn claude_json_lives_beside_the_claude_dir_on_every_side() {
+        // The WSL side's file is `\\wsl.localhost\…\home\u\.claude.json`,
+        // beside its `.claude`; deriving from the directory rather than from
+        // HOME is what makes one rule serve both sides.
+        assert_eq!(
+            claude_json_path(Path::new("/home/u/.claude")),
+            PathBuf::from("/home/u/.claude.json")
+        );
+        assert_eq!(
+            claude_json_path(Path::new("/custom/dir")),
+            PathBuf::from("/custom/.claude.json")
+        );
     }
 
     #[tokio::test]
