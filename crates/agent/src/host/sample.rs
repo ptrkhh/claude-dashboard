@@ -60,6 +60,10 @@ impl Sampler {
             true,
             ProcessRefreshKind::nothing().with_cpu().with_memory(),
         );
+        // The global figure needs its own refresh, under the same interval
+        // rule and the same "first sample is a baseline" logic.
+        #[cfg(windows)]
+        self.sys.refresh_cpu_usage();
         // The first refresh establishes a baseline; only from the second
         // onward is cpu_usage() meaningful.
         if self.last_refresh.is_some() {
@@ -89,11 +93,24 @@ impl Sampler {
     /// because Node's `Math.round` did.
     pub fn machine_stats(&mut self) -> MachineStats {
         self.sys.refresh_memory();
-        let cores = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1) as f64;
-        let load = System::load_average().one;
-        let pct = ((load / cores) * 100.0).round();
+        #[cfg(not(windows))]
+        let pct = {
+            let cores = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1) as f64;
+            let load = System::load_average().one;
+            ((load / cores) * 100.0).round()
+        };
+        // sysinfo's Windows "load average" is an estimate from the processor
+        // queue length — threads waiting, not running — and reads near zero on
+        // a busy machine. Use the measured global CPU; like the per-process
+        // figures it is valid only from the second refresh, so the first poll
+        // says 0 rather than a number that means nothing.
+        #[cfg(windows)]
+        let pct = {
+            self.refresh_if_due();
+            if self.cpu_valid { f64::from(self.sys.global_cpu_usage()).round() } else { 0.0 }
+        };
         let to_kb = |bytes: u64| (bytes as f64 / 1024.0).round() as u64;
         let total = self.sys.total_memory();
         MachineStats {

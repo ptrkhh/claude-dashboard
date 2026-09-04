@@ -59,7 +59,7 @@ pub async fn probe_path(log: &LogBuffer) -> String {
     #[cfg(windows)]
     {
         let _ = log;
-        return compose_path(None, &inherited);
+        compose_path(None, &inherited)
     }
 
     #[cfg(not(windows))]

@@ -183,7 +183,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>) -> SessionsResponse {
         s.machine_stats()
     };
     let mut disks: Vec<DiskUsage> = Vec::new();
-    if let Some(d) = disk_usage("/") {
+    if let Some(d) = disk_usage(&crate::host::disk::root_mount()) {
         disks.push(d);
     }
     if let Some(extra) = ctx.disk_extra.as_deref() {
@@ -319,7 +319,7 @@ mod tests {
         let d = tempdir("disks");
         std::fs::write(d.join("history.jsonl"), "").unwrap();
         let r = collect_sessions(&ctx_for(d)).await;
-        assert_eq!(r.stats.disks[0].mount, "/");
+        assert_eq!(r.stats.disks[0].mount, crate::host::disk::root_mount());
         assert!(r.stats.disks[0].total_kb > 0);
     }
 
