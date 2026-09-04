@@ -326,6 +326,7 @@ mod tests {
     /// Put a stub `tmux` on a private PATH so the pane branch of
     /// `collect_sessions` can be exercised without a real server. Without this
     /// the whole pane loop — the majority of the function — has no test at all.
+    #[cfg(unix)]
     fn fake_tmux(dir: &Path, pane_line: &str) -> String {
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -339,6 +340,7 @@ mod tests {
         bin.to_string_lossy().into_owned()
     }
 
+    #[cfg(unix)]
     fn ctx_with_path(claude_dir: PathBuf, path: String) -> Arc<Ctx> {
         let log = Arc::new(LogBuffer::new());
         let host = crate::host::init::Host {
@@ -350,6 +352,7 @@ mod tests {
         Arc::new(Ctx::new(host, claude_dir, None))
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_pane_becomes_a_running_session_carrying_its_rc_link() {
         let d = tempdir("pane");
@@ -373,6 +376,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_link_discovered_from_the_session_file_is_memoized_into_meta() {
         // D9: rediscovering it on every 4s poll is wasted work, and the meta

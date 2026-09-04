@@ -69,6 +69,7 @@ impl TranscriptCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::time::{Duration, SystemTime};
 
     fn tempdir(tag: &str) -> std::path::PathBuf {
@@ -86,7 +87,8 @@ mod tests {
 
     /// `utimensat` via std is not exposed, and `filetime` is a dependency this
     /// crate does not need in production. `rustix` is already a dependency and
-    /// has the syscall.
+    /// has the syscall. Unix-only: `rustix` itself is a `cfg(unix)` dependency.
+    #[cfg(unix)]
     fn filetime_set(p: &Path, t: SystemTime) {
         let d = t.duration_since(SystemTime::UNIX_EPOCH).unwrap();
         let stamp = rustix::fs::Timespec {
@@ -103,6 +105,7 @@ mod tests {
         assert!(c.get(Path::new("/no/such/cdash.jsonl")).await.is_none());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_unchanged_mtime_serves_the_memoized_parse_without_rereading() {
         // Node asserted object identity. Rust returns a clone, so identity
@@ -125,6 +128,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_changed_mtime_forces_a_reparse() {
         let dir = tempdir("miss");

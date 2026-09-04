@@ -271,6 +271,9 @@ mod tests {
 
     /// A stub `tmux` whose exit status the test chooses, so both sides of the
     /// checked-subprocess branch are reachable without a real tmux server.
+    /// Unix-only: it chmods the script executable and writes a `#!/bin/sh`
+    /// shebang, neither of which means anything on Windows.
+    #[cfg(unix)]
     fn stub_tmux(dir: &Path, exit: i32) -> String {
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -288,6 +291,7 @@ mod tests {
         bin.to_string_lossy().into_owned()
     }
 
+    #[cfg(unix)]
     async fn ctx_with_tmux(claude_dir: PathBuf, exit: i32) -> Arc<Ctx> {
         let path = stub_tmux(&claude_dir, exit);
         let log = Arc::new(LogBuffer::new());
@@ -477,6 +481,7 @@ mod tests {
         assert!(matches!(&e, Refused::BadRequest(m) if m.contains("unknown session")), "got {e:?}");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn resume_un_purges_the_session_it_is_bringing_back() {
         // D6: without this the resumed session is filtered straight back out
@@ -513,6 +518,7 @@ mod tests {
         assert!(kill_session(&ctx, "cdash-x; rm -rf /").await.is_err());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn kill_forgets_the_session_meta() {
         // D7: a stale meta entry would let the RC poll write a link back for a
@@ -523,6 +529,7 @@ mod tests {
         assert!(!ctx.meta_has("cdash-gone-1200-abc"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_kill_that_failed_is_reported_and_keeps_the_session() {
         // The regression this exists for: `Runner::run` returns an empty string
@@ -540,6 +547,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_launch_whose_tmux_failed_leaves_no_phantom_session() {
         let d = tempdir("launch-fails");
@@ -552,6 +560,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn launch_overrides_the_setting_that_disables_remote_control() {
         let d = tempdir("rc-setting");
