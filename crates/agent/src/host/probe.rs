@@ -1,12 +1,16 @@
+use super::path::PATH_SEP;
 use std::path::Path;
 
 /// `ps` and `df` are absent by design: the Rust agent uses `sysinfo` and
-/// `statvfs` and never shells out to them.
+/// `statvfs` and never shells out to them. tmux is required only where tmux
+/// is the session backend; on Windows the WSL side reports its own list
+/// through `/api/hostinfo`.
+#[cfg(windows)]
+pub const REQUIRED_BINARIES: &[&str] = &["claude", "git"];
+#[cfg(not(windows))]
 pub const REQUIRED_BINARIES: &[&str] = &["tmux", "claude", "git"];
 
-/// Unix-only, like the crate: `rustix::termios` (`main.rs`) and
-/// `rustix::fs::statvfs` (`host/disk.rs`) are unconditional, so a `cfg(not(unix))`
-/// arm here could never be compiled, let alone reached.
+#[cfg(unix)]
 fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(p)
@@ -14,12 +18,19 @@ fn is_executable(p: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Only the native installer's `claude.exe` counts: an npm `claude.cmd` is
+/// not an executable image and cannot be spawned by CreateProcess.
+#[cfg(windows)]
+fn is_executable(p: &Path) -> bool {
+    p.with_extension("exe").is_file()
+}
+
 pub fn missing_binaries(path: &str) -> Vec<String> {
     REQUIRED_BINARIES
         .iter()
         .filter(|bin| {
             !path
-                .split(':')
+                .split(PATH_SEP)
                 .filter(|d| !d.is_empty())
                 .any(|dir| is_executable(&Path::new(dir).join(bin)))
         })
@@ -27,6 +38,7 @@ pub fn missing_binaries(path: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -49,7 +61,7 @@ mod tests {
     #[test]
     fn reports_all_required_binaries_when_path_is_empty() {
         let missing = missing_binaries("");
-        assert_eq!(missing, vec!["tmux", "claude", "git"]);
+        assert_eq!(missing.iter().map(String::as_str).collect::<Vec<_>>(), REQUIRED_BINARIES);
     }
 
     #[test]
@@ -72,5 +84,32 @@ mod tests {
     fn ps_and_df_are_not_required() {
         assert!(!REQUIRED_BINARIES.contains(&"ps"));
         assert!(!REQUIRED_BINARIES.contains(&"df"));
+    }
+
+    #[test]
+    fn required_binaries_are_exactly_tmux_claude_git_on_unix() {
+        assert_eq!(REQUIRED_BINARIES, &["tmux", "claude", "git"]);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn an_exe_file_on_a_semicolon_separated_path_is_found() {
+        let dir = std::env::temp_dir().join(format!("cdash-probe-win-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("git.exe"), "MZ").unwrap();
+        let path = format!("C:\\definitely-not-here;{}", dir.display());
+        let missing = missing_binaries(&path);
+        assert!(!missing.contains(&"git".to_string()), "{missing:?}");
+        assert!(missing.contains(&"claude".to_string()));
+    }
+
+    #[test]
+    fn required_binaries_are_exactly_claude_git_on_windows() {
+        assert_eq!(REQUIRED_BINARIES, &["claude", "git"]);
     }
 }

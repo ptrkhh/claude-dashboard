@@ -1,8 +1,28 @@
 use super::log::LogBuffer;
+#[cfg(not(windows))]
 use std::time::Duration;
 
+#[cfg(not(windows))]
 const PROBE_TIMEOUT: Duration = Duration::from_millis(2000);
-const KNOWN_LOCATIONS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin"];
+
+#[cfg(windows)]
+pub const PATH_SEP: char = ';';
+#[cfg(not(windows))]
+pub const PATH_SEP: char = ':';
+
+/// Where an installer puts binaries that a GUI launch's PATH lacks: Homebrew
+/// and /usr/local on Unix, the native Claude installer's
+/// `%USERPROFILE%\.local\bin` on Windows.
+pub fn known_locations() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        vec![home().join(".local").join("bin").to_string_lossy().into_owned()]
+    }
+    #[cfg(not(windows))]
+    {
+        vec!["/opt/homebrew/bin".to_string(), "/usr/local/bin".to_string()]
+    }
+}
 
 /// The user's home. `std::env::home_dir` reads `$HOME` on Unix and the
 /// profile directory on Windows, and is not deprecated on the pinned
@@ -15,16 +35,17 @@ pub fn home() -> std::path::PathBuf {
 /// then the known-location backstop, then whatever we inherited. Deduped,
 /// first occurrence kept, empty segments dropped.
 pub fn compose_path(probed: Option<&str>, inherited: &str) -> String {
+    let sep = PATH_SEP.to_string();
+    let known = known_locations().join(&sep);
     let mut out: Vec<&str> = Vec::new();
-    let sources = [probed.unwrap_or(""), &KNOWN_LOCATIONS.join(":"), inherited];
-    for src in sources {
-        for seg in src.split(':') {
+    for src in [probed.unwrap_or(""), known.as_str(), inherited] {
+        for seg in src.split(PATH_SEP) {
             if !seg.is_empty() && !out.contains(&seg) {
                 out.push(seg);
             }
         }
     }
-    out.join(":")
+    out.join(&sep)
 }
 
 /// Probe the user's login-shell PATH. Never returns an error and never gates
@@ -32,40 +53,53 @@ pub fn compose_path(probed: Option<&str>, inherited: &str) -> String {
 /// inherited PATH and record why.
 pub async fn probe_path(log: &LogBuffer) -> String {
     let inherited = std::env::var("PATH").unwrap_or_default();
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
 
-    // The one deliberate direct use outside host/cmd.rs: the helper in
-    // crates/agent/src/host/cmd.rs depends on the value this function
-    // produces, so it cannot itself be routed through the helper.
-    #[allow(clippy::disallowed_types)]
-    let spawned = tokio::process::Command::new(&shell)
-        .args(["-l", "-c", "echo $PATH"])
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+    // No login shell to ask on Windows: a logon-triggered task inherits the
+    // user's own environment block, so the inherited PATH is the user's PATH.
+    #[cfg(windows)]
+    {
+        let _ = log;
+        return compose_path(None, &inherited);
+    }
 
-    let probed = match tokio::time::timeout(PROBE_TIMEOUT, spawned).await {
-        Err(_) => {
-            log.push("PATH probe failed (timed out after 2000ms); using inherited PATH");
-            None
-        }
-        Ok(Err(e)) => {
-            log.push(format!("PATH probe failed ({e}); using inherited PATH"));
-            None
-        }
-        Ok(Ok(out)) if !out.status.success() => {
-            log.push(format!(
-                "PATH probe failed (exit {}); using inherited PATH",
-                out.status.code().unwrap_or(-1)
-            ));
-            None
-        }
-        Ok(Ok(out)) => Some(String::from_utf8_lossy(&out.stdout).trim().to_string()),
-    };
+    #[cfg(not(windows))]
+    {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
 
-    compose_path(probed.as_deref(), &inherited)
+        // The one deliberate direct use outside host/cmd.rs: the helper in
+        // crates/agent/src/host/cmd.rs depends on the value this function
+        // produces, so it cannot itself be routed through the helper.
+        #[allow(clippy::disallowed_types)]
+        let spawned = tokio::process::Command::new(&shell)
+            .args(["-l", "-c", "echo $PATH"])
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output();
+
+        let probed = match tokio::time::timeout(PROBE_TIMEOUT, spawned).await {
+            Err(_) => {
+                log.push("PATH probe failed (timed out after 2000ms); using inherited PATH");
+                None
+            }
+            Ok(Err(e)) => {
+                log.push(format!("PATH probe failed ({e}); using inherited PATH"));
+                None
+            }
+            Ok(Ok(out)) if !out.status.success() => {
+                log.push(format!(
+                    "PATH probe failed (exit {}); using inherited PATH",
+                    out.status.code().unwrap_or(-1)
+                ));
+                None
+            }
+            Ok(Ok(out)) => Some(String::from_utf8_lossy(&out.stdout).trim().to_string()),
+        };
+
+        compose_path(probed.as_deref(), &inherited)
+    }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +139,25 @@ mod tests {
         let p = probe_path(&log).await;
         assert!(!p.is_empty());
         assert!(p.contains("/usr/local/bin"));
+    }
+}
+
+#[cfg(test)]
+mod portable_tests {
+    use super::*;
+
+    #[test]
+    fn compose_path_dedupes_on_the_platform_separator_and_keeps_the_backstop() {
+        let sep = PATH_SEP.to_string();
+        let a = std::env::temp_dir().join("cdash-a").to_string_lossy().into_owned();
+        let b = std::env::temp_dir().join("cdash-b").to_string_lossy().into_owned();
+        let out = compose_path(Some(&a), &format!("{a}{sep}{b}{sep}{a}"));
+        let segs: Vec<&str> = out.split(PATH_SEP).collect();
+        assert_eq!(segs[0], a, "the probed value comes first");
+        assert_eq!(segs.iter().filter(|s| **s == a).count(), 1, "deduped");
+        assert!(segs.contains(&b.as_str()));
+        for k in known_locations() {
+            assert!(segs.contains(&k.as_str()), "backstop {k} missing from {out}");
+        }
     }
 }
