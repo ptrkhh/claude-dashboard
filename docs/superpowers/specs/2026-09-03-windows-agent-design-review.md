@@ -256,6 +256,18 @@ drift and new problems.
 - **`CREATE_NEW_CONSOLE` from both exes**: from `cdash-agentw.exe` (no
   console) it creates one; from `cdash-agent.exe` in a terminal it gives the
   session its own window rather than the agent's terminal. Consistent with §6.
+  **Corrected after the review (E0, `library/std/src/sys/process/windows.rs`
+  on the pinned toolchain):** the second half is wrong. For `Stdio::Inherit`
+  std duplicates a console parent's standard handles and sets
+  `STARTF_USESTDHANDLES` whenever any of them is non-null; the flag does not
+  override handles that were given. So from `cdash-agent.exe` in a terminal
+  the session has its own window but its I/O is the agent's terminal. From
+  `cdash-agentw.exe` the handles are null, the flag stays clear, and the
+  child takes its new console's handles — the production path is unaffected.
+  Disposition: accepted as a documented limitation of the console binary
+  (§3, §11); `conhost.exe <argv…>` named as the fallback. The I5 verdict
+  stands for the scheduled instance; its "works whether the agent has a
+  console or not" wording was the error.
 - **`/End` → `/Create` → `/Run` plus the repetition plus `IgnoreNew`**: no
   path to two instances. Consistent.
 - **The time-box in §1** wraps `wsl.exe` spawns that already carry their own

@@ -178,13 +178,27 @@ wraps it:
   through a new `Runner::spawn_detached(program, args, cwd) -> Result<(), String>`
   that spawns without waiting, without `kill_on_drop`, without stdio
   overrides, and with `creation_flags(CREATE_NEW_CONSOLE)` — the documented
-  flag for "a new console instead of the parent's", which works whether the
-  agent has a console or not, and on Windows 11 with Windows Terminal as the
-  default terminal opens as a tab there. `CREATE_NO_WINDOW` is ignored when
-  combined with it, so this is the one spawn that does not set it. The child
-  pid is not relied on: it may belong to a launcher shim rather than to
-  `claude`, and it is unknown after an agent restart, so ownership goes by
-  name.
+  flag for "a new console instead of the parent's"; on Windows 11 with
+  Windows Terminal as the default terminal it opens as a tab there.
+  `CREATE_NO_WINDOW` is ignored when combined with it, so this is the one
+  spawn that does not set it. The child pid is not relied on: it may belong
+  to a launcher shim rather than to `claude`, and it is unknown after an
+  agent restart, so ownership goes by name.
+
+  This works from `cdash-agentw.exe`, the scheduled instance, because a
+  GUI-subsystem process has no console handles: Rust's `Command` then passes
+  null handles, leaves `STARTF_USESTDHANDLES` clear, and the child takes its
+  new console's handles. It does **not** fully work from `cdash-agent.exe`
+  run in a terminal: for `Stdio::Inherit`, `Command` duplicates a console
+  parent's standard handles and sets `STARTF_USESTDHANDLES`
+  (`library/std/src/sys/process/windows.rs`, verified on the pinned
+  toolchain), and `CREATE_NEW_CONSOLE` does not override handles that were
+  given. The session gets its own window, but its input and output are the
+  agent's terminal. Accepted as a limitation of serving from the console
+  binary, which exists for a visible banner and log, not for daily use; the
+  README says so. Should it ever matter, the fallback is to spawn
+  `conhost.exe <argv…>` instead, which creates the console and the client
+  itself, at the cost of relying on undocumented `conhost` behaviour.
 
 `claude` is resolved by Rust's `Command`, which on Windows searches the
 child's `PATH` — the composed PATH of §7 — before the parent's. Only the
@@ -495,7 +509,10 @@ The README gains a *Windows* section: download `cdash-agent.exe`,
 folder, run `cdash-agent.exe install` once and open the URL it prints;
 configure with `setx` and run `install` again to apply; upgrade by
 `uninstall`, replacing the files, `install`; remove with
-`cdash-agent.exe uninstall`; `CDASH_WSL=0` turns the WSL side off.
+`cdash-agent.exe uninstall`; `CDASH_WSL=0` turns the WSL side off. Running
+`cdash-agent.exe` with no subcommand serves with a visible banner and log for
+a first check; a session launched from that instance reads and writes its
+terminal (§3), so the scheduled instance is the one to use.
 Requirements: the native Claude Code installer, Git for Windows, and for the
 WSL side a WSL 2 distro with `tmux`, `claude` and `git` on its login-shell
 PATH. `scripts/release.sh` is unchanged; the Windows binaries come from CI.
