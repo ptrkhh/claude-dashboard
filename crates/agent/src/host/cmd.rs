@@ -8,6 +8,14 @@ use std::time::Duration;
 /// without measuring; do not remove it.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// `CREATE_NO_WINDOW`: a console child of a windowless parent must not open a
+/// console of its own. Ignored when combined with `CREATE_NEW_CONSOLE`.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// `CREATE_NEW_CONSOLE`: the one spawn that wants a window — a Claude session.
+#[cfg(windows)]
+const CREATE_NEW_CONSOLE: u32 = 0x10;
+
 /// The only sanctioned way to run a subprocess. `clippy.toml` forbids
 /// `std::process::Command` and `tokio::process::Command` everywhere else, and
 /// `-D clippy::disallowed_types` is a required CI gate, because this helper is
@@ -16,11 +24,26 @@ pub struct Runner {
     path: String,
     log: Arc<LogBuffer>,
     failed: Mutex<HashSet<String>>,
+    /// Prepended to every command: `["wsl.exe", "--exec", "/usr/bin/env",
+    /// "PATH=…"]` turns this runner into the WSL side's. Empty for native.
+    prefix: Vec<String>,
+    /// Prepended to failure log lines so two sides sharing one log are told
+    /// apart: `"wsl "` or `""`.
+    label: &'static str,
 }
 
 impl Runner {
     pub fn new(path: String, log: Arc<LogBuffer>) -> Self {
-        Self { path, log, failed: Mutex::new(HashSet::new()) }
+        Self::with_prefix(Vec::new(), "", path, log)
+    }
+
+    pub fn with_prefix(
+        prefix: Vec<String>,
+        label: &'static str,
+        path: String,
+        log: Arc<LogBuffer>,
+    ) -> Self {
+        Self { path, log, failed: Mutex::new(HashSet::new()), prefix, label }
     }
 
     /// Swallowing: failure is an empty string. Correct for the 4-second poll,
@@ -52,31 +75,84 @@ impl Runner {
         self.run_checked_with_timeout(program, args, key, DEFAULT_TIMEOUT).await
     }
 
-    async fn run_checked_with_timeout(
+    /// The prefix applied: `(program, args)` becomes
+    /// `(prefix[0], prefix[1..] ++ [program] ++ args)`.
+    fn compose<'a>(&'a self, program: &'a str, args: &[&'a str]) -> (&'a str, Vec<&'a str>) {
+        match self.prefix.first() {
+            None => (program, args.to_vec()),
+            Some(head) => {
+                let mut all: Vec<&str> = self.prefix[1..].iter().map(String::as_str).collect();
+                all.push(program);
+                all.extend_from_slice(args);
+                (head.as_str(), all)
+            }
+        }
+    }
+
+    pub async fn run_checked_with_timeout(
         &self,
         program: &str,
         args: &[&str],
         key: &str,
         timeout: Duration,
     ) -> Result<String, String> {
+        let (program, args) = self.compose(program, args);
         #[allow(clippy::disallowed_types)]
-        let fut = tokio::process::Command::new(program)
-            .args(args)
+        let mut cmd = tokio::process::Command::new(program);
+        cmd.args(&args)
             .env("PATH", &self.path)
             .stdin(std::process::Stdio::null())
-            .kill_on_drop(true) // the timeout must actually kill the child
-            .output();
+            .kill_on_drop(true); // the timeout must actually kill the child
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        let fut = cmd.output();
 
         let reason = match tokio::time::timeout(timeout, fut).await {
             Err(_) => format!("timed out after {}ms", timeout.as_millis()),
             Ok(Err(e)) => e.to_string(),
             Ok(Ok(out)) if !out.status.success() => {
-                format!("exit {}", out.status.code().unwrap_or(-1))
+                let code = out.status.code().unwrap_or(-1);
+                // wsl.exe's own messages are UTF-16; dropping the NULs leaves
+                // readable ASCII rather than "E R R O R".
+                let err = String::from_utf8_lossy(&out.stderr).replace('\0', "");
+                match err.lines().rev().find(|l| !l.trim().is_empty()) {
+                    Some(last) => format!("exit {code}: {}", last.trim()),
+                    None => format!("exit {code}"),
+                }
             }
             Ok(Ok(out)) => return Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
         };
         self.log_once(key, &reason);
         Err(format!("{key}: {reason}"))
+    }
+
+    /// Start a program and do not wait for it: a Claude session in its own
+    /// console window. No time-box applies because nothing is awaited; no
+    /// `kill_on_drop`, because the session must outlive this process. On
+    /// Windows the child gets a new console; from a windowless parent it also
+    /// gets that console's standard handles (see spec §3 for the console
+    /// parent's limitation). Must be called from within the tokio runtime.
+    pub fn spawn_detached(
+        &self,
+        program: &str,
+        args: &[&str],
+        cwd: &str,
+        key: &str,
+    ) -> Result<(), String> {
+        let (program, args) = self.compose(program, args);
+        #[allow(clippy::disallowed_types)]
+        let mut cmd = tokio::process::Command::new(program);
+        cmd.args(&args).current_dir(cwd).env("PATH", &self.path);
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NEW_CONSOLE);
+        match cmd.spawn() {
+            Ok(_child) => Ok(()), // dropped: tokio reaps it, it keeps running
+            Err(e) => {
+                let reason = e.to_string();
+                self.log_once(key, &reason);
+                Err(format!("{key}: {reason}"))
+            }
+        }
     }
 
     /// Log a given failing key once per process lifetime. The KEY IS EXPLICIT:
@@ -85,11 +161,12 @@ impl Runner {
     fn log_once(&self, key: &str, reason: &str) {
         let mut failed = self.failed.lock().unwrap_or_else(|e| e.into_inner());
         if failed.insert(key.to_string()) {
-            self.log.push(format!("sh failed: {key}: {reason}"));
+            self.log.push(format!("sh failed: {}{key}: {reason}", self.label));
         }
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +227,70 @@ mod tests {
         let r = Runner::new("/nonexistent-dir-for-test".to_string(), log);
         // `echo` is not on the supplied PATH, so the spawn must fail.
         assert_eq!(r.run("echo", &["hi"], "echo").await, "");
+    }
+
+    #[tokio::test]
+    async fn a_prefix_wraps_every_command() {
+        // The WSL runner is `wsl.exe --exec env PATH=… <program> <args>`.
+        // `env` stands in for wsl.exe here, so the composition is proven
+        // without a distro: a variable set by the prefix reaches the child.
+        let log = Arc::new(LogBuffer::new());
+        let path = std::env::var("PATH").unwrap_or_default();
+        let r = Runner::with_prefix(
+            vec!["env".into(), "CDASH_PREFIX_TEST=42".into()],
+            "wsl ",
+            path,
+            log,
+        );
+        let out = r.run("sh", &["-c", "echo $CDASH_PREFIX_TEST"], "sh").await;
+        assert_eq!(out.trim(), "42");
+    }
+
+    #[tokio::test]
+    async fn the_label_prefixes_the_failure_line() {
+        // Two sides share one log; a failed `tmux list-panes` must say which.
+        let log = Arc::new(LogBuffer::new());
+        let path = std::env::var("PATH").unwrap_or_default();
+        let r = Runner::with_prefix(Vec::new(), "wsl ", path, log.clone());
+        r.run("false", &[], "tmux list-panes").await;
+        assert!(
+            log.lines()[0].contains("sh failed: wsl tmux list-panes"),
+            "{:?}",
+            log.lines()
+        );
+    }
+
+    #[tokio::test]
+    async fn stderr_reaches_the_error_message() {
+        // `schtasks` and `wsl.exe` explain themselves on stderr; "exit 1"
+        // alone sends the operator to guess.
+        let (r, _) = runner();
+        let e = r
+            .run_checked("sh", &["-c", "echo boom >&2; exit 7"], "sh")
+            .await
+            .unwrap_err();
+        assert!(e.contains("exit 7: boom"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn spawn_detached_returns_at_once_and_reports_a_missing_program() {
+        let (r, _) = runner();
+        let started = std::time::Instant::now();
+        r.spawn_detached("sleep", &["3"], "/", "sleep").unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1), "must not wait for the child");
+        assert!(r.spawn_detached("cdash-no-such-program", &[], "/", "nope").is_err());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn returns_stdout_on_success_through_cmd() {
+        let log = Arc::new(LogBuffer::new());
+        let r = Runner::new(std::env::var("PATH").unwrap_or_default(), log);
+        let out = r.run("cmd", &["/c", "echo hello"], "cmd").await;
+        assert_eq!(out.trim(), "hello");
     }
 }

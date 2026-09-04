@@ -35,6 +35,7 @@ pub async fn init() -> Host {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn init_produces_a_usable_host() {
         let host = init().await;
