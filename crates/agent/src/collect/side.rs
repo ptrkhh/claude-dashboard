@@ -285,12 +285,17 @@ mod tests {
         assert_eq!(dead.wsl_missing().await, vec!["wsl unreachable".to_string()]);
 
         // A side that answered is never reported unreachable, whichever of the
-        // three binaries this host happens to have.
-        let live = Side::native(
-            PathBuf::from("/tmp/.claude"),
-            Arc::new(Runner::new(std::env::var("PATH").unwrap_or_default(), log)),
-        );
-        assert!(!live.wsl_missing().await.contains(&"wsl unreachable".to_string()));
+        // three binaries this host happens to have. Unix only: the probe runs
+        // `sh`, which a bare Windows runner resolves only if Git for Windows
+        // happens to be on PATH.
+        #[cfg(unix)]
+        {
+            let live = Side::native(
+                PathBuf::from("/tmp/.claude"),
+                Arc::new(Runner::new(std::env::var("PATH").unwrap_or_default(), log)),
+            );
+            assert!(!live.wsl_missing().await.contains(&"wsl unreachable".to_string()));
+        }
     }
 
     #[test]

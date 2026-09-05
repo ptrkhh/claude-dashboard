@@ -341,6 +341,11 @@ async function browseTo(path) {
     if (pkHiddenInput.checked) q.set('hidden', '1');
     const d = await api('/api/browse?' + q);
     pkPath = d.path;
+    // Windows lists drives and the WSL share under a virtual `/` whose entries
+    // are not children of it. `/` is not a folder there: selecting it would
+    // launch at the distro root, or 400 with no WSL side. On Linux `/` is real.
+    $('#picker-select').disabled =
+      d.parent === null && d.path === '/' && !d.entries.some(e => e.path.startsWith('/'));
     $('#picker-current').textContent = d.path;
     renderCrumbs(d.crumbs);
     pkList.innerHTML = d.entries.length

@@ -22,6 +22,19 @@ pub fn root_mount() -> String {
     }
 }
 
+/// `GetDiskFreeSpaceExW` documents a UNC directory name as needing a trailing
+/// backslash: without one `\\wsl.localhost\Ubuntu` fails and the second
+/// mount silently vanishes from the stats bar. `DISK_EXTRA` is typed by hand
+/// and spec §10 asks for exactly that value to work, so normalise rather than
+/// document the trap. Pure, so it is tested on every host.
+pub fn unc_dir_arg(mount: &str) -> String {
+    if mount.starts_with("\\\\") && !mount.ends_with('\\') {
+        format!("{mount}\\")
+    } else {
+        mount.to_string()
+    }
+}
+
 /// One `GetDiskFreeSpaceExW` call — the same shape as `statvfs(mount)`: the
 /// caller names the directory and nothing is listed or parsed. A mapped drive
 /// or a UNC path is answered by the same call; a path that does not exist is
@@ -30,7 +43,9 @@ pub fn root_mount() -> String {
 #[cfg(windows)]
 pub fn disk_usage(mount: &str) -> Option<DiskUsage> {
     use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
-    let wide: Vec<u16> = mount.encode_utf16().chain(std::iter::once(0)).collect();
+    // The label stays what the caller named; only the argument is normalised.
+    let wide: Vec<u16> =
+        unc_dir_arg(mount).encode_utf16().chain(std::iter::once(0)).collect();
     let (mut free, mut total) = (0u64, 0u64);
     // SAFETY: `wide` is NUL-terminated and outlives the call; the out-pointers
     // are to locals; the fourth pointer is documented as optional.
@@ -85,6 +100,17 @@ mod tests {
     #[test]
     fn a_nonexistent_path_yields_none_rather_than_panicking() {
         assert!(disk_usage("/definitely/not/a/real/mount/point").is_none());
+    }
+
+    #[test]
+    fn a_unc_mount_gains_the_trailing_backslash_the_api_requires() {
+        // Spec §10 check #8: DISK_EXTRA=\\wsl.localhost\Ubuntu\ must work,
+        // and so must the same value typed without the trailing separator.
+        assert_eq!(unc_dir_arg(r"\\wsl.localhost\Ubuntu"), r"\\wsl.localhost\Ubuntu\");
+        assert_eq!(unc_dir_arg(r"\\wsl.localhost\Ubuntu\"), r"\\wsl.localhost\Ubuntu\");
+        // Nothing else is touched: a drive root and a POSIX mount pass through.
+        assert_eq!(unc_dir_arg(r"C:\"), r"C:\");
+        assert_eq!(unc_dir_arg("/mnt/d"), "/mnt/d");
     }
 
     #[test]

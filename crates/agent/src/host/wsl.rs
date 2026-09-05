@@ -4,8 +4,9 @@
 
 use crate::host::proc::ProcRow;
 
-/// Run once at boot inside the distro with `sh -lc`: line 1 the login-shell
-/// PATH, line 2 the home directory as the share sees it (`wslpath -w`).
+/// Run once at boot inside the distro with `sh -lc`: the login-shell PATH
+/// then the home directory as the share sees it (`wslpath -w`). It is the
+/// last thing the login shell prints, which is how the parser finds it.
 pub const PROBE_SCRIPT: &str = r#"printf "%s\n%s\n" "$PATH" "$(wslpath -w "$HOME")""#;
 
 /// One line per binary the WSL side needs and lacks. Re-run per
@@ -28,9 +29,12 @@ pub struct WslProbe {
 }
 
 pub fn parse_wsl_probe(out: &str) -> Option<WslProbe> {
-    let mut lines = out.lines().map(str::trim).filter(|l| !l.is_empty());
-    let path = lines.next()?.to_string();
+    // The LAST two lines, not the first: `sh -lc` sources /etc/profile and
+    // ~/.profile, and a MOTD or a version-manager banner there prints before
+    // the script does. The script's own printf is always last.
+    let mut lines = out.lines().map(str::trim).filter(|l| !l.is_empty()).rev();
     let home_unc = lines.next()?.to_string();
+    let path = lines.next()?.to_string();
     if !home_unc.starts_with("\\\\") {
         return None;
     }
@@ -39,7 +43,8 @@ pub fn parse_wsl_probe(out: &str) -> Option<WslProbe> {
 
 /// The command prefix that turns a native `Runner` into the WSL side's:
 /// `--exec` skips the distro's shell so arguments arrive unchanged, and `env`
-/// applies the probed login PATH without sourcing a profile per call.
+/// applies the probed login PATH and a C locale without sourcing a profile
+/// per call.
 pub fn wsl_prefix(distro_flag: Option<&str>, path: &str) -> Vec<String> {
     let mut v = vec!["wsl.exe".to_string()];
     if let Some(d) = distro_flag {
@@ -49,6 +54,9 @@ pub fn wsl_prefix(distro_flag: Option<&str>, path: &str) -> Vec<String> {
     v.push("--exec".to_string());
     v.push("/usr/bin/env".to_string());
     v.push(format!("PATH={path}"));
+    // `ps` prints %cpu through the C library's locale; under a comma-decimal
+    // one every row would fail to parse and the alive set would empty.
+    v.push("LC_ALL=C".to_string());
     v
 }
 
@@ -146,6 +154,9 @@ pub async fn probe_wsl(
     }
     args.extend_from_slice(&["--exec", "/bin/sh", "-lc", PROBE_SCRIPT]);
 
+    // One log line for a failed probe, not two: the `Err` arm below says the
+    // same thing and adds the consequence.
+    native.silence("wsl probe");
     match native.run_checked_with_timeout("wsl.exe", &args, "wsl probe", PROBE_TIMEOUT).await {
         Ok(out) => match parse_wsl_probe(&out) {
             Some(mut p) => {
@@ -180,9 +191,22 @@ mod tests {
     }
 
     #[test]
+    fn profile_noise_before_the_two_lines_is_ignored() {
+        // `sh -lc` sources /etc/profile and ~/.profile; a MOTD or an nvm
+        // banner there used to shift the two real lines out of reach and drop
+        // the WSL side for the whole session.
+        let p = parse_wsl_probe(
+            "Welcome to Ubuntu 24.04 LTS\n\nnvm: using node v22\n/usr/bin\n\\\\wsl.localhost\\Ubuntu\\home\\u\n",
+        )
+        .unwrap();
+        assert_eq!(p.path, "/usr/bin");
+        assert_eq!(p.home_unc, "\\\\wsl.localhost\\Ubuntu\\home\\u");
+    }
+
+    #[test]
     fn probe_output_without_a_unc_home_is_rejected() {
-        // A distro whose wslpath is broken prints something else on line 2;
-        // building a share path from it would read the wrong disk.
+        // A distro whose wslpath is broken prints something else as its last
+        // line; building a share path from it would read the wrong disk.
         assert!(parse_wsl_probe("/usr/bin\n/home/u\n").is_none());
         assert!(parse_wsl_probe("").is_none());
         assert!(parse_wsl_probe("/usr/bin\n").is_none());
@@ -192,11 +216,11 @@ mod tests {
     fn the_prefix_names_the_distro_only_when_asked() {
         assert_eq!(
             wsl_prefix(None, "/usr/bin"),
-            vec!["wsl.exe", "--exec", "/usr/bin/env", "PATH=/usr/bin"]
+            vec!["wsl.exe", "--exec", "/usr/bin/env", "PATH=/usr/bin", "LC_ALL=C"]
         );
         assert_eq!(
             wsl_prefix(Some("Debian"), "/usr/bin"),
-            vec!["wsl.exe", "-d", "Debian", "--exec", "/usr/bin/env", "PATH=/usr/bin"]
+            vec!["wsl.exe", "-d", "Debian", "--exec", "/usr/bin/env", "PATH=/usr/bin", "LC_ALL=C"]
         );
     }
 

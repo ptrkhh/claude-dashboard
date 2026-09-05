@@ -319,8 +319,12 @@ pub async fn resume_session(ctx: &Arc<Ctx>, sid: &str) -> Result<String, Refused
 
 /// Kill a session this dashboard owns. The name is guarded first — it becomes
 /// a `tmux` or `taskkill` argument. Console sides are searched first, with the
-/// same liveness scan the list uses, so a stale file whose pid was recycled
-/// never matches and nothing foreign is killed; then every tmux side is tried.
+/// same liveness scan the list uses, so a session file whose process is long
+/// gone matches nothing. That scan is a sampler snapshot up to
+/// `MIN_CPU_INTERVAL` old and `ProcRow` carries no start time to check against
+/// `startedAt`, so a pid recycled inside that window can still be killed —
+/// the residual race the design accepts (spec §9, "Kill of a session whose
+/// process is already gone"). Then every tmux side is tried.
 pub async fn kill_session(ctx: &Arc<Ctx>, name: &str) -> Result<(), Refused> {
     assert_kill_name(name)?;
 

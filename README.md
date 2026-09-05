@@ -28,13 +28,16 @@ their own console window; WSL-side sessions run in tmux as on Linux. A path
 decides the side: `C:\…` is Windows, `/home/…` or `\\wsl.localhost\<distro>\…`
 is WSL.
 
-1. Download `cdash-agent.exe`, `cdash-agentw.exe` and the `public/` directory
-   from the `cdash-agent-x86_64-pc-windows-msvc` CI artifact into one folder.
+1. Download the `cdash-agent-x86_64-pc-windows-msvc` CI artifact and unzip it
+   anywhere. It holds `cdash-agent.exe`, `cdash-agentw.exe` and `public/`
+   already laid out the way the agent serves them; keep them together.
 2. Run `cdash-agent.exe install` once. It registers a logon task for your user,
    starts it, and prints the URL to open. No re-login is needed.
 3. Configure with user environment variables, then run `install` again to
    apply: `setx PORT 8080`, `setx CDASH_BIND 0.0.0.0`, `setx CDASH_WSL_DISTRO Ubuntu`,
-   `setx CDASH_WSL 0` to leave WSL alone.
+   `setx CDASH_WSL 0` to leave WSL alone. Run it from a **new** console: `setx`
+   writes the value for future processes, so the task picks it up but the
+   console you typed it in — and the URL `install` prints there — does not.
 
 `cdash-agentw.exe` is the same server without a console window; the task runs
 it. `cdash-agent.exe` keeps its console for `set-password`, `install`,
@@ -44,7 +47,8 @@ one to use.
 
 The task retries every five minutes while you are logged on, so a crash or a
 port freed after logon costs at most five minutes; nothing runs before logon.
-Upgrade by `cdash-agent.exe uninstall`, replacing the three files, `install`.
+Upgrade by `cdash-agent.exe uninstall`, replacing the unzipped contents,
+`install`.
 
 Requirements: the native Claude Code installer (`claude.exe`; an npm
 `claude.cmd` is reported as missing), Git for Windows, and for the WSL side a
@@ -76,7 +80,7 @@ Requires `tmux`, `claude` and `git` on `PATH` (`claude` and `git` on Windows, wh
 | `PORT` | `8080` | Port to listen on. `0` picks any free port. |
 | `CDASH_BIND` | `127.0.0.1` | Address to bind. **Breaking change:** the Node agent bound every interface. LAN access now requires setting `CDASH_BIND=0.0.0.0` explicitly. |
 | `CLAUDE_DIR` | `~/.claude` | Path to the Claude config/projects directory. |
-| `DISK_EXTRA` | — | Optional second mount to report alongside `/`, e.g. `/mnt/d`, or `D:\` on Windows. |
+| `DISK_EXTRA` | — | Optional second mount to report alongside `/`, e.g. `/mnt/d`, or on Windows `D:\` or `\\wsl.localhost\<distro>\`. |
 | `CDASH_PUBLIC` | `public` | Directory served as static files. |
 | `CDASH_AUTH` | `none` | Comma-composable guard chain, **AND** semantics: `none`, `bearer`, `password`, `trusted-proxy`, `cf-access`. An unknown value refuses to boot rather than falling back to `none`. |
 | `CDASH_TOKEN` | — | Required by `bearer`. |

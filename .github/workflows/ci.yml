@@ -97,10 +97,18 @@ jobs:
           Stop-Process -Id $p.Id -Force
           Get-Content bootw.log, bootw.err
           if ($body -ne '{"ok":true}') { Write-Error "unexpected health body: $body"; exit 1 }
+      # upload-artifact roots the zip at the least common ancestor of the paths
+      # it matches, so listing the exes and public/ separately would nest them
+      # under target/release/ and public/ — a layout in which default_public_dir
+      # finds nothing and the task's WorkingDirectory serves 404s. Stage one
+      # flat directory instead, so the unzipped folder runs as it stands.
+      - name: Stage the artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Copy-Item target\release\cdash-agent.exe, target\release\cdash-agentw.exe dist
+          Copy-Item -Recurse public dist\public
       - uses: actions/upload-artifact@v4
         with:
           name: cdash-agent-x86_64-pc-windows-msvc
-          path: |
-            target/release/cdash-agent.exe
-            target/release/cdash-agentw.exe
-            public
+          path: dist

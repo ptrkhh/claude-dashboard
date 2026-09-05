@@ -80,6 +80,19 @@ pub fn task_user(domain: &str, name: &str) -> Result<String, String> {
     Ok(format!("{domain}\\{name}"))
 }
 
+/// The URL an install prints. `0.0.0.0` and `::` answer on loopback too and
+/// are not addresses to open; any other bind is where the agent will actually
+/// listen, and printing `127.0.0.1` there would be a lie. An unparseable bind
+/// is echoed as given — the agent refuses to boot on it and says so.
+pub fn open_url(bind: &str, port: &str) -> String {
+    let host = match bind.parse::<std::net::IpAddr>() {
+        Ok(ip) if ip.is_unspecified() => "127.0.0.1".to_string(),
+        Ok(std::net::IpAddr::V6(ip)) => format!("[{ip}]"),
+        _ => bind.to_string(),
+    };
+    format!("http://{host}:{port}")
+}
+
 /// What `schtasks /Query /XML` exports: UTF-16LE with a byte-order mark.
 pub fn utf16le_bom(s: &str) -> Vec<u8> {
     let mut out = vec![0xFF, 0xFE];
@@ -133,10 +146,18 @@ pub async fn install(runner: &Runner) -> Result<String, String> {
         .await?;
 
     // The scheduled instance's exit status is invisible to anyone; the URL is
-    // the check.
-    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    // the check. It can only be built from this console's environment, and the
+    // task reads the user's environment afresh when it starts — so a `setx`
+    // made in this same console has changed the task's port without changing
+    // ours. Say so rather than print a URL that confidently answers nothing.
+    let env = |k: &str, d: &str| {
+        std::env::var(k).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| d.to_string())
+    };
+    let url = open_url(&env("CDASH_BIND", "127.0.0.1"), &env("PORT", "8080"));
     Ok(format!(
-        "registered task {TASK_NAME}: {} at logon for {user}, retried every 5 minutes while stopped\nopen http://127.0.0.1:{port}",
+        "registered task {TASK_NAME}: {} at logon for {user}, retried every 5 minutes while stopped\n\
+         open {url} — PORT and CDASH_BIND as this console sees them; a `setx` made in this same \
+         console is not visible here, so re-run install from a new one if that page does not answer",
         agentw.display()
     ))
 }
@@ -206,6 +227,17 @@ mod tests {
             let e = task_user(domain, name).unwrap_err();
             assert!(e.contains("USERDOMAIN"), "{domain:?}/{name:?}: {e}");
         }
+    }
+
+    #[test]
+    fn the_printed_url_follows_the_bind_and_is_openable() {
+        assert_eq!(open_url("127.0.0.1", "8080"), "http://127.0.0.1:8080");
+        // A LAN bind: 127.0.0.1 would name an address nothing listens on.
+        assert_eq!(open_url("192.168.1.5", "9000"), "http://192.168.1.5:9000");
+        // Every interface includes loopback, and neither wildcard is a URL.
+        assert_eq!(open_url("0.0.0.0", "8080"), "http://127.0.0.1:8080");
+        assert_eq!(open_url("::", "8080"), "http://127.0.0.1:8080");
+        assert_eq!(open_url("::1", "8080"), "http://[::1]:8080");
     }
 
     #[test]

@@ -3,6 +3,10 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// How much of a child's last stderr line is kept. It reaches the boot log
+/// and the body of a 500, and a child can write as much as it likes.
+const MAX_STDERR: usize = 200;
+
 /// Default subprocess deadline. This exists because `git status` on a 9P mount
 /// once took over 60 seconds and stalled every 4-second poll. Do not raise it
 /// without measuring; do not remove it.
@@ -25,11 +29,21 @@ pub struct Runner {
     log: Arc<LogBuffer>,
     failed: Mutex<HashSet<String>>,
     /// Prepended to every command: `["wsl.exe", "--exec", "/usr/bin/env",
-    /// "PATH=…"]` turns this runner into the WSL side's. Empty for native.
+    /// "PATH=…", "LC_ALL=C"]` turns this runner into the WSL side's. Empty for
+    /// native.
     prefix: Vec<String>,
     /// Prepended to failure log lines so two sides sharing one log are told
     /// apart: `"wsl "` or `""`.
     label: &'static str,
+}
+
+/// Truncate on a character boundary, never a byte one: a child that prints
+/// UTF-8 must not have a codepoint sliced in half on its way into the log.
+fn cap(s: &str) -> String {
+    match s.char_indices().nth(MAX_STDERR) {
+        Some((i, _)) => format!("{}…", &s[..i]),
+        None => s.to_string(),
+    }
 }
 
 impl Runner {
@@ -116,7 +130,7 @@ impl Runner {
                 // readable ASCII rather than "E R R O R".
                 let err = String::from_utf8_lossy(&out.stderr).replace('\0', "");
                 match err.lines().rev().find(|l| !l.trim().is_empty()) {
-                    Some(last) => format!("exit {code}: {}", last.trim()),
+                    Some(last) => format!("exit {code}: {}", cap(last.trim())),
                     None => format!("exit {code}"),
                 }
             }
@@ -153,6 +167,13 @@ impl Runner {
                 Err(format!("{key}: {reason}"))
             }
         }
+    }
+
+    /// Drop the one `log_once` line this key would produce, for a caller that
+    /// logs a better line itself — `probe_wsl`, whose own line names the
+    /// consequence ("Windows side only"). Every other key is untouched.
+    pub fn silence(&self, key: &str) {
+        self.failed.lock().unwrap_or_else(|e| e.into_inner()).insert(key.to_string());
     }
 
     /// Log a given failing key once per process lifetime. The KEY IS EXPLICIT:
@@ -270,6 +291,30 @@ mod tests {
             .await
             .unwrap_err();
         assert!(e.contains("exit 7: boom"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn a_silenced_key_logs_nothing_and_leaves_other_keys_alone() {
+        // probe_wsl pushes its own "Windows side only" line; the spec allows
+        // one line for that failure, not two.
+        let (r, log) = runner();
+        r.silence("wsl probe");
+        assert!(r.run_checked("false", &[], "wsl probe").await.is_err());
+        assert!(log.lines().is_empty(), "{:?}", log.lines());
+        r.run("false", &[], "git /repo-a").await;
+        assert_eq!(log.lines().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_long_stderr_line_is_capped_on_a_character_boundary() {
+        let (r, _) = runner();
+        // Multi-byte, so a byte-wise cut would split a codepoint and panic.
+        let e = r
+            .run_checked("sh", &["-c", "printf 'é%.0s' $(seq 400) >&2; exit 1"], "sh")
+            .await
+            .unwrap_err();
+        assert!(e.ends_with('…'), "{e}");
+        assert_eq!(e.chars().filter(|c| *c == 'é').count(), MAX_STDERR);
     }
 
     #[tokio::test]
