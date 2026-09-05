@@ -130,16 +130,21 @@ pub async fn post_launch(
     State(ctx): State<Arc<Ctx>>,
     Json(body): Json<LaunchBody>,
 ) -> Result<Response, ApiError> {
-    let name = launch_session(&ctx, &body.dir, &body.model, &body.effort).await?;
+    let launched = launch_session(&ctx, &body.dir, &body.model, &body.effort).await?;
 
     // Fire-and-forget, exactly as `server.js:56`: a failed recents write logs
-    // and does not fail the launch. The route resolves the directory before
-    // recording it; `launch_session` received the raw value.
+    // and does not fail the launch. The entry is the path as submitted: a
+    // native path resolved as before, a WSL path verbatim — on Windows
+    // `absolute("/home/u/p")` would be `C:\home\u\p`.
     let places_file = ctx.places_file.clone();
-    let resolved = std::path::absolute(&body.dir)
-        .unwrap_or_else(|_| std::path::PathBuf::from(&body.dir))
-        .to_string_lossy()
-        .into_owned();
+    let resolved = if launched.native {
+        std::path::absolute(&body.dir)
+            .unwrap_or_else(|_| std::path::PathBuf::from(&body.dir))
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        body.dir.clone()
+    };
     let log = Arc::clone(&ctx.host.log);
     tokio::spawn(async move {
         if let Err(e) = add_recent(&places_file, &resolved).await {
@@ -147,7 +152,7 @@ pub async fn post_launch(
         }
     });
 
-    Ok(Json(serde_json::json!({ "name": name })).into_response())
+    Ok(Json(serde_json::json!({ "name": launched.name })).into_response())
 }
 
 pub async fn post_resume(
@@ -335,11 +340,9 @@ mod tests {
     #[tokio::test]
     async fn launch_rejects_a_directory_that_is_not_one() {
         let b = serve(cfg_for(tempdir("launch-dir"))).await.unwrap();
-        let (status, body) = http_post(
-            &format!("http://{}/api/launch", b.addr),
-            "{\"dir\":\"/no/such/cdash-dir\"}",
-        )
-        .await;
+        let missing = std::env::temp_dir().join("no-such-cdash-dir");
+        let req = serde_json::json!({ "dir": missing }).to_string();
+        let (status, body) = http_post(&format!("http://{}/api/launch", b.addr), &req).await;
         assert_eq!(status, 400);
         assert!(body.contains("not a directory"));
     }

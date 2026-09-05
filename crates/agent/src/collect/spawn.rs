@@ -1,10 +1,15 @@
 use super::ctx::{Ctx, Meta};
+#[cfg(windows)]
+use super::external::live_session_files;
 use super::fsio::{read_if, write_atomic};
-use super::lookup::rc_link_for;
+use super::lookup::{rc_link_for, SessionFile};
+use super::side::{side_for, Backend, Side};
 use super::validate::{
     assert_effort, assert_kill_name, assert_model, assert_valid_sid, BadRequest, Refused,
 };
 use crate::parse::history::group_history;
+#[cfg(windows)]
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -12,6 +17,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// 60 × 500 ms = the 30 s budget from `lib/collect.js:143`.
 pub const RC_POLL_ATTEMPTS: u32 = 60;
 pub const RC_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// The explicit Remote Control request must win over this user-level opt-out,
+/// but only for the dashboard child; the user's settings file stays untouched.
+pub const SETTINGS_JSON: &str = r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":""}}"#;
 
 /// Mark a directory trusted in `~/.claude.json` so `claude` does not open on a
 /// trust prompt no one is sitting in front of. Read-modify-write: every other
@@ -84,13 +93,41 @@ pub fn tmux_name(dir: &str) -> String {
     format!("cdash-{base}-{hhmm}-{suffix}")
 }
 
+/// How the RC-link poll finds the session file: by the pane pid tmux reported,
+/// or, where nothing reported a pid, by the `--name` the launcher passed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RcLocator {
+    ByPid(i32),
+    ByName,
+}
+
+/// The RC link of the session file whose `name` is `name`, if it has one yet.
+pub async fn rc_link_by_name(claude_dir: &Path, name: &str) -> Option<String> {
+    let mut entries = tokio::fs::read_dir(claude_dir.join("sessions")).await.ok()?;
+    while let Ok(Some(e)) = entries.next_entry().await {
+        let p = e.path();
+        if p.extension().and_then(|x| x.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(txt) = read_if(&p).await else { continue };
+        let Ok(sess) = serde_json::from_str::<SessionFile>(&txt) else { continue };
+        if sess.name.as_deref() == Some(name) {
+            if let Some(id) = sess.bridge_session_id {
+                return Some(format!("https://claude.ai/code/{id}"));
+            }
+        }
+    }
+    None
+}
+
 /// Wait for `claude` to publish its remote-control session id, then record the
 /// link. Two guards, both required: the session can be killed while this
 /// sleeps, and again between the read and the write.
 pub async fn poll_rc_link(
     ctx: Arc<Ctx>,
+    claude_dir: PathBuf,
     name: String,
-    pid: i32,
+    locator: RcLocator,
     attempts: u32,
     interval: Duration,
 ) {
@@ -99,7 +136,11 @@ pub async fn poll_rc_link(
         if !ctx.meta_has(&name) {
             return; // killed while polling
         }
-        if let Some(link) = rc_link_for(&ctx.claude_dir, pid).await {
+        let found = match locator {
+            RcLocator::ByPid(pid) => rc_link_for(&claude_dir, pid).await,
+            RcLocator::ByName => rc_link_by_name(&claude_dir, &name).await,
+        };
+        if let Some(link) = found {
             if !ctx.meta_update(&name, |m| m.rc_link = Some(link.clone())) {
                 return; // killed between the check and the write
             }
@@ -116,37 +157,50 @@ pub async fn poll_rc_link(
     ));
 }
 
+/// Start `claude` on one side. The argv is the same everywhere; the backend
+/// decides what wraps it: a detached tmux session, or its own console window.
+/// `--name` makes the session file carry the same name on every backend.
 async fn spawn_claude(
     ctx: &Arc<Ctx>,
+    side: &Side,
     dir: &str,
     claude_args: &[&str],
     meta: Meta,
 ) -> Result<String, Refused> {
-    if let Err(e) = trust_dir(&claude_json_path(&ctx.claude_dir), dir).await {
+    if let Err(e) = trust_dir(&claude_json_path(&side.claude_dir), dir).await {
         ctx.host.log.push(format!("trust write failed for {dir}: {e}"));
     }
     let name = tmux_name(dir);
 
-    // The explicit Remote Control request must win over this user-level opt-out,
-    // but only for the dashboard child; the user's settings file stays untouched.
-    let mut args: Vec<&str> = vec![
-        "new-session",
-        "-d",
-        "-s",
+    let mut argv: Vec<&str> = vec!["claude", "--settings", SETTINGS_JSON];
+    argv.extend_from_slice(claude_args);
+    argv.extend_from_slice(&[
+        "--dangerously-skip-permissions",
+        "--remote-control",
         &name,
-        "-c",
-        dir,
-        "claude",
-        "--settings",
-        r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":""}}"#,
-    ];
-    args.extend_from_slice(claude_args);
-    args.extend_from_slice(&["--dangerously-skip-permissions", "--remote-control", &name]);
-    // Checked: without this a failed `tmux new-session` still answered 200
-    // with a session name, and left a meta entry for a session that does not
-    // exist. The pid lookup below stays best-effort — losing it costs the
-    // rc-link poll, not the session.
-    ctx.runner.run_checked("tmux", &args, "tmux new-session").await.map_err(Refused::Failed)?;
+        "--name",
+        &name,
+    ]);
+
+    match side.backend {
+        Backend::Tmux => {
+            let mut args: Vec<&str> = vec!["new-session", "-d", "-s", &name, "-c", dir];
+            args.extend_from_slice(&argv);
+            // Checked: without this a failed `tmux new-session` still answered
+            // 200 with a session name, and left a meta entry for a session
+            // that does not exist.
+            side.runner
+                .run_checked("tmux", &args, "tmux new-session")
+                .await
+                .map_err(Refused::Failed)?;
+        }
+        #[cfg(windows)]
+        Backend::Console => {
+            side.runner
+                .spawn_detached(argv[0], &argv[1..], dir, "claude spawn")
+                .map_err(Refused::Failed)?;
+        }
+    }
 
     ctx.meta_set(&name, meta);
     ctx.host.log.push(format!(
@@ -157,27 +211,49 @@ async fn spawn_claude(
             .unwrap_or_default()
     ));
 
-    let pid_out = ctx
-        .runner
-        .run(
-            "tmux",
-            &["display-message", "-p", "-t", &name, "#{pane_pid}"],
-            "tmux display-message",
-        )
-        .await;
-    if let Ok(pid) = pid_out.trim().parse::<i32>() {
+    // The pid lookup stays best-effort — losing it costs the rc-link poll,
+    // not the session. A console launch never has one and polls by name.
+    let locator = match side.backend {
+        Backend::Tmux => {
+            let pid_out = side
+                .runner
+                .run(
+                    "tmux",
+                    &["display-message", "-p", "-t", &name, "#{pane_pid}"],
+                    "tmux display-message",
+                )
+                .await;
+            match pid_out.trim().parse::<i32>() {
+                Ok(pid) => Some(RcLocator::ByPid(pid)),
+                Err(_) => {
+                    ctx.host.log.push(format!("rc-poll skipped {name}: no pane pid"));
+                    None
+                }
+            }
+        }
+        #[cfg(windows)]
+        Backend::Console => Some(RcLocator::ByName),
+    };
+    if let Some(locator) = locator {
         tokio::spawn(poll_rc_link(
             Arc::clone(ctx),
+            side.claude_dir.clone(),
             name.clone(),
-            pid,
+            locator,
             RC_POLL_ATTEMPTS,
             RC_POLL_INTERVAL,
         ));
-    } else {
-        ctx.host.log.push(format!("rc-poll skipped {name}: no pane pid"));
     }
 
     Ok(name)
+}
+
+/// What a launch reports back: the session name, and whether it landed on the
+/// native side — the recents entry is resolved only for native paths.
+#[derive(Debug)]
+pub struct Launched {
+    pub name: String,
+    pub native: bool,
 }
 
 pub async fn launch_session(
@@ -185,55 +261,108 @@ pub async fn launch_session(
     dir: &str,
     model: &str,
     effort: &str,
-) -> Result<String, Refused> {
+) -> Result<Launched, Refused> {
     assert_model(model)?;
     assert_effort(effort)?;
+    let (side, dir) = side_for(&ctx.sides, dir)?;
     // A6: the directory must exist and be a directory before it reaches `-c`.
-    let is_dir = tokio::fs::metadata(dir).await.map(|m| m.is_dir()).unwrap_or(false);
+    // A WSL directory is checked through the share.
+    let check = match &side.wsl {
+        Some(w) => PathBuf::from(w.to_unc(&dir)),
+        None => PathBuf::from(&dir),
+    };
+    let is_dir = tokio::fs::metadata(&check).await.map(|m| m.is_dir()).unwrap_or(false);
     if !is_dir {
         return Err(Refused::BadRequest(format!("not a directory: {dir}")));
     }
-    spawn_claude(
+    let name = spawn_claude(
         ctx,
-        dir,
+        side,
+        &dir,
         &["--model", model, "--effort", effort],
         Meta { model: Some(model.into()), effort: Some(effort.into()), rc_link: None },
     )
-    .await
+    .await?;
+    Ok(Launched { name, native: !side.is_wsl() })
 }
 
 pub async fn resume_session(ctx: &Arc<Ctx>, sid: &str) -> Result<String, Refused> {
     assert_valid_sid(sid)?;
-    let hist = read_if(&ctx.claude_dir.join("history.jsonl")).await.unwrap_or_default();
-    let cwd = group_history(&hist)
-        .into_iter()
-        .find(|g| g.sid == sid)
-        .and_then(|g| g.cwd)
-        .filter(|c| !c.is_empty())
-        .ok_or_else(|| Refused::BadRequest(format!("unknown session: {sid}")))?;
+    // The side is whichever history holds the sid; its cwd is already in
+    // that side's notation.
+    let mut found: Option<(&Side, String)> = None;
+    for side in &ctx.sides {
+        let hist = read_if(&side.claude_dir.join("history.jsonl")).await.unwrap_or_default();
+        let cwd = group_history(&hist)
+            .into_iter()
+            .find(|g| g.sid == sid)
+            .and_then(|g| g.cwd)
+            .filter(|c| !c.is_empty());
+        if let Some(cwd) = cwd {
+            found = Some((side, cwd));
+            break;
+        }
+    }
+    let (side, cwd) =
+        found.ok_or_else(|| Refused::BadRequest(format!("unknown session: {sid}")))?;
 
     // D6: un-purge before spawning, so the resumed session is not filtered
     // straight back out of the resumable list it came from.
     ctx.purged.lock().unwrap_or_else(|e| e.into_inner()).remove(sid);
 
-    spawn_claude(ctx, &cwd, &["--resume", sid], Meta::default()).await
+    spawn_claude(ctx, side, &cwd, &["--resume", sid], Meta::default()).await
 }
 
 /// Kill a session this dashboard owns. The name is guarded first — it becomes
-/// a `tmux` argument — and the meta entry is dropped whether or not tmux
-/// agreed, which is what stops a poll still in flight from resurrecting it.
+/// a `tmux` or `taskkill` argument. Console sides are searched first, with the
+/// same liveness scan the list uses, so a stale file whose pid was recycled
+/// never matches and nothing foreign is killed; then every tmux side is tried.
 pub async fn kill_session(ctx: &Arc<Ctx>, name: &str) -> Result<(), Refused> {
     assert_kill_name(name)?;
+
+    #[cfg(windows)]
+    for side in ctx.sides.iter().filter(|s| matches!(s.backend, Backend::Console)) {
+        let rows = side.proc_rows(&ctx.host.sampler).await;
+        let hit = live_session_files(side, &rows, &HashSet::new())
+            .await
+            .into_iter()
+            .find(|(_, s)| s.name.as_deref() == Some(name));
+        if let Some((pid, _)) = hit {
+            let pid = pid.to_string();
+            side.runner
+                .run_checked("taskkill", &["/T", "/F", "/PID", &pid], "taskkill")
+                .await
+                .map_err(Refused::Failed)?;
+            ctx.meta_delete(name);
+            ctx.host.log.push(format!("kill {name} (pid {pid})"));
+            return Ok(());
+        }
+    }
+
     // Checked, and the meta entry is dropped only after the kill succeeds:
     // reporting a kill that did not happen removes the card from the UI while
-    // the session keeps running. Node's route threw here; ours swallowed.
-    ctx.runner
-        .run_checked("tmux", &["kill-session", "-t", name], "tmux kill-session")
-        .await
-        .map_err(Refused::Failed)?;
-    ctx.meta_delete(name);
-    ctx.host.log.push(format!("kill {name}"));
-    Ok(())
+    // the session keeps running. The first failure is the reported one, so the
+    // message does not depend on how many sides were tried after it.
+    let mut first_err = None;
+    for side in ctx.sides.iter().filter(|s| matches!(s.backend, Backend::Tmux)) {
+        match side
+            .runner
+            .run_checked("tmux", &["kill-session", "-t", name], "tmux kill-session")
+            .await
+        {
+            Ok(_) => {
+                ctx.meta_delete(name);
+                ctx.host.log.push(format!("kill {name}"));
+                return Ok(());
+            }
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+    }
+    Err(Refused::Failed(first_err.unwrap_or_else(|| format!("no such session: {name}"))))
 }
 
 /// Hide a resumable session from the list. Purely a note to ourselves — no
@@ -260,41 +389,6 @@ mod tests {
     async fn ctx_for(claude_dir: PathBuf) -> Arc<Ctx> {
         let log = Arc::new(LogBuffer::new());
         let path = std::env::var("PATH").unwrap_or_default();
-        let host = crate::host::init::Host {
-            runner: Runner::new(path.clone(), Arc::clone(&log)),
-            log,
-            path,
-            sampler: std::sync::Mutex::new(crate::host::sample::Sampler::new()),
-        };
-        Arc::new(Ctx::new(host, claude_dir, None))
-    }
-
-    /// A stub `tmux` whose exit status the test chooses, so both sides of the
-    /// checked-subprocess branch are reachable without a real tmux server.
-    /// Unix-only: it chmods the script executable and writes a `#!/bin/sh`
-    /// shebang, neither of which means anything on Windows.
-    #[cfg(unix)]
-    fn stub_tmux(dir: &Path, exit: i32) -> String {
-        let bin = dir.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let p = bin.join("tmux");
-        std::fs::write(
-            &p,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}/tmux-args'\necho 4242\nexit {exit}\n",
-                dir.display()
-            ),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        bin.to_string_lossy().into_owned()
-    }
-
-    #[cfg(unix)]
-    async fn ctx_with_tmux(claude_dir: PathBuf, exit: i32) -> Arc<Ctx> {
-        let path = stub_tmux(&claude_dir, exit);
-        let log = Arc::new(LogBuffer::new());
         let host = crate::host::init::Host {
             runner: Runner::new(path.clone(), Arc::clone(&log)),
             log,
@@ -406,7 +500,7 @@ mod tests {
         .await
         .unwrap();
 
-        poll_rc_link(Arc::clone(&ctx), "cdash-x".into(), 99, 3, Duration::from_millis(10)).await;
+        poll_rc_link(Arc::clone(&ctx), d.clone(), "cdash-x".into(), RcLocator::ByPid(99), 3, Duration::from_millis(10)).await;
 
         assert_eq!(
             ctx.meta_get("cdash-x").unwrap().rc_link.as_deref(),
@@ -429,7 +523,7 @@ mod tests {
         .unwrap();
         // meta deliberately NOT set — this stands for "killed before the tick".
 
-        poll_rc_link(Arc::clone(&ctx), "cdash-dead".into(), 98, 3, Duration::from_millis(10)).await;
+        poll_rc_link(Arc::clone(&ctx), d.clone(), "cdash-dead".into(), RcLocator::ByPid(98), 3, Duration::from_millis(10)).await;
 
         assert!(
             ctx.meta_get("cdash-dead").is_none(),
@@ -442,15 +536,43 @@ mod tests {
         // B6/C4: bounded, so a session that never publishes a link does not
         // leave a task polling forever.
         let d = tempdir("rc-timeout");
-        let ctx = ctx_for(d).await;
+        let ctx = ctx_for(d.clone()).await;
         ctx.meta_set("cdash-y", Meta::default());
         let started = std::time::Instant::now();
 
-        poll_rc_link(Arc::clone(&ctx), "cdash-y".into(), 1, 3, Duration::from_millis(10)).await;
+        poll_rc_link(Arc::clone(&ctx), d.clone(), "cdash-y".into(), RcLocator::ByPid(1), 3, Duration::from_millis(10)).await;
 
         assert!(started.elapsed() < Duration::from_secs(1));
         assert_eq!(ctx.meta_get("cdash-y").unwrap().rc_link, None);
         assert!(ctx.host.log.lines().iter().any(|l| l.contains("rc-link timeout")));
+    }
+
+    #[tokio::test]
+    async fn the_rc_poll_can_find_the_session_by_name() {
+        // A console launch knows no pid: the session file is found by the
+        // `--name` the launcher passed, not by a pid we never learned.
+        let d = tempdir("rc-name");
+        let ctx = ctx_for(d.clone()).await;
+        ctx.meta_set("cdash-byname", Meta::default());
+        tokio::fs::write(
+            d.join("sessions/77.json"),
+            r#"{"name":"cdash-byname","bridgeSessionId":"session_named"}"#,
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            d.join("sessions/78.json"),
+            r#"{"name":"other","bridgeSessionId":"session_other"}"#,
+        )
+        .await
+        .unwrap();
+
+        poll_rc_link(Arc::clone(&ctx), d.clone(), "cdash-byname".into(), RcLocator::ByName, 3, Duration::from_millis(10)).await;
+
+        assert_eq!(
+            ctx.meta_get("cdash-byname").unwrap().rc_link.as_deref(),
+            Some("https://claude.ai/code/session_named")
+        );
     }
 
     #[tokio::test]
@@ -481,34 +603,6 @@ mod tests {
         assert!(matches!(&e, Refused::BadRequest(m) if m.contains("unknown session")), "got {e:?}");
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn resume_un_purges_the_session_it_is_bringing_back() {
-        // D6: without this the resumed session is filtered straight back out
-        // of the list it was resumed from, and the row never reappears.
-        // A stub tmux that exits 0, so this test never starts a real session.
-        // It cannot point PATH at nothing any more: resume is checked now, and
-        // a tmux that fails to spawn is a failed resume rather than a no-op.
-        let d = tempdir("resume-unpurge");
-        let ctx = ctx_with_tmux(d.clone(), 0).await;
-
-        let sid = "2f8a1c94-3b7e-4d51-9a02-6c5f8e1b7d34";
-        tokio::fs::write(
-            d.join("history.jsonl"),
-            format!("{{\"sessionId\":\"{sid}\",\"project\":\"/tmp\",\"timestamp\":1,\"display\":\"x\"}}\n"),
-        )
-        .await
-        .unwrap();
-        purge_session(&ctx, sid).unwrap();
-        assert!(ctx.purged.lock().unwrap().contains(sid));
-
-        resume_session(&ctx, sid).await.unwrap();
-        assert!(
-            !ctx.purged.lock().unwrap().contains(sid),
-            "a resumed session must stop being hidden"
-        );
-    }
-
     #[tokio::test]
     async fn kill_rejects_a_name_that_is_not_ours_before_running_tmux() {
         // A2: the argument reaches `tmux kill-session -t`.
@@ -516,65 +610,6 @@ mod tests {
         let ctx = ctx_for(d).await;
         assert!(kill_session(&ctx, "other").await.is_err());
         assert!(kill_session(&ctx, "cdash-x; rm -rf /").await.is_err());
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn kill_forgets_the_session_meta() {
-        // D7: a stale meta entry would let the RC poll write a link back for a
-        // session that no longer exists.
-        let ctx = ctx_with_tmux(tempdir("kill-meta"), 0).await;
-        ctx.meta_set("cdash-gone-1200-abc", Meta::default());
-        kill_session(&ctx, "cdash-gone-1200-abc").await.unwrap();
-        assert!(!ctx.meta_has("cdash-gone-1200-abc"));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_kill_that_failed_is_reported_and_keeps_the_session() {
-        // The regression this exists for: `Runner::run` returns an empty string
-        // on a non-zero exit, so the route answered 200 {"ok":true} while the
-        // session kept running and the card vanished from the UI. Node's route
-        // used the throwing `run` and returned 500.
-        let ctx = ctx_with_tmux(tempdir("kill-fails"), 1).await;
-        ctx.meta_set("cdash-alive-1200-abc", Meta::default());
-
-        let e = kill_session(&ctx, "cdash-alive-1200-abc").await.unwrap_err();
-        assert!(matches!(&e, Refused::Failed(m) if m.contains("kill-session")), "got {e:?}");
-        assert!(
-            ctx.meta_has("cdash-alive-1200-abc"),
-            "a session we failed to kill must not be forgotten"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_launch_whose_tmux_failed_leaves_no_phantom_session() {
-        let d = tempdir("launch-fails");
-        let ctx = ctx_with_tmux(d.clone(), 1).await;
-        let e = launch_session(&ctx, d.to_str().unwrap(), "sonnet", "medium").await.unwrap_err();
-        assert!(matches!(&e, Refused::Failed(m) if m.contains("new-session")), "got {e:?}");
-        assert!(
-            ctx.meta.lock().unwrap().is_empty(),
-            "a session that was never created must leave no meta entry"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn launch_overrides_the_setting_that_disables_remote_control() {
-        let d = tempdir("rc-setting");
-        let ctx = ctx_with_tmux(d.clone(), 0).await;
-
-        launch_session(&ctx, d.to_str().unwrap(), "sonnet", "medium").await.unwrap();
-
-        let args = std::fs::read_to_string(d.join("tmux-args")).unwrap();
-        assert!(
-            args.lines().next().unwrap().contains(
-                r#"--settings {"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":""}}"#
-            ),
-            "dashboard launches must keep their explicitly requested Remote Control enabled: {args}"
-        );
     }
 
     #[tokio::test]
@@ -588,5 +623,162 @@ mod tests {
             .lock()
             .unwrap()
             .contains("2f8a1c94-3b7e-4d51-9a02-6c5f8e1b7d34"));
+    }
+
+    /// Everything that needs the stub `tmux`. Unix-only: the stub is chmodded
+    /// executable and written with a `#!/bin/sh` shebang, neither of which
+    /// means anything on Windows, where the native side is a console anyway.
+    #[cfg(unix)]
+    mod tmux_tests {
+        use super::*;
+
+        /// A stub `tmux` whose exit status the test chooses, so both sides of
+        /// the checked-subprocess branch are reachable without a real tmux
+        /// server.
+        fn stub_tmux(dir: &Path, exit: i32) -> String {
+            let bin = dir.join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let p = bin.join("tmux");
+            std::fs::write(
+                &p,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}/tmux-args'\necho 4242\nexit {exit}\n",
+                    dir.display()
+                ),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            bin.to_string_lossy().into_owned()
+        }
+
+        async fn ctx_with_tmux(claude_dir: PathBuf, exit: i32) -> Arc<Ctx> {
+            let path = stub_tmux(&claude_dir, exit);
+            let log = Arc::new(LogBuffer::new());
+            let host = crate::host::init::Host {
+                runner: Runner::new(path.clone(), Arc::clone(&log)),
+                log,
+                path,
+                sampler: std::sync::Mutex::new(crate::host::sample::Sampler::new()),
+            };
+            Arc::new(Ctx::new(host, claude_dir, None))
+        }
+
+        #[tokio::test]
+        async fn resume_un_purges_the_session_it_is_bringing_back() {
+            // D6: without this the resumed session is filtered straight back out
+            // of the list it was resumed from, and the row never reappears.
+            // A stub tmux that exits 0, so this test never starts a real session.
+            // It cannot point PATH at nothing any more: resume is checked now, and
+            // a tmux that fails to spawn is a failed resume rather than a no-op.
+            let d = tempdir("resume-unpurge");
+            let ctx = ctx_with_tmux(d.clone(), 0).await;
+
+            let sid = "2f8a1c94-3b7e-4d51-9a02-6c5f8e1b7d34";
+            tokio::fs::write(
+                d.join("history.jsonl"),
+                format!("{{\"sessionId\":\"{sid}\",\"project\":\"/tmp\",\"timestamp\":1,\"display\":\"x\"}}\n"),
+            )
+            .await
+            .unwrap();
+            purge_session(&ctx, sid).unwrap();
+            assert!(ctx.purged.lock().unwrap().contains(sid));
+
+            resume_session(&ctx, sid).await.unwrap();
+            assert!(
+                !ctx.purged.lock().unwrap().contains(sid),
+                "a resumed session must stop being hidden"
+            );
+        }
+
+        #[tokio::test]
+        async fn kill_forgets_the_session_meta() {
+            // D7: a stale meta entry would let the RC poll write a link back for a
+            // session that no longer exists.
+            let ctx = ctx_with_tmux(tempdir("kill-meta"), 0).await;
+            ctx.meta_set("cdash-gone-1200-abc", Meta::default());
+            kill_session(&ctx, "cdash-gone-1200-abc").await.unwrap();
+            assert!(!ctx.meta_has("cdash-gone-1200-abc"));
+        }
+
+        #[tokio::test]
+        async fn a_kill_that_failed_is_reported_and_keeps_the_session() {
+            // The regression this exists for: `Runner::run` returns an empty string
+            // on a non-zero exit, so the route answered 200 {"ok":true} while the
+            // session kept running and the card vanished from the UI. Node's route
+            // used the throwing `run` and returned 500.
+            let ctx = ctx_with_tmux(tempdir("kill-fails"), 1).await;
+            ctx.meta_set("cdash-alive-1200-abc", Meta::default());
+
+            let e = kill_session(&ctx, "cdash-alive-1200-abc").await.unwrap_err();
+            assert!(matches!(&e, Refused::Failed(m) if m.contains("kill-session")), "got {e:?}");
+            assert!(
+                ctx.meta_has("cdash-alive-1200-abc"),
+                "a session we failed to kill must not be forgotten"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_launch_whose_tmux_failed_leaves_no_phantom_session() {
+            let d = tempdir("launch-fails");
+            let ctx = ctx_with_tmux(d.clone(), 1).await;
+            let e = launch_session(&ctx, d.to_str().unwrap(), "sonnet", "medium").await.unwrap_err();
+            assert!(matches!(&e, Refused::Failed(m) if m.contains("new-session")), "got {e:?}");
+            assert!(
+                ctx.meta.lock().unwrap().is_empty(),
+                "a session that was never created must leave no meta entry"
+            );
+        }
+
+        #[tokio::test]
+        async fn launch_overrides_the_setting_that_disables_remote_control() {
+            let d = tempdir("rc-setting");
+            let ctx = ctx_with_tmux(d.clone(), 0).await;
+
+            launch_session(&ctx, d.to_str().unwrap(), "sonnet", "medium").await.unwrap();
+
+            let args = std::fs::read_to_string(d.join("tmux-args")).unwrap();
+            assert!(
+                args.lines().next().unwrap().contains(
+                    r#"--settings {"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":""}}"#
+                ),
+                "dashboard launches must keep their explicitly requested Remote Control enabled: {args}"
+            );
+        }
+
+        #[tokio::test]
+        async fn resume_finds_the_sid_in_a_later_sides_history_and_names_the_session() {
+            // Two native sides stand in for native + WSL: the sid lives only
+            // in the second side's history, so that is where the spawn goes.
+            let d1 = tempdir("resume-side-1");
+            let d2 = tempdir("resume-side-2");
+            let path = stub_tmux(&d1, 0);
+            let log = Arc::new(LogBuffer::new());
+            let host = crate::host::init::Host {
+                runner: Runner::new(path.clone(), Arc::clone(&log)),
+                log,
+                path,
+                sampler: std::sync::Mutex::new(crate::host::sample::Sampler::new()),
+            };
+            let mut c = Ctx::new(host, d1.clone(), None);
+            c.sides.push(crate::collect::side::Side::native(d2.clone(), Arc::clone(&c.runner)));
+            let ctx = Arc::new(c);
+
+            let sid = "3f8a1c94-3b7e-4d51-9a02-6c5f8e1b7d34";
+            tokio::fs::write(d1.join("history.jsonl"), "").await.unwrap();
+            tokio::fs::write(
+                d2.join("history.jsonl"),
+                format!("{{\"sessionId\":\"{sid}\",\"project\":\"/tmp\",\"timestamp\":1,\"display\":\"x\"}}\n"),
+            )
+            .await
+            .unwrap();
+
+            let name = resume_session(&ctx, sid).await.unwrap();
+
+            let args = std::fs::read_to_string(d1.join("tmux-args")).unwrap();
+            assert!(args.contains(&format!("--resume {sid}")), "{args}");
+            assert!(args.contains(&format!("--name {name}")), "the session file will carry our name: {args}");
+            assert!(args.contains("-c /tmp"), "{args}");
+        }
     }
 }
