@@ -49,3 +49,42 @@ jobs:
         with:
           name: cdash-agent-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/cdash-agent
+
+  # The only place Windows code runs: tests, clippy, and two boot gates — the
+  # console binary by its banner, the windowless one by a health request,
+  # because a GUI-subsystem process has no banner to grep.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          components: clippy
+      # aws-lc-sys assembles with NASM on x86_64-pc-windows-msvc; CMake is on the image.
+      - uses: ilammy/setup-nasm@v1
+      - run: cargo test -p cdash-agent --locked
+      - run: cargo clippy -p cdash-agent --all-targets --locked -- -D warnings -D clippy::disallowed_types
+      - run: cargo build --release --locked -p cdash-agent
+      - name: Execute the console binary
+        shell: pwsh
+        run: |
+          $env:PORT = '0'
+          $p = Start-Process -FilePath target\release\cdash-agent.exe -PassThru -NoNewWindow -RedirectStandardOutput boot.log -RedirectStandardError boot.err
+          Start-Sleep -Seconds 5
+          Stop-Process -Id $p.Id -Force
+          Get-Content boot.log, boot.err
+          if (-not (Select-String -Path boot.log -Pattern 'cdash-agent .* on http://127.0.0.1:' -Quiet)) { exit 1 }
+      - name: Execute the windowless binary
+        shell: pwsh
+        run: |
+          $env:PORT = '18080'
+          $p = Start-Process -FilePath target\release\cdash-agentw.exe -PassThru
+          Start-Sleep -Seconds 5
+          try { $r = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18080/api/health } finally { Stop-Process -Id $p.Id -Force }
+          if ($r.Content -ne '{"ok":true}') { Write-Error "unexpected health body: $($r.Content)"; exit 1 }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cdash-agent-x86_64-pc-windows-msvc
+          path: |
+            target/release/cdash-agent.exe
+            target/release/cdash-agentw.exe

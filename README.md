@@ -18,6 +18,41 @@ cargo run -p cdash-tauri
 
 A Tauri desktop wrapper around the same UI. The agent runs in-process (no separate server, no port to remember), started at app setup on a tokio task. The HTTP boundary is kept even in-process: the same `/api/*` calls still speak HTTP to loopback, tunnelled through the `api_request` Tauri command rather than webview `fetch`. Connection profiles are stored in the app's config directory via `tauri-plugin-store`. Secrets handling arrives in step 10.
 
+## Windows
+
+One native agent, started by Task Scheduler at every logon, sees Claude Code
+on **both** sides of the machine: sessions started from a Windows terminal
+(`%USERPROFILE%\.claude`, `claude.exe`) and sessions inside your WSL distro,
+reached over `\\wsl.localhost` and `wsl.exe`. Windows-side sessions open in
+their own console window; WSL-side sessions run in tmux as on Linux. A path
+decides the side: `C:\…` is Windows, `/home/…` or `\\wsl.localhost\<distro>\…`
+is WSL.
+
+1. Download `cdash-agent.exe`, `cdash-agentw.exe` and the `public/` directory
+   from the `cdash-agent-x86_64-pc-windows-msvc` CI artifact into one folder.
+2. Run `cdash-agent.exe install` once. It registers a logon task for your user,
+   starts it, and prints the URL to open. No re-login is needed.
+3. Configure with user environment variables, then run `install` again to
+   apply: `setx PORT 8080`, `setx CDASH_BIND 0.0.0.0`, `setx CDASH_WSL_DISTRO Ubuntu`,
+   `setx CDASH_WSL 0` to leave WSL alone.
+
+`cdash-agentw.exe` is the same server without a console window; the task runs
+it. `cdash-agent.exe` keeps its console for `set-password`, `install`,
+`uninstall`, and a first check with a visible banner — a session launched from
+that instance reads and writes its terminal, so the scheduled instance is the
+one to use.
+
+The task retries every five minutes while you are logged on, so a crash or a
+port freed after logon costs at most five minutes; nothing runs before logon.
+Upgrade by `cdash-agent.exe uninstall`, replacing the three files, `install`.
+
+Requirements: the native Claude Code installer (`claude.exe`; an npm
+`claude.cmd` is reported as missing), Git for Windows, and for the WSL side a
+WSL 2 distro with `tmux`, `claude` and `git` on its login-shell PATH.
+`/api/hostinfo` reports the distro and anything it lacks under `wsl`. While
+the WSL side is on, polling keeps the distro and its VM resident; `CDASH_WSL=0`
+is the switch for a machine whose WSL has no Claude in it.
+
 ## Run
 
 ```
@@ -32,7 +67,7 @@ CI gates the same two targets but sources its cross-toolchain from `taiki-e/setu
 
 The `aarch64` binary is confirmed working on-device under Termux (Android, 2026-08-29): UI, host stats and live session data all functional.
 
-Requires `tmux`, `claude` and `git` on `PATH`; the agent reports any that are missing at startup.
+Requires `tmux`, `claude` and `git` on `PATH` (`claude` and `git` on Windows, where tmux lives on the WSL side); the agent reports any that are missing at startup.
 
 ## Configuration
 
@@ -41,7 +76,7 @@ Requires `tmux`, `claude` and `git` on `PATH`; the agent reports any that are mi
 | `PORT` | `8080` | Port to listen on. `0` picks any free port. |
 | `CDASH_BIND` | `127.0.0.1` | Address to bind. **Breaking change:** the Node agent bound every interface. LAN access now requires setting `CDASH_BIND=0.0.0.0` explicitly. |
 | `CLAUDE_DIR` | `~/.claude` | Path to the Claude config/projects directory. |
-| `DISK_EXTRA` | — | Optional second mount to report alongside `/`, e.g. `/mnt/d`. |
+| `DISK_EXTRA` | — | Optional second mount to report alongside `/`, e.g. `/mnt/d`, or `D:\` on Windows. |
 | `CDASH_PUBLIC` | `public` | Directory served as static files. |
 | `CDASH_AUTH` | `none` | Comma-composable guard chain, **AND** semantics: `none`, `bearer`, `password`, `trusted-proxy`, `cf-access`. An unknown value refuses to boot rather than falling back to `none`. |
 | `CDASH_TOKEN` | — | Required by `bearer`. |
@@ -51,6 +86,8 @@ Requires `tmux`, `claude` and `git` on `PATH`; the agent reports any that are mi
 | `CDASH_PROXY_ALLOW` / `CDASH_PROXY_HEADER` | — / `X-Forwarded-Email` | Required by `trusted-proxy`. Unsafe unless the origin is unreachable except through the proxy. |
 | `CDASH_CF_TEAM_DOMAIN` / `CDASH_CF_AUD` | — | Required by `cf-access`. |
 | `CDASH_LOGIN_PENDING_MAX` | `1024` | Bound on delayed logins pending at once. |
+| `CDASH_WSL` | — | Windows only. `0` skips the WSL side entirely. |
+| `CDASH_WSL_DISTRO` | the default distro | Windows only. Which distro the WSL side is. |
 
 ### `cf-access`
 
