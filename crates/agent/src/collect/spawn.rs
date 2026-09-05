@@ -2,7 +2,7 @@ use super::ctx::{Ctx, Meta};
 #[cfg(windows)]
 use super::external::live_session_files;
 use super::fsio::{read_if, write_atomic};
-use super::lookup::{rc_link_for, SessionFile};
+use super::lookup::{rc_link_for, rc_link_from};
 use super::side::{side_for, Backend, Side};
 use super::validate::{
     assert_effort, assert_kill_name, assert_model, assert_valid_sid, BadRequest, Refused,
@@ -110,10 +110,14 @@ pub async fn rc_link_by_name(claude_dir: &Path, name: &str) -> Option<String> {
             continue;
         }
         let Some(txt) = read_if(&p).await else { continue };
-        let Ok(sess) = serde_json::from_str::<SessionFile>(&txt) else { continue };
-        if sess.name.as_deref() == Some(name) {
-            if let Some(id) = sess.bridge_session_id {
-                return Some(format!("https://claude.ai/code/{id}"));
+        // Read as a `Value`, not as `SessionFile`: one wrongly-typed field
+        // anywhere in the file — a numeric `bridgeSessionId`, a string
+        // `startedAt` — fails the typed parse and would drop the name match
+        // with it, timing out a session the by-pid arm would have linked.
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else { continue };
+        if v.get("name").and_then(|n| n.as_str()) == Some(name) {
+            if let Some(link) = rc_link_from(&txt) {
+                return Some(link);
             }
         }
     }
@@ -573,6 +577,63 @@ mod tests {
             ctx.meta_get("cdash-byname").unwrap().rc_link.as_deref(),
             Some("https://claude.ai/code/session_named")
         );
+    }
+
+    #[tokio::test]
+    async fn the_by_name_poll_stringifies_a_numeric_bridge_id() {
+        // Both locators must agree on what a bridge id is: `parse_rc_file`
+        // stringifies a numeric one rather than dropping the link with it.
+        let d = tempdir("rc-name-numeric");
+        let ctx = ctx_for(d.clone()).await;
+        ctx.meta_set("cdash-num", Meta::default());
+        tokio::fs::write(
+            d.join("sessions/79.json"),
+            r#"{"name":"cdash-num","bridgeSessionId":12345}"#,
+        )
+        .await
+        .unwrap();
+
+        poll_rc_link(Arc::clone(&ctx), d.clone(), "cdash-num".into(), RcLocator::ByName, 3, Duration::from_millis(10)).await;
+
+        assert_eq!(
+            ctx.meta_get("cdash-num").unwrap().rc_link.as_deref(),
+            Some("https://claude.ai/code/12345")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_named_session_without_a_bridge_id_yet_stays_retryable() {
+        // The session file appears before the id does. The poll must keep
+        // looking rather than record a link it has not been given.
+        let d = tempdir("rc-name-pending");
+        let ctx = ctx_for(d.clone()).await;
+        ctx.meta_set("cdash-pending", Meta::default());
+        tokio::fs::write(d.join("sessions/80.json"), r#"{"name":"cdash-pending"}"#).await.unwrap();
+
+        poll_rc_link(Arc::clone(&ctx), d.clone(), "cdash-pending".into(), RcLocator::ByName, 3, Duration::from_millis(10)).await;
+
+        assert_eq!(ctx.meta_get("cdash-pending").unwrap().rc_link, None);
+        assert!(
+            ctx.host.log.lines().iter().any(|l| l.contains("rc-link timeout")),
+            "a file without an id yet must be retried, not treated as an answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_by_name_poll_gives_up_after_its_attempt_budget() {
+        // B6/C4 for the ByName arm, as `the_poll_gives_up_after_its_attempt_budget`
+        // pins it for ByPid: a name that never appears is bounded too.
+        let d = tempdir("rc-name-timeout");
+        let ctx = ctx_for(d.clone()).await;
+        ctx.meta_set("cdash-z", Meta::default());
+        tokio::fs::write(d.join("sessions/81.json"), r#"{"name":"someone-else"}"#).await.unwrap();
+        let started = std::time::Instant::now();
+
+        poll_rc_link(Arc::clone(&ctx), d.clone(), "cdash-z".into(), RcLocator::ByName, 3, Duration::from_millis(10)).await;
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(ctx.meta_get("cdash-z").unwrap().rc_link, None);
+        assert!(ctx.host.log.lines().iter().any(|l| l.contains("rc-link timeout")));
     }
 
     #[tokio::test]

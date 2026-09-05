@@ -31,9 +31,15 @@ pub async fn session_file_for(claude_dir: &Path, pid: i32) -> Option<SessionFile
     serde_json::from_str(&txt).ok()
 }
 
+/// The "Open in Claude" link a session-file body carries, if any. The one
+/// construction both locators share: `parse_rc_file` stringifies a numeric or
+/// boolean id rather than dropping the link along with it.
+pub fn rc_link_from(txt: &str) -> Option<String> {
+    parse_rc_file(txt).map(|id| format!("https://claude.ai/code/{id}"))
+}
+
 pub async fn rc_link_for(claude_dir: &Path, pid: i32) -> Option<String> {
-    let txt = read_if(&session_path(claude_dir, pid)).await?;
-    parse_rc_file(&txt).map(|id| format!("https://claude.ai/code/{id}"))
+    rc_link_from(&read_if(&session_path(claude_dir, pid)).await?)
 }
 
 /// The newest `.jsonl` in the project directory modified at or after session
