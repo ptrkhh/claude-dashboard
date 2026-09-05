@@ -29,7 +29,7 @@ pub struct Runner {
     log: Arc<LogBuffer>,
     failed: Mutex<HashSet<String>>,
     /// Prepended to every command: `["wsl.exe", "--exec", "/usr/bin/env",
-    /// "PATH=…", "LC_ALL=C"]` turns this runner into the WSL side's. Empty for
+    /// "PATH=…", "LC_NUMERIC=C"]` turns this runner into the WSL side's. Empty for
     /// native.
     prefix: Vec<String>,
     /// Prepended to failure log lines so two sides sharing one log are told

@@ -43,8 +43,8 @@ pub fn parse_wsl_probe(out: &str) -> Option<WslProbe> {
 
 /// The command prefix that turns a native `Runner` into the WSL side's:
 /// `--exec` skips the distro's shell so arguments arrive unchanged, and `env`
-/// applies the probed login PATH and a C locale without sourcing a profile
-/// per call.
+/// applies the probed login PATH and a C numeric locale without sourcing a
+/// profile per call.
 pub fn wsl_prefix(distro_flag: Option<&str>, path: &str) -> Vec<String> {
     let mut v = vec!["wsl.exe".to_string()];
     if let Some(d) = distro_flag {
@@ -55,8 +55,11 @@ pub fn wsl_prefix(distro_flag: Option<&str>, path: &str) -> Vec<String> {
     v.push("/usr/bin/env".to_string());
     v.push(format!("PATH={path}"));
     // `ps` prints %cpu through the C library's locale; under a comma-decimal
-    // one every row would fail to parse and the alive set would empty.
-    v.push("LC_ALL=C".to_string());
+    // one every row would fail to parse and the alive set would empty. The
+    // numeric category only: this prefix wraps every WSL-side command, and a
+    // blanket C locale would strip UTF-8 from LC_CTYPE for the tmux server
+    // and the claude TUI inside it.
+    v.push("LC_NUMERIC=C".to_string());
     v
 }
 
@@ -216,11 +219,11 @@ mod tests {
     fn the_prefix_names_the_distro_only_when_asked() {
         assert_eq!(
             wsl_prefix(None, "/usr/bin"),
-            vec!["wsl.exe", "--exec", "/usr/bin/env", "PATH=/usr/bin", "LC_ALL=C"]
+            vec!["wsl.exe", "--exec", "/usr/bin/env", "PATH=/usr/bin", "LC_NUMERIC=C"]
         );
         assert_eq!(
             wsl_prefix(Some("Debian"), "/usr/bin"),
-            vec!["wsl.exe", "-d", "Debian", "--exec", "/usr/bin/env", "PATH=/usr/bin", "LC_ALL=C"]
+            vec!["wsl.exe", "-d", "Debian", "--exec", "/usr/bin/env", "PATH=/usr/bin", "LC_NUMERIC=C"]
         );
     }
 
