@@ -80,15 +80,19 @@ pub async fn get_browse(
     let home = crate::host::path::home().to_string_lossy().into_owned();
     let target = q.get("path").filter(|p| !p.is_empty()).cloned().unwrap_or(home);
     let hidden = q.get("hidden").map(|h| h == "1").unwrap_or(false);
-    Ok(Json(list_dirs(&target, hidden, &browse_roots(&ctx)).await?).into_response())
+    // Computed only for the roots view: `browse_roots` probes every drive
+    // letter, and an ordinary folder click must not pay for that on Windows.
+    let roots =
+        if cfg!(windows) && target == "/" { browse_roots(&ctx).await } else { Vec::new() };
+    Ok(Json(list_dirs(&target, hidden, &roots).await?).into_response())
 }
 
 /// What `/` lists on Windows: every drive, then the WSL share root when there
 /// is a WSL side. Nothing elsewhere — `/` is the real root.
-fn browse_roots(ctx: &Ctx) -> Vec<String> {
+async fn browse_roots(ctx: &Ctx) -> Vec<String> {
     #[cfg(windows)]
     {
-        let mut roots = crate::collect::browse::drive_roots();
+        let mut roots = crate::collect::browse::drive_roots().await;
         if let Some(w) = ctx.wsl_paths() {
             roots.push(format!("{}\\", w.unc_root));
         }

@@ -321,7 +321,11 @@ function folderRow(name, path) {
     </button>${starBtn(path)}</div>`;
 }
 function placeRow(path, icon) {
-  const name = path.split(/[\\/]/).filter(Boolean).pop() || path;
+  // `\` is a legal filename character on Linux, so only a Windows-shaped path
+  // (a drive letter or a UNC share) splits on it too — everything else splits
+  // on `/` alone, as before.
+  const winShaped = /^[a-zA-Z]:|^\\\\/.test(path);
+  const name = path.split(winShaped ? /[\\/]/ : '/').filter(Boolean).pop() || path;
   return `<div class="pk-row">
     <button class="pk-main" type="button" data-pick="${esc(path)}">
       <span class="pk-icon">${icon}</span>

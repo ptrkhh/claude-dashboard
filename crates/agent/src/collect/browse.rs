@@ -74,19 +74,36 @@ pub fn crumbs_for(abs: &Path) -> Vec<Crumb> {
                     path: acc.to_string_lossy().into_owned(),
                 });
             }
-            Component::CurDir | Component::ParentDir => {}
+            // `absolute()` does not resolve `..` (verified: on Unix
+            // `absolute("/a/../b")` stays `/a/../b`), so a `..` reaching here
+            // is real and must walk the crumb trail back lexically — else the
+            // last crumb would link somewhere other than what is displayed.
+            // `acc.pop()` is `Path::parent()`-shaped: at a root it is a no-op,
+            // so `/..` behaves as `/` rather than underflowing the trail.
+            Component::ParentDir => {
+                if acc.pop() {
+                    out.pop();
+                }
+            }
+            Component::CurDir => {}
         }
     }
     out
 }
 
-/// Every drive letter whose root exists, as `X:\`.
+/// Every drive letter whose root exists, as `X:\`. `tokio::fs`, like the rest
+/// of this module: a disconnected mapped drive can hang on the attribute
+/// check, and this runs inside an async handler with no `spawn_blocking`.
 #[cfg(windows)]
-pub fn drive_roots() -> Vec<String> {
-    ('A'..='Z')
-        .map(|d| format!("{d}:\\"))
-        .filter(|r| Path::new(r).is_dir())
-        .collect()
+pub async fn drive_roots() -> Vec<String> {
+    let mut out = Vec::new();
+    for d in 'A'..='Z' {
+        let r = format!("{d}:\\");
+        if tokio::fs::metadata(&r).await.map(|m| m.is_dir()).unwrap_or(false) {
+            out.push(r);
+        }
+    }
+    out
 }
 
 /// Folders only — a project directory is what is being chosen — plus symlinks,
@@ -177,6 +194,55 @@ mod tests {
             assert_eq!(pairs.first().map(|p| p.0), Some("/"));
         } else {
             assert_eq!(pairs, vec![("/", "/"), ("a", "/a"), ("b", "/a/b")]);
+        }
+    }
+
+    #[test]
+    fn crumbs_for_the_bare_root() {
+        let c = crumbs_for(Path::new("/"));
+        let pairs: Vec<(&str, &str)> = c.iter().map(|x| (x.name.as_str(), x.path.as_str())).collect();
+        if cfg!(windows) {
+            assert_eq!(pairs.first().map(|p| p.0), Some("/"));
+        } else {
+            assert_eq!(pairs, vec![("/", "/")]);
+        }
+    }
+
+    #[test]
+    fn crumbs_for_a_single_segment_path() {
+        let c = crumbs_for(Path::new("/a"));
+        let pairs: Vec<(&str, &str)> = c.iter().map(|x| (x.name.as_str(), x.path.as_str())).collect();
+        if cfg!(windows) {
+            assert_eq!(pairs.first().map(|p| p.0), Some("/"));
+        } else {
+            assert_eq!(pairs, vec![("/", "/"), ("a", "/a")]);
+        }
+    }
+
+    #[test]
+    fn a_parent_dir_component_walks_the_crumb_trail_back_lexically() {
+        // Fix round 1, Finding 1: `absolute()` does not resolve `..`
+        // (verified: on Unix `absolute("/a/../b")` stays `/a/../b`), so a `..`
+        // reaching here is real. The last crumb must name the directory
+        // actually being displayed, not one built by literally walking into
+        // a path beside it.
+        let c = crumbs_for(Path::new("/a/../b"));
+        let names: Vec<&str> = c.iter().map(|x| x.name.as_str()).collect();
+        assert_eq!(names.last(), Some(&"b"), "{names:?}");
+        assert!(!names.contains(&"a"), "the popped crumb must not remain: {names:?}");
+        if !cfg!(windows) {
+            assert_eq!(c.last().unwrap().path, "/b");
+        }
+    }
+
+    #[test]
+    fn a_parent_dir_above_the_root_does_not_underflow_the_trail() {
+        let c = crumbs_for(Path::new("/.."));
+        let pairs: Vec<(&str, &str)> = c.iter().map(|x| (x.name.as_str(), x.path.as_str())).collect();
+        if cfg!(windows) {
+            assert_eq!(pairs.first().map(|p| p.0), Some("/"));
+        } else {
+            assert_eq!(pairs, vec![("/", "/")], "`/..` behaves as `/`, not empty or panicking");
         }
     }
 
