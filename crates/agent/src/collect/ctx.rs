@@ -1,9 +1,12 @@
 use super::cache::TranscriptCache;
 use super::git::GitCache;
+use super::side::Side;
 use crate::host::cmd::Runner;
 use crate::host::init::Host;
+use crate::host::wsl::WslPaths;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 /// What the dashboard knows about a session it launched itself. Mirrors the
@@ -32,6 +35,13 @@ pub struct Ctx {
     /// Set once at boot when `CDASH_AUTH` includes `password`. A `OnceLock`
     /// because `Ctx` is shared behind an `Arc` by the time the policy exists.
     pub password: std::sync::OnceLock<crate::auth::login::PasswordState>,
+    /// Every Claude installation this agent can see. The native side is first
+    /// and always present; a WSL side is appended at boot on Windows. Fixed
+    /// once `Ctx` is shared.
+    pub sides: Vec<Side>,
+    /// Set the first time the WSL side's poll time-box fires, so it is logged
+    /// once and not every four seconds.
+    pub wsl_poll_timed_out: AtomicBool,
 }
 
 impl Ctx {
@@ -42,6 +52,7 @@ impl Ctx {
         let runner = Arc::new(Runner::new(host.path.clone(), Arc::clone(&host.log)));
         Self {
             places_file: claude_dir.join("cdash-places.json"),
+            sides: vec![Side::native(claude_dir.clone(), Arc::clone(&runner))],
             host,
             runner,
             claude_dir,
@@ -51,7 +62,16 @@ impl Ctx {
             transcripts: TranscriptCache::new(),
             git: Arc::new(GitCache::new()),
             password: std::sync::OnceLock::new(),
+            wsl_poll_timed_out: AtomicBool::new(false),
         }
+    }
+
+    pub fn native(&self) -> &Side {
+        &self.sides[0]
+    }
+
+    pub fn wsl_paths(&self) -> Option<&WslPaths> {
+        self.sides.iter().find_map(|s| s.wsl.as_ref())
     }
 
     pub fn meta_get(&self, name: &str) -> Option<Meta> {

@@ -25,9 +25,11 @@ pub const MODELS: &[&str] = &["sonnet", "opus", "haiku", "fable"];
 /// Mirrors `EFFORTS` (`lib/collect.js:109`).
 pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
-/// Mirrors `assertPath` (`server.js:28-30`).
+/// Mirrors `assertPath` (`server.js:28-30`), extended to the platform's path
+/// shapes (spec §4): a drive, a `\\wsl…` share or a `/` path on Windows, `/`
+/// only elsewhere. Shape only — routing to a side is `side::side_for`.
 pub fn assert_path(p: &str) -> Result<(), BadRequest> {
-    if std::path::Path::new(p).is_absolute() {
+    if super::side::path_is_valid(p) {
         Ok(())
     } else {
         Err(BadRequest(format!("bad path: {p}")))
@@ -89,6 +91,9 @@ mod tests {
         assert!(assert_path("/home/x").is_ok());
         assert!(assert_path("relative/x").is_err());
         assert!(assert_path("").is_err());
+        // A traversal only reaches this guard in relative form: it has no root
+        // to confine to, it guards a stored favourite, not a read.
+        assert!(assert_path("../../etc/passwd").is_err());
     }
 
     #[test]
