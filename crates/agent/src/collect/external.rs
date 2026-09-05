@@ -1,6 +1,7 @@
-use super::ctx::Ctx;
+use super::ctx::{Ctx, Meta};
 use super::fsio::read_tail;
-use super::lookup::session_file_for;
+use super::lookup::{session_file_for, SessionFile};
+use super::side::Side;
 use crate::host::proc::ProcRow;
 use crate::parse::git::{parse_git_status, GitStatus};
 use crate::parse::paths::project_dir_name;
@@ -48,24 +49,24 @@ fn basename(p: &str) -> String {
         .unwrap_or_else(|| p.to_string())
 }
 
-/// Sessions this dashboard did not launch: every `~/.claude/sessions/<pid>.json`
-/// whose pid still belongs to Claude. Read-only — they live in terminals we do not own.
-pub async fn external_sessions(
-    ctx: &Arc<Ctx>,
+/// Every `<claude_dir>/sessions/<pid>.json` whose pid is a live `claude`
+/// process with a `cli` entrypoint, minus `exclude`. This is the one liveness
+/// predicate: the list uses it to show sessions, kill uses it to refuse a
+/// recycled pid. Session files outlive their process.
+pub async fn live_session_files(
+    side: &Side,
     rows: &[ProcRow],
-    pane_pids: &HashSet<i32>,
-    now_ms: f64,
-) -> Vec<Session> {
+    exclude: &HashSet<i32>,
+) -> Vec<(i32, SessionFile)> {
     let alive: HashSet<i32> = rows
         .iter()
         .filter(|r| r.name == "claude" || r.name == "claude.exe")
         .map(|r| r.pid)
         .collect();
-    let dir = ctx.claude_dir.join("sessions");
+    let dir = side.claude_dir.join("sessions");
     let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
         return Vec::new();
     };
-
     let mut out = Vec::new();
     while let Ok(Some(e)) = entries.next_entry().await {
         let p = e.path();
@@ -79,18 +80,41 @@ pub async fn external_sessions(
         else {
             continue;
         };
-        if pane_pids.contains(&pid) || !alive.contains(&pid) {
+        if exclude.contains(&pid) || !alive.contains(&pid) {
             continue;
         }
-        let Some(sess) = session_file_for(&ctx.claude_dir, pid).await else { continue };
-        let (Some(sid), Some(cwd)) = (sess.session_id.clone(), sess.cwd.clone()) else { continue };
+        let Some(sess) = session_file_for(&side.claude_dir, pid).await else { continue };
         // E1: 'cli' is a session someone is sitting in front of; 'sdk-cli' is
         // programmatic and not ours to show.
         if sess.entrypoint.as_deref() != Some("cli") {
             continue;
         }
+        out.push((pid, sess));
+    }
+    out
+}
 
-        let file = ctx
+/// Sessions known from their session files: ours when the `name` carries the
+/// `cdash-` prefix the launcher sets, external otherwise. On a tmux side the
+/// pane pids are excluded first, so a tmux session is never listed twice.
+pub async fn file_sessions(
+    ctx: &Arc<Ctx>,
+    side: &Side,
+    rows: &[ProcRow],
+    pane_pids: &HashSet<i32>,
+    now_ms: f64,
+) -> Vec<Session> {
+    let mut out = Vec::new();
+    for (pid, sess) in live_session_files(side, rows, pane_pids).await {
+        let (Some(sid), Some(cwd)) = (sess.session_id.clone(), sess.cwd.clone()) else { continue };
+        let name = sess.name.clone().filter(|n| !n.is_empty());
+        let ours = name.as_deref().is_some_and(|n| n.starts_with("cdash-"));
+        let meta = match &name {
+            Some(n) if ours => ctx.meta_get(n).unwrap_or_default(),
+            _ => Meta::default(),
+        };
+
+        let file = side
             .claude_dir
             .join("projects")
             .join(project_dir_name(&cwd))
@@ -107,29 +131,26 @@ pub async fn external_sessions(
             .map(|m| now_ms - super::cache::mtime_ms(m) < 10_000.0)
             .unwrap_or(false);
 
-        let usage = {
-            let mut s = ctx.host.sampler.lock().unwrap_or_else(|e| e.into_inner());
-            s.tree_usage(pid)
-        };
+        let usage = side.tree_usage(&ctx.host.sampler, rows, pid);
         let git_out =
-            Arc::clone(&ctx.git).status_for(Arc::clone(&ctx.runner), &cwd, now_ms as u64);
+            Arc::clone(&ctx.git).status_for(Arc::clone(&side.runner), &cwd, now_ms as u64);
+        let rc_link = meta.rc_link.clone().or_else(|| {
+            sess.bridge_session_id
+                .clone()
+                .map(|id| format!("https://claude.ai/code/{id}"))
+        });
 
         out.push(Session {
-            name: sess
-                .name
-                .filter(|n| !n.is_empty())
-                .unwrap_or_else(|| basename(&cwd)),
+            name: name.unwrap_or_else(|| basename(&cwd)),
             dir: cwd,
             pid,
             uptime_sec: sess
                 .started_at
                 .map(|t| (((now_ms - t) / 1000.0).round() as i64).max(0))
                 .unwrap_or(0),
-            model: None,
-            effort: None,
-            rc_link: sess
-                .bridge_session_id
-                .map(|id| format!("https://claude.ai/code/{id}")),
+            model: meta.model,
+            effort: meta.effort,
+            rc_link,
             git: git_out.as_deref().map(parse_git_status),
             working,
             last_message,
@@ -137,7 +158,7 @@ pub async fn external_sessions(
             cpu: usage.cpu,
             rss_kb: usage.rss_kb,
             cpu_sample_age_ms: usage.cpu_sample_age_ms,
-            external: true,
+            external: !ours,
         });
     }
     out
@@ -146,6 +167,7 @@ pub async fn external_sessions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::collect::ctx::Meta;
     use crate::host::log::LogBuffer;
     use std::path::PathBuf;
 
@@ -190,7 +212,8 @@ mod tests {
     async fn a_live_cli_session_is_reported() {
         let d = tempdir("live");
         write_session(&d, 500, CLI);
-        let out = external_sessions(&ctx_for(d), &rows(&[500]), &HashSet::new(), 61_000.0).await;
+        let ctx = ctx_for(d);
+        let out = file_sessions(&ctx, ctx.native(), &rows(&[500]), &HashSet::new(), 61_000.0).await;
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name, "api");
         assert_eq!(out[0].dir, "/proj");
@@ -203,7 +226,8 @@ mod tests {
     async fn a_name_less_session_falls_back_to_the_directory_basename() {
         let d = tempdir("noname");
         write_session(&d, 501, r#"{"sessionId":"s","cwd":"/a/proj","entrypoint":"cli"}"#);
-        let out = external_sessions(&ctx_for(d), &rows(&[501]), &HashSet::new(), 0.0).await;
+        let ctx = ctx_for(d);
+        let out = file_sessions(&ctx, ctx.native(), &rows(&[501]), &HashSet::new(), 0.0).await;
         assert_eq!(out[0].name, "proj");
         assert_eq!(out[0].uptime_sec, 0, "no startedAt means zero, not a negative age");
     }
@@ -214,7 +238,8 @@ mod tests {
         // sitting in front of. Showing them makes the list untrustworthy.
         let d = tempdir("sdk");
         write_session(&d, 502, r#"{"sessionId":"s","cwd":"/p","entrypoint":"sdk-cli"}"#);
-        let out = external_sessions(&ctx_for(d), &rows(&[502]), &HashSet::new(), 0.0).await;
+        let ctx = ctx_for(d);
+        let out = file_sessions(&ctx, ctx.native(), &rows(&[502]), &HashSet::new(), 0.0).await;
         assert!(out.is_empty());
     }
 
@@ -222,7 +247,8 @@ mod tests {
     async fn a_session_missing_its_entrypoint_is_excluded() {
         let d = tempdir("noentry");
         write_session(&d, 503, r#"{"sessionId":"s","cwd":"/p"}"#);
-        let out = external_sessions(&ctx_for(d), &rows(&[503]), &HashSet::new(), 0.0).await;
+        let ctx = ctx_for(d);
+        let out = file_sessions(&ctx, ctx.native(), &rows(&[503]), &HashSet::new(), 0.0).await;
         assert!(out.is_empty());
     }
 
@@ -231,7 +257,8 @@ mod tests {
         // E4: the session file outlives the process that wrote it.
         let d = tempdir("dead");
         write_session(&d, 504, CLI);
-        let out = external_sessions(&ctx_for(d), &rows(&[999]), &HashSet::new(), 0.0).await;
+        let ctx = ctx_for(d);
+        let out = file_sessions(&ctx, ctx.native(), &rows(&[999]), &HashSet::new(), 0.0).await;
         assert!(out.is_empty());
     }
 
@@ -242,7 +269,8 @@ mod tests {
         let mut live = rows(&[504]);
         live[0].name = "bash".into();
 
-        let out = external_sessions(&ctx_for(d), &live, &HashSet::new(), 0.0).await;
+        let ctx = ctx_for(d);
+        let out = file_sessions(&ctx, ctx.native(), &live, &HashSet::new(), 0.0).await;
 
         assert!(out.is_empty());
     }
@@ -253,7 +281,8 @@ mod tests {
         let d = tempdir("dupe");
         write_session(&d, 505, CLI);
         let panes: HashSet<i32> = [505].into_iter().collect();
-        let out = external_sessions(&ctx_for(d), &rows(&[505]), &panes, 0.0).await;
+        let ctx = ctx_for(d);
+        let out = file_sessions(&ctx, ctx.native(), &rows(&[505]), &panes, 0.0).await;
         assert!(out.is_empty());
     }
 
@@ -262,7 +291,8 @@ mod tests {
         let d = tempdir("partial");
         write_session(&d, 506, r#"{"cwd":"/p","entrypoint":"cli"}"#);
         write_session(&d, 507, r#"{"sessionId":"s","entrypoint":"cli"}"#);
-        let out = external_sessions(&ctx_for(d), &rows(&[506, 507]), &HashSet::new(), 0.0).await;
+        let ctx = ctx_for(d);
+        let out = file_sessions(&ctx, ctx.native(), &rows(&[506, 507]), &HashSet::new(), 0.0).await;
         assert!(out.is_empty());
     }
 
@@ -272,7 +302,8 @@ mod tests {
         let d = tempdir("junk");
         std::fs::write(d.join("sessions/notes.txt"), "x").unwrap();
         std::fs::write(d.join("sessions/abc.json"), CLI).unwrap();
-        let out = external_sessions(&ctx_for(d), &rows(&[1]), &HashSet::new(), 0.0).await;
+        let ctx = ctx_for(d);
+        let out = file_sessions(&ctx, ctx.native(), &rows(&[1]), &HashSet::new(), 0.0).await;
         assert!(out.is_empty());
     }
 
@@ -281,7 +312,49 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cdash-ext-none-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let out = external_sessions(&ctx_for(dir), &rows(&[1]), &HashSet::new(), 0.0).await;
+        let ctx = ctx_for(dir);
+        let out = file_sessions(&ctx, ctx.native(), &rows(&[1]), &HashSet::new(), 0.0).await;
         assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_cdash_named_session_is_ours_and_carries_its_meta() {
+        // Without tmux there is no session name to match: the `--name` the
+        // launcher passes is the only durable mark of a session we started.
+        let d = tempdir("ours");
+        write_session(
+            &d,
+            508,
+            r#"{"sessionId":"s-8","cwd":"/proj","entrypoint":"cli","name":"cdash-proj-1200-abc","bridgeSessionId":"session_ours"}"#,
+        );
+        let ctx = ctx_for(d);
+        ctx.meta_set(
+            "cdash-proj-1200-abc",
+            Meta { model: Some("opus".into()), effort: Some("high".into()), rc_link: None },
+        );
+        let out = file_sessions(&ctx, ctx.native(), &rows(&[508]), &HashSet::new(), 0.0).await;
+        assert_eq!(out.len(), 1);
+        assert!(!out[0].external, "a cdash- name is a session this dashboard launched");
+        assert_eq!(out[0].name, "cdash-proj-1200-abc");
+        assert_eq!(out[0].model.as_deref(), Some("opus"));
+        assert_eq!(out[0].rc_link.as_deref(), Some("https://claude.ai/code/session_ours"));
+    }
+
+    #[tokio::test]
+    async fn live_session_files_applies_the_liveness_predicate() {
+        // Kill reuses this: a stale file whose pid was recycled must never
+        // match, or taskkill would reach a foreign process.
+        // Not tempdir("live"): `a_live_cli_session_is_reported` already owns
+        // that directory and these tests run in parallel.
+        let d = tempdir("liveness");
+        write_session(&d, 600, CLI);
+        write_session(&d, 601, CLI);
+        write_session(&d, 602, r#"{"sessionId":"s","cwd":"/p","entrypoint":"sdk-cli"}"#);
+        let ctx = ctx_for(d);
+        let mut live = rows(&[600, 602]);
+        live.push(ProcRow { pid: 601, ppid: 1, name: "bash".into(), cpu: 0.0, rss_kb: 1 });
+        let files = live_session_files(ctx.native(), &live, &HashSet::new()).await;
+        let pids: Vec<i32> = files.iter().map(|(p, _)| *p).collect();
+        assert_eq!(pids, vec![600], "601 is a recycled pid, 602 is not a cli session");
     }
 }

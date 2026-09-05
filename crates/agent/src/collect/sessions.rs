@@ -1,9 +1,10 @@
 use super::ctx::{Ctx, Meta};
-use super::external::{external_sessions, Session};
+use super::external::{file_sessions, Session};
 use super::fsio::{read_if, read_tail};
 use super::lookup::{session_file_for, transcript_for};
-use crate::host::disk::{disk_usage, DiskUsage};
-
+use super::side::{Backend, Side};
+use crate::host::cmd::DEFAULT_TIMEOUT;
+use crate::host::disk::{disk_usage, root_mount, DiskUsage};
 use crate::parse::git::parse_git_status;
 use crate::parse::history::group_history;
 use crate::parse::paths::project_dir_name;
@@ -12,6 +13,7 @@ use crate::parse::transcript::parse_transcript;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 /// Mirrors the `resumable.length >= 20` break (`lib/collect.js:269`).
@@ -52,98 +54,98 @@ fn now_ms() -> f64 {
         .unwrap_or(0.0)
 }
 
-pub async fn collect_sessions(ctx: &Arc<Ctx>) -> SessionsResponse {
-    let panes_out = ctx
-        .runner
-        .run("tmux", &["list-panes", "-a", "-F", PANE_FORMAT], "tmux list-panes")
-        .await;
-    let panes = parse_tmux_panes(&panes_out);
-    let now = now_ms();
-
+/// One side's running and resumable sessions. On a tmux side the pane loop
+/// runs first and its pids are excluded from the session-file scan; on a
+/// console side the scan is the whole list.
+async fn collect_side(ctx: &Arc<Ctx>, side: &Side, now: f64) -> (Vec<Session>, Vec<Resumable>) {
     // One sample serves every session in this response; the 200 ms rule lives
     // inside `Sampler` and must not be re-implemented here.
-    let rows = {
-        let mut s = ctx.host.sampler.lock().unwrap_or_else(|e| e.into_inner());
-        s.sample()
-    };
-
+    let rows = side.proc_rows(&ctx.host.sampler).await;
     let mut running: Vec<Session> = Vec::new();
-    for p in &panes {
-        let meta = ctx.meta_get(&p.name).unwrap_or_default();
-        let sess = session_file_for(&ctx.claude_dir, p.pid).await;
+    let mut pane_pids: HashSet<i32> = HashSet::new();
 
-        let rc_link = meta.rc_link.clone().or_else(|| {
-            sess.as_ref()
-                .and_then(|s| s.bridge_session_id.clone())
-                .map(|id| format!("https://claude.ai/code/{id}"))
-        });
-        // D9: memoize a link discovered from the session file, so a later poll
-        // does not have to rediscover it.
-        if rc_link.is_some() && meta.rc_link.is_none() {
-            ctx.meta_set(&p.name, Meta { rc_link: rc_link.clone(), ..meta.clone() });
-        }
+    if matches!(side.backend, Backend::Tmux) {
+        let panes_out = side
+            .runner
+            .run("tmux", &["list-panes", "-a", "-F", PANE_FORMAT], "tmux list-panes")
+            .await;
+        for p in parse_tmux_panes(&panes_out) {
+            pane_pids.insert(p.pid);
+            let meta = ctx.meta_get(&p.name).unwrap_or_default();
+            let sess = session_file_for(&side.claude_dir, p.pid).await;
 
-        // Prefer the pane's own session id; only guess from mtime when the
-        // session file has no id yet — several panes can share one cwd.
-        let mut tr: Option<(PathBuf, f64)> = None;
-        if let Some(sid) = sess.as_ref().and_then(|s| s.session_id.clone()) {
-            let cwd = sess
-                .as_ref()
-                .and_then(|s| s.cwd.clone())
-                .unwrap_or_else(|| p.path.clone());
-            let file = ctx
-                .claude_dir
-                .join("projects")
-                .join(project_dir_name(&cwd))
-                .join(format!("{sid}.jsonl"));
-            if let Ok(md) = tokio::fs::metadata(&file).await {
-                tr = Some((file, super::cache::mtime_ms(&md)));
+            let rc_link = meta.rc_link.clone().or_else(|| {
+                sess.as_ref()
+                    .and_then(|s| s.bridge_session_id.clone())
+                    .map(|id| format!("https://claude.ai/code/{id}"))
+            });
+            // D9: memoize a link discovered from the session file, so a later
+            // poll does not have to rediscover it.
+            if rc_link.is_some() && meta.rc_link.is_none() {
+                ctx.meta_set(&p.name, Meta { rc_link: rc_link.clone(), ..meta.clone() });
             }
-        }
-        if tr.is_none() {
-            tr = transcript_for(&ctx.claude_dir, &p.path, p.created).await;
-        }
 
-        let (mut working, mut last_message, mut sid) = (false, None, None);
-        if let Some((file, mtime)) = &tr {
-            working = now - mtime < 10_000.0;
-            sid = file.file_stem().map(|s| s.to_string_lossy().into_owned());
-            if let Some(txt) = read_tail(file).await {
-                last_message = parse_transcript(&txt).last_assistant_text;
+            // Prefer the pane's own session id; only guess from mtime when the
+            // session file has no id yet — several panes can share one cwd.
+            let mut tr: Option<(PathBuf, f64)> = None;
+            if let Some(sid) = sess.as_ref().and_then(|s| s.session_id.clone()) {
+                let cwd = sess
+                    .as_ref()
+                    .and_then(|s| s.cwd.clone())
+                    .unwrap_or_else(|| p.path.clone());
+                let file = side
+                    .claude_dir
+                    .join("projects")
+                    .join(project_dir_name(&cwd))
+                    .join(format!("{sid}.jsonl"));
+                if let Ok(md) = tokio::fs::metadata(&file).await {
+                    tr = Some((file, super::cache::mtime_ms(&md)));
+                }
             }
+            if tr.is_none() {
+                tr = transcript_for(&side.claude_dir, &p.path, p.created).await;
+            }
+
+            let (mut working, mut last_message, mut sid) = (false, None, None);
+            if let Some((file, mtime)) = &tr {
+                working = now - mtime < 10_000.0;
+                sid = file.file_stem().map(|s| s.to_string_lossy().into_owned());
+                if let Some(txt) = read_tail(file).await {
+                    last_message = parse_transcript(&txt).last_assistant_text;
+                }
+            }
+
+            let usage = side.tree_usage(&ctx.host.sampler, &rows, p.pid);
+            let git_out = Arc::clone(&ctx.git).status_for(
+                Arc::clone(&side.runner),
+                &p.path,
+                now as u64,
+            );
+
+            running.push(Session {
+                name: p.name.clone(),
+                dir: p.path.clone(),
+                pid: p.pid,
+                uptime_sec: ((now / 1000.0 - p.created as f64).round() as i64).max(0),
+                model: meta.model.clone(),
+                effort: meta.effort.clone(),
+                rc_link,
+                git: git_out.as_deref().map(parse_git_status),
+                working,
+                last_message,
+                sid,
+                cpu: usage.cpu,
+                rss_kb: usage.rss_kb,
+                cpu_sample_age_ms: usage.cpu_sample_age_ms,
+                external: false,
+            });
         }
-
-        let cpu_state = {
-            let mut s = ctx.host.sampler.lock().unwrap_or_else(|e| e.into_inner());
-            s.tree_usage(p.pid)
-        };
-        let git_out =
-            Arc::clone(&ctx.git).status_for(Arc::clone(&ctx.runner), &p.path, now as u64);
-
-        running.push(Session {
-            name: p.name.clone(),
-            dir: p.path.clone(),
-            pid: p.pid,
-            uptime_sec: ((now / 1000.0 - p.created as f64).round() as i64).max(0),
-            model: meta.model.clone(),
-            effort: meta.effort.clone(),
-            rc_link,
-            git: git_out.as_deref().map(parse_git_status),
-            working,
-            last_message,
-            sid,
-            cpu: cpu_state.cpu,
-            rss_kb: cpu_state.rss_kb,
-            cpu_sample_age_ms: cpu_state.cpu_sample_age_ms,
-            external: false,
-        });
     }
 
-    let pane_pids: HashSet<i32> = panes.iter().map(|p| p.pid).collect();
-    running.extend(external_sessions(ctx, &rows, &pane_pids, now).await);
+    running.extend(file_sessions(ctx, side, &rows, &pane_pids, now).await);
 
     let running_sids: HashSet<String> = running.iter().filter_map(|r| r.sid.clone()).collect();
-    let hist = read_if(&ctx.claude_dir.join("history.jsonl")).await.unwrap_or_default();
+    let hist = read_if(&side.claude_dir.join("history.jsonl")).await.unwrap_or_default();
 
     let mut resumable = Vec::new();
     for g in group_history(&hist) {
@@ -155,7 +157,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>) -> SessionsResponse {
         {
             continue;
         }
-        let file = ctx
+        let file = side
             .claude_dir
             .join("projects")
             .join(project_dir_name(g.cwd.as_deref().unwrap_or("")))
@@ -177,13 +179,48 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>) -> SessionsResponse {
             prompts: g.prompts,
         });
     }
+    (running, resumable)
+}
+
+pub async fn collect_sessions(ctx: &Arc<Ctx>) -> SessionsResponse {
+    let now = now_ms();
+    let mut running: Vec<Session> = Vec::new();
+    let mut resumable: Vec<Resumable> = Vec::new();
+
+    for side in &ctx.sides {
+        let part = if side.is_wsl() {
+            // `tokio::fs` over the share has no time-box of its own, and the
+            // 5-second rule exists because one 9P stall once froze every poll
+            // for a minute. On expiry the side is empty for this poll.
+            match tokio::time::timeout(DEFAULT_TIMEOUT, collect_side(ctx, side, now)).await {
+                Ok(p) => p,
+                Err(_) => {
+                    if !ctx.wsl_poll_timed_out.swap(true, Ordering::Relaxed) {
+                        ctx.host.log.push(format!(
+                            "wsl poll timed out after {}ms; WSL side empty until it answers",
+                            DEFAULT_TIMEOUT.as_millis()
+                        ));
+                    }
+                    (Vec::new(), Vec::new())
+                }
+            }
+        } else {
+            collect_side(ctx, side, now).await
+        };
+        running.extend(part.0);
+        resumable.extend(part.1);
+    }
+
+    // Each side capped itself; the merge is sorted and capped again.
+    resumable.sort_by(|a, b| b.ts.partial_cmp(&a.ts).unwrap_or(std::cmp::Ordering::Equal));
+    resumable.truncate(RESUMABLE_MAX);
 
     let machine = {
         let mut s = ctx.host.sampler.lock().unwrap_or_else(|e| e.into_inner());
         s.machine_stats()
     };
     let mut disks: Vec<DiskUsage> = Vec::new();
-    if let Some(d) = disk_usage(&crate::host::disk::root_mount()) {
+    if let Some(d) = disk_usage(&root_mount()) {
         disks.push(d);
     }
     if let Some(extra) = ctx.disk_extra.as_deref() {
@@ -323,81 +360,109 @@ mod tests {
         assert!(r.stats.disks[0].total_kb > 0);
     }
 
-    /// Put a stub `tmux` on a private PATH so the pane branch of
-    /// `collect_sessions` can be exercised without a real server. Without this
-    /// the whole pane loop — the majority of the function — has no test at all.
-    #[cfg(unix)]
-    fn fake_tmux(dir: &Path, pane_line: &str) -> String {
-        let bin = dir.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let script = format!(
-            "#!/bin/sh\ncase \"$1\" in\n  list-panes) echo '{pane_line}' ;;\n  *) echo '' ;;\nesac\n"
-        );
-        let p = bin.join("tmux");
-        std::fs::write(&p, script).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        bin.to_string_lossy().into_owned()
-    }
+    #[tokio::test]
+    async fn resumable_rows_from_every_side_are_merged_newest_first() {
+        // Two sides here are two native sides pointing at two Claude dirs —
+        // the merge does not care what a side is, only what its history says.
+        let d1 = tempdir("merge-1");
+        let d2 = tempdir("merge-2");
+        let a = seed(&d1, "aaa", "/p/a", 100, 3);
+        let b = seed(&d2, "bbb", "/p/b", 300, 3);
+        std::fs::write(d1.join("history.jsonl"), a).unwrap();
+        std::fs::write(d2.join("history.jsonl"), b).unwrap();
 
-    #[cfg(unix)]
-    fn ctx_with_path(claude_dir: PathBuf, path: String) -> Arc<Ctx> {
         let log = Arc::new(LogBuffer::new());
+        let path = std::env::var("PATH").unwrap_or_default();
         let host = crate::host::init::Host {
             runner: crate::host::cmd::Runner::new(path.clone(), Arc::clone(&log)),
             log,
             path,
             sampler: std::sync::Mutex::new(crate::host::sample::Sampler::new()),
         };
-        Arc::new(Ctx::new(host, claude_dir, None))
+        let mut c = Ctx::new(host, d1, None);
+        c.sides.push(crate::collect::side::Side::native(d2, Arc::clone(&c.runner)));
+
+        let r = collect_sessions(&Arc::new(c)).await;
+        let sids: Vec<&str> = r.resumable.iter().map(|x| x.sid.as_str()).collect();
+        assert_eq!(sids, vec!["bbb", "aaa"], "the second side's newer row sorts first");
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn a_pane_becomes_a_running_session_carrying_its_rc_link() {
-        let d = tempdir("pane");
-        std::fs::write(d.join("history.jsonl"), "").unwrap();
-        std::fs::write(
-            d.join("sessions/4242.json"),
-            r#"{"sessionId":"s-9","cwd":"/proj","bridgeSessionId":"session_pane"}"#,
-        )
-        .unwrap();
-        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000|/proj");
-        let ctx = ctx_with_path(d, path);
+    mod tmux_tests {
+        use super::*;
 
-        let r = collect_sessions(&ctx).await;
-        assert_eq!(r.running.len(), 1);
-        assert_eq!(r.running[0].name, "cdash-test-1200-abc");
-        assert_eq!(r.running[0].dir, "/proj");
-        assert_eq!(r.running[0].pid, 4242);
-        assert_eq!(
-            r.running[0].rc_link.as_deref(),
-            Some("https://claude.ai/code/session_pane")
-        );
-    }
+        /// Put a stub `tmux` on a private PATH so the pane branch of
+        /// `collect_sessions` can be exercised without a real server. Without this
+        /// the whole pane loop — the majority of the function — has no test at all.
+        fn fake_tmux(dir: &Path, pane_line: &str) -> String {
+            let bin = dir.join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let script = format!(
+                "#!/bin/sh\ncase \"$1\" in\n  list-panes) echo '{pane_line}' ;;\n  *) echo '' ;;\nesac\n"
+            );
+            let p = bin.join("tmux");
+            std::fs::write(&p, script).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            bin.to_string_lossy().into_owned()
+        }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_link_discovered_from_the_session_file_is_memoized_into_meta() {
-        // D9: rediscovering it on every 4s poll is wasted work, and the meta
-        // entry is what survives the session file being rewritten.
-        let d = tempdir("memo");
-        std::fs::write(d.join("history.jsonl"), "").unwrap();
-        std::fs::write(
-            d.join("sessions/777.json"),
-            r#"{"sessionId":"s-7","cwd":"/proj","bridgeSessionId":"session_memo"}"#,
-        )
-        .unwrap();
-        let path = fake_tmux(&d, "cdash-memo-1200-xyz|777|1785050000|/proj");
-        let ctx = ctx_with_path(d, path);
+        fn ctx_with_path(claude_dir: PathBuf, path: String) -> Arc<Ctx> {
+            let log = Arc::new(LogBuffer::new());
+            let host = crate::host::init::Host {
+                runner: crate::host::cmd::Runner::new(path.clone(), Arc::clone(&log)),
+                log,
+                path,
+                sampler: std::sync::Mutex::new(crate::host::sample::Sampler::new()),
+            };
+            Arc::new(Ctx::new(host, claude_dir, None))
+        }
 
-        assert!(ctx.meta_get("cdash-memo-1200-xyz").is_none());
-        collect_sessions(&ctx).await;
-        assert_eq!(
-            ctx.meta_get("cdash-memo-1200-xyz").unwrap().rc_link.as_deref(),
-            Some("https://claude.ai/code/session_memo"),
-            "the discovered link must be remembered"
-        );
+        #[tokio::test]
+        async fn a_pane_becomes_a_running_session_carrying_its_rc_link() {
+            let d = tempdir("pane");
+            std::fs::write(d.join("history.jsonl"), "").unwrap();
+            std::fs::write(
+                d.join("sessions/4242.json"),
+                r#"{"sessionId":"s-9","cwd":"/proj","bridgeSessionId":"session_pane"}"#,
+            )
+            .unwrap();
+            let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000|/proj");
+            let ctx = ctx_with_path(d, path);
+
+            let r = collect_sessions(&ctx).await;
+            assert_eq!(r.running.len(), 1);
+            assert_eq!(r.running[0].name, "cdash-test-1200-abc");
+            assert_eq!(r.running[0].dir, "/proj");
+            assert_eq!(r.running[0].pid, 4242);
+            assert_eq!(
+                r.running[0].rc_link.as_deref(),
+                Some("https://claude.ai/code/session_pane")
+            );
+        }
+
+        #[tokio::test]
+        async fn a_link_discovered_from_the_session_file_is_memoized_into_meta() {
+            // D9: rediscovering it on every 4s poll is wasted work, and the meta
+            // entry is what survives the session file being rewritten.
+            let d = tempdir("memo");
+            std::fs::write(d.join("history.jsonl"), "").unwrap();
+            std::fs::write(
+                d.join("sessions/777.json"),
+                r#"{"sessionId":"s-7","cwd":"/proj","bridgeSessionId":"session_memo"}"#,
+            )
+            .unwrap();
+            let path = fake_tmux(&d, "cdash-memo-1200-xyz|777|1785050000|/proj");
+            let ctx = ctx_with_path(d, path);
+
+            assert!(ctx.meta_get("cdash-memo-1200-xyz").is_none());
+            collect_sessions(&ctx).await;
+            assert_eq!(
+                ctx.meta_get("cdash-memo-1200-xyz").unwrap().rc_link.as_deref(),
+                Some("https://claude.ai/code/session_memo"),
+                "the discovered link must be remembered"
+            );
+        }
     }
 
     #[test]
