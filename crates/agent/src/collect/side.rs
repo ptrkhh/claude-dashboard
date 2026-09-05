@@ -109,13 +109,14 @@ impl Side {
     }
 
     /// Binaries this side lacks, re-probed per call like the native list.
+    /// `run_checked` and not `run`: the swallowing `run` reports a stopped,
+    /// hung or absent distro as the empty list a fully-equipped side returns.
+    /// A side that could not be reached at all answers `["wsl unreachable"]`.
     pub async fn wsl_missing(&self) -> Vec<String> {
-        self.runner
-            .run("sh", &["-c", MISSING_SCRIPT], "wsl missing")
-            .await
-            .lines()
-            .map(str::to_string)
-            .collect()
+        match self.runner.run_checked("sh", &["-c", MISSING_SCRIPT], "wsl missing").await {
+            Ok(out) => out.lines().map(str::to_string).collect(),
+            Err(_) => vec!["wsl unreachable".to_string()],
+        }
     }
 }
 
@@ -269,6 +270,27 @@ mod tests {
         assert!(!s.is_wsl());
         assert_eq!(d, native_dir);
         assert!(side_for(&sides, "relative").is_err());
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_side_is_not_a_fully_equipped_one() {
+        // The defect this closes: `Runner::run` swallows, so a distro that is
+        // stopped or gone printed nothing — exactly what a distro with tmux,
+        // claude and git all installed prints.
+        let log = Arc::new(LogBuffer::new());
+        let dead = Side::native(
+            PathBuf::from("/tmp/.claude"),
+            Arc::new(Runner::new("/nonexistent-dir-for-test".to_string(), Arc::clone(&log))),
+        );
+        assert_eq!(dead.wsl_missing().await, vec!["wsl unreachable".to_string()]);
+
+        // A side that answered is never reported unreachable, whichever of the
+        // three binaries this host happens to have.
+        let live = Side::native(
+            PathBuf::from("/tmp/.claude"),
+            Arc::new(Runner::new(std::env::var("PATH").unwrap_or_default(), log)),
+        );
+        assert!(!live.wsl_missing().await.contains(&"wsl unreachable".to_string()));
     }
 
     #[test]
