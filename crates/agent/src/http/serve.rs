@@ -261,6 +261,68 @@ pub async fn serve(cfg: Config) -> std::io::Result<Bound> {
     Ok(Bound { addr, ctx, stop: stop_tx, task })
 }
 
+/// Everything `main` does after argument parsing, shared by the console
+/// binary and the windowless one: read the environment, name the two
+/// undiagnosable exposures, bind, print the banner, park. Failures exit the
+/// process with the codes the README documents; on success this never
+/// returns.
+pub async fn serve_from_env() {
+    let cfg = match Config::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            // A misconfiguration that would otherwise open the origin is
+            // refused at boot rather than debugged in production.
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
+    let (bind, port) = (cfg.bind, cfg.port);
+
+    // Both exposures are undiagnosable from their symptom, so they are named
+    // here rather than left for the operator to infer.
+    if !bind.is_loopback() && cfg.auth.is_open() {
+        eprintln!(
+            "warning: CDASH_BIND={bind} with CDASH_AUTH=none — every session runs with \
+             --dangerously-skip-permissions, so anyone who can reach this port has \
+             remote code execution on this host"
+        );
+    }
+    if cfg.password.as_ref().is_some_and(|p| !p.policy.secure_cookie) {
+        eprintln!(
+            "warning: CDASH_ALLOW_INSECURE_COOKIE=1 — the session cookie has lost Secure \
+             and the __Host- prefix and now crosses the wire in clear; anyone on the path \
+             can steal a logged-in session"
+        );
+    }
+
+    match serve(cfg).await {
+        Ok(b) => {
+            println!("cdash-agent {} on http://{}", env!("CARGO_PKG_VERSION"), b.addr);
+            let missing = b.ctx.host.missing();
+            if !missing.is_empty() {
+                println!("missing: {}", missing.join(", "));
+            }
+            // The task inside `serve` owns the accept loop; park here.
+            std::future::pending::<()>().await;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            // The spec's diagnosed condition: stderr, exit 3, no pidfile.
+            eprintln!("port {port} already in use");
+            std::process::exit(3);
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            // A startup refusal, e.g. cf-access could not obtain its keys.
+            // Named, non-zero, and nothing ever listened.
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+        Err(e) => {
+            eprintln!("cannot bind {bind}:{port}: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

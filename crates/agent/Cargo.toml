@@ -3,6 +3,7 @@ name = "cdash-agent"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.94.1"
+default-run = "cdash-agent"
 
 [lib]
 name = "cdash_agent"
@@ -11,6 +12,13 @@ path = "src/lib.rs"
 [[bin]]
 name = "cdash-agent"
 path = "src/main.rs"
+
+# Built for every platform, meaningful on Windows: see src/main_w.rs.
+[[bin]]
+name = "cdash-agentw"
+path = "src/main_w.rs"
+test = false
+bench = false
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
