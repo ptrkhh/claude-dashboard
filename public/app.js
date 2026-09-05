@@ -287,7 +287,7 @@ let favorites = [];     // cached from /api/places, for the star state
 
 function openPicker() {
   const typed = $('#dir').value.trim();
-  pkPath = typed.startsWith('/') ? typed : null; // seed from field, else server default (home)
+  pkPath = typed || null; // seed from any typed value; the dead-end guard falls back to home on a bad one
   api('/api/places').then(p => { favorites = p.favorites; }).catch(() => {}).finally(() => setTab('browse'));
   picker.showModal();
 }
@@ -321,7 +321,7 @@ function folderRow(name, path) {
     </button>${starBtn(path)}</div>`;
 }
 function placeRow(path, icon) {
-  const name = path.split('/').filter(Boolean).pop() || path;
+  const name = path.split(/[\\/]/).filter(Boolean).pop() || path;
   return `<div class="pk-row">
     <button class="pk-main" type="button" data-pick="${esc(path)}">
       <span class="pk-icon">${icon}</span>
@@ -338,7 +338,7 @@ async function browseTo(path) {
     const d = await api('/api/browse?' + q);
     pkPath = d.path;
     $('#picker-current').textContent = d.path;
-    renderCrumbs(d.path);
+    renderCrumbs(d.crumbs);
     pkList.innerHTML = d.entries.length
       ? d.entries.map(e => folderRow(e.name, e.path)).join('') + (d.truncated ? '<div class="picker-empty">…more folders not shown</div>' : '')
       : '<div class="picker-empty">No subfolders here — use “Use this folder” to pick it.</div>';
@@ -361,16 +361,13 @@ async function renderPlaces(tab) {
   } catch (err) { pkList.innerHTML = `<div class="picker-empty">${esc(err.message)}</div>`; }
 }
 
-function renderCrumbs(path) {
-  const parts = path.split('/').filter(Boolean);
-  let acc = '';
-  const out = [`<button class="picker-crumb" type="button" data-nav="/">/</button>`];
-  for (const part of parts) {
-    acc += '/' + part;
-    out.push('<span class="picker-crumb-sep">›</span>');
-    out.push(`<button class="picker-crumb" type="button" data-nav="${esc(acc)}">${esc(part)}</button>`);
-  }
-  pkCrumbs.innerHTML = out.join('');
+function renderCrumbs(crumbs) {
+  // The server builds the crumbs: this client never learns a path separator,
+  // so C:\Users and \\wsl.localhost\Ubuntu render the same way / does.
+  pkCrumbs.innerHTML = crumbs.map((c, i) =>
+    (i ? '<span class="picker-crumb-sep">›</span>' : '') +
+    `<button class="picker-crumb" type="button" data-nav="${esc(c.path)}">${esc(c.name)}</button>`
+  ).join('');
   pkCrumbs.scrollLeft = pkCrumbs.scrollWidth; // keep the deepest crumb in view
 }
 

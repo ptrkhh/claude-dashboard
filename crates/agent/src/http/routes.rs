@@ -73,11 +73,32 @@ pub async fn get_places(State(ctx): State<Arc<Ctx>>) -> Response {
     Json(read_places(&ctx.places_file).await).into_response()
 }
 
-pub async fn get_browse(Query(q): Query<HashMap<String, String>>) -> Result<Response, ApiError> {
+pub async fn get_browse(
+    State(ctx): State<Arc<Ctx>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Response, ApiError> {
     let home = crate::host::path::home().to_string_lossy().into_owned();
     let target = q.get("path").filter(|p| !p.is_empty()).cloned().unwrap_or(home);
     let hidden = q.get("hidden").map(|h| h == "1").unwrap_or(false);
-    Ok(Json(list_dirs(&target, hidden).await?).into_response())
+    Ok(Json(list_dirs(&target, hidden, &browse_roots(&ctx)).await?).into_response())
+}
+
+/// What `/` lists on Windows: every drive, then the WSL share root when there
+/// is a WSL side. Nothing elsewhere — `/` is the real root.
+fn browse_roots(ctx: &Ctx) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        let mut roots = crate::collect::browse::drive_roots();
+        if let Some(w) = ctx.wsl_paths() {
+            roots.push(format!("{}\\", w.unc_root));
+        }
+        roots
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = ctx;
+        Vec::new()
+    }
 }
 
 use crate::collect::places::{add_recent, toggle_favorite};
