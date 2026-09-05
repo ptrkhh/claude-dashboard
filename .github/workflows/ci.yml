@@ -70,21 +70,37 @@ jobs:
         run: |
           $env:PORT = '0'
           $p = Start-Process -FilePath target\release\cdash-agent.exe -PassThru -NoNewWindow -RedirectStandardOutput boot.log -RedirectStandardError boot.err
-          Start-Sleep -Seconds 5
+          # A hosted runner can be slow to get a freshly-built exe scanned and
+          # running (AV, cold TLS init), so poll the banner instead of a fixed
+          # sleep — but the pass condition stays exactly as strict.
+          $deadline = (Get-Date).AddSeconds(15)
+          $ok = $false
+          while ((Get-Date) -lt $deadline) {
+            if (Select-String -Path boot.log -Pattern 'cdash-agent .* on http://127.0.0.1:' -Quiet -ErrorAction SilentlyContinue) { $ok = $true; break }
+            Start-Sleep -Milliseconds 500
+          }
           Stop-Process -Id $p.Id -Force
           Get-Content boot.log, boot.err
-          if (-not (Select-String -Path boot.log -Pattern 'cdash-agent .* on http://127.0.0.1:' -Quiet)) { exit 1 }
+          if (-not $ok) { Write-Error "banner not found in boot.log within 15s"; exit 1 }
       - name: Execute the windowless binary
         shell: pwsh
         run: |
           $env:PORT = '18080'
-          $p = Start-Process -FilePath target\release\cdash-agentw.exe -PassThru
-          Start-Sleep -Seconds 5
-          try { $r = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18080/api/health } finally { Stop-Process -Id $p.Id -Force }
-          if ($r.Content -ne '{"ok":true}') { Write-Error "unexpected health body: $($r.Content)"; exit 1 }
+          $p = Start-Process -FilePath target\release\cdash-agentw.exe -PassThru -RedirectStandardOutput bootw.log -RedirectStandardError bootw.err
+          $deadline = (Get-Date).AddSeconds(15)
+          $body = $null
+          while ((Get-Date) -lt $deadline) {
+            try { $body = (Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18080/api/health -TimeoutSec 2).Content } catch { $body = $null }
+            if ($body -eq '{"ok":true}') { break }
+            Start-Sleep -Milliseconds 500
+          }
+          Stop-Process -Id $p.Id -Force
+          Get-Content bootw.log, bootw.err
+          if ($body -ne '{"ok":true}') { Write-Error "unexpected health body: $body"; exit 1 }
       - uses: actions/upload-artifact@v4
         with:
           name: cdash-agent-x86_64-pc-windows-msvc
           path: |
             target/release/cdash-agent.exe
             target/release/cdash-agentw.exe
+            public
