@@ -66,6 +66,20 @@ pub fn task_xml(exe: &str, working_dir: &str, user: &str) -> String {
     )
 }
 
+/// `DOMAIN\name` for the trigger and the principal. Refused rather than
+/// defaulted: a native `install` launched from a WSL shell inherits WSL's
+/// environment, where neither variable exists, and the empty halves would
+/// register the task against a principal that never logs on — an install
+/// that reports success and an agent that never starts.
+pub fn task_user(domain: &str, name: &str) -> Result<String, String> {
+    if domain.is_empty() || name.is_empty() {
+        return Err("USERDOMAIN and USERNAME must both be set; run install from a \
+                    Windows console, not a WSL shell"
+            .to_string());
+    }
+    Ok(format!("{domain}\\{name}"))
+}
+
 /// What `schtasks /Query /XML` exports: UTF-16LE with a byte-order mark.
 pub fn utf16le_bom(s: &str) -> Vec<u8> {
     let mut out = vec![0xFF, 0xFE];
@@ -92,11 +106,10 @@ pub async fn install(runner: &Runner) -> Result<String, String> {
             exe.display()
         ));
     }
-    let user = format!(
-        "{}\\{}",
-        std::env::var("USERDOMAIN").unwrap_or_default(),
-        std::env::var("USERNAME").unwrap_or_default()
-    );
+    let user = task_user(
+        &std::env::var("USERDOMAIN").unwrap_or_default(),
+        &std::env::var("USERNAME").unwrap_or_default(),
+    )?;
     let xml = task_xml(&agentw.to_string_lossy(), &dir.to_string_lossy(), &user);
     let tmp = std::env::temp_dir().join("cdash-agent-task.xml");
     std::fs::write(&tmp, utf16le_bom(&xml)).map_err(|e| format!("write {}: {e}", tmp.display()))?;
@@ -181,6 +194,18 @@ mod tests {
         assert!(xml.contains("<Command>e&lt;x&gt;e</Command>"), "{xml}");
         assert!(xml.contains("<WorkingDirectory>d&quot;ir</WorkingDirectory>"), "{xml}");
         assert!(xml.contains(r"<UserId>PC\o'e</UserId>"), "{xml}");
+    }
+
+    #[test]
+    fn a_user_missing_either_half_is_refused_before_any_xml_is_written() {
+        assert_eq!(task_user("PC", "pat").unwrap(), r"PC\pat");
+        // A native install run from a WSL shell inherits WSL's environment,
+        // where neither variable exists; `\` would register the task against
+        // a principal that never logs on.
+        for (domain, name) in [("", ""), ("", "pat"), ("PC", "")] {
+            let e = task_user(domain, name).unwrap_err();
+            assert!(e.contains("USERDOMAIN"), "{domain:?}/{name:?}: {e}");
+        }
     }
 
     #[test]
