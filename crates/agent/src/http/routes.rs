@@ -47,12 +47,20 @@ pub async fn get_sessions(State(ctx): State<Arc<Ctx>>) -> Response {
 /// Authenticated: it names the host's platform and which binaries are absent.
 /// `/api/health` is the unauthenticated one and says only `{ok:true}`.
 pub async fn get_hostinfo(State(ctx): State<Arc<Ctx>>) -> Response {
+    // Re-probed per request on both sides, never a boot-time cache: the setup
+    // screen's re-check button is worthless against a stale answer.
+    let wsl = match ctx.sides.iter().find(|s| s.is_wsl()) {
+        Some(s) => serde_json::json!({
+            "distro": s.wsl.as_ref().map(|w| w.distro.as_str()),
+            "missing": s.wsl_missing().await,
+        }),
+        None => serde_json::Value::Null,
+    };
     Json(serde_json::json!({
         "platform": std::env::consts::OS,
         "version": env!("CARGO_PKG_VERSION"),
-        // Re-probed per request, never a boot-time cache: the setup screen's
-        // re-check button is worthless against a stale answer.
         "missing": ctx.host.missing(),
+        "wsl": wsl,
     }))
     .into_response()
 }
@@ -237,6 +245,19 @@ mod tests {
         let b = serve(cfg_for(tempdir("hostinfo-recheck"))).await.unwrap();
         let url = format!("http://{}/api/hostinfo", b.addr);
         assert_eq!(reqwest_get(&url).await, reqwest_get(&url).await);
+    }
+
+    #[tokio::test]
+    async fn hostinfo_reports_the_wsl_side_or_null() {
+        // Off Windows there is never a WSL side; the key is still present so
+        // a client can tell "no WSL" from "old agent".
+        let b = serve(cfg_for(tempdir("hostinfo-wsl"))).await.unwrap();
+        let body = reqwest_get(&format!("http://{}/api/hostinfo", b.addr)).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(v.get("wsl").is_some(), "the key must exist: {body}");
+        if !cfg!(windows) {
+            assert!(v["wsl"].is_null());
+        }
     }
 
     #[tokio::test]

@@ -217,7 +217,27 @@ pub async fn serve(cfg: Config) -> std::io::Result<Bound> {
     let addr = listener.local_addr()?;
 
     let h = host::init::init().await;
-    let ctx = Arc::new(Ctx::new(h, cfg.claude_dir, cfg.disk_extra));
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut ctx = Ctx::new(h, cfg.claude_dir, cfg.disk_extra);
+    // The WSL side is appended before `Ctx` is shared; `sides` is fixed after.
+    #[cfg(windows)]
+    if let Some(probe) = crate::host::wsl::probe_wsl(&ctx.host.runner, &ctx.host.log).await {
+        match crate::collect::side::Side::wsl(&probe, Arc::clone(&ctx.host.log)) {
+            Some(side) => {
+                ctx.host.log.push(format!(
+                    "wsl: {} at {}",
+                    side.wsl.as_ref().map(|w| w.distro.as_str()).unwrap_or("?"),
+                    side.claude_dir.display()
+                ));
+                ctx.sides.push(side);
+            }
+            None => ctx.host.log.push(format!(
+                "wsl: cannot read a distro from {:?}; Windows side only",
+                probe.home_unc
+            )),
+        }
+    }
+    let ctx = Arc::new(ctx);
     if let Some(pw) = cfg.password.clone() {
         let _ = ctx.password.set(pw);
     }

@@ -120,6 +120,53 @@ pub fn parse_ps(out: &str) -> Vec<ProcRow> {
         .collect()
 }
 
+/// The first `wsl.exe` call may cold-start the distro; 5 seconds is not
+/// enough for that and 30 is.
+#[cfg(windows)]
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Ask the distro for its login PATH and its home as the share sees it.
+/// `None` — with the reason logged — means the agent runs with the native
+/// side alone: `wsl.exe` absent, the distro failing, a timeout, or output
+/// that is not the two lines `PROBE_SCRIPT` prints.
+#[cfg(windows)]
+pub async fn probe_wsl(
+    native: &crate::host::cmd::Runner,
+    log: &crate::host::log::LogBuffer,
+) -> Option<WslProbe> {
+    if std::env::var("CDASH_WSL").as_deref() == Ok("0") {
+        log.push("wsl: disabled by CDASH_WSL=0; Windows side only");
+        return None;
+    }
+    let distro_flag = std::env::var("CDASH_WSL_DISTRO").ok().filter(|s| !s.is_empty());
+    let mut args: Vec<&str> = Vec::new();
+    if let Some(d) = distro_flag.as_deref() {
+        args.push("-d");
+        args.push(d);
+    }
+    args.extend_from_slice(&["--exec", "/bin/sh", "-lc", PROBE_SCRIPT]);
+
+    match native.run_checked_with_timeout("wsl.exe", &args, "wsl probe", PROBE_TIMEOUT).await {
+        Ok(out) => match parse_wsl_probe(&out) {
+            Some(mut p) => {
+                p.distro_flag = distro_flag;
+                Some(p)
+            }
+            None => {
+                log.push(format!(
+                    "wsl: unexpected probe output {:?}; Windows side only",
+                    out.trim()
+                ));
+                None
+            }
+        },
+        Err(e) => {
+            log.push(format!("wsl: {e}; Windows side only"));
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
