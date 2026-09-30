@@ -31,6 +31,7 @@ crate::guarded_routes! {
     post "/api/launch" => routes::post_launch,
     post "/api/resume" => routes::post_resume,
     post "/api/kill" => routes::post_kill,
+    post "/api/keys" => routes::post_keys,
     post "/api/purge" => routes::post_purge,
     post "/api/logout" => routes::post_logout,
 }

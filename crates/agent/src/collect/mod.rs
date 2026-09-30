@@ -7,5 +7,6 @@ pub mod places;
 pub mod browse;
 pub mod validate;
 pub mod spawn;
+pub mod keys;
 pub mod external;
 pub mod sessions;
