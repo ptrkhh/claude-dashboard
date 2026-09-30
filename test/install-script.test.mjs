@@ -147,3 +147,40 @@ test('a failed download leaves the agent that was already there', async () => {
   assert.ok(!existsSync(`${agent}.new`), 'no partial download left behind');
   await run('pkill', ['-f', agent]).catch(() => {});
 });
+
+test('a truncated download leaves the agent that was already there', async () => {
+  // Promises 1000 bytes, sends 10, hangs up: curl exits non-zero but has already
+  // written a partial file, which is the case the && chain exists for. (A refused
+  // connection, as above, writes nothing, so it cannot tell a chain from no chain.)
+  const server = createServer((_, res) => {
+    res.writeHead(200, { 'content-length': '1000' });
+    res.write('0123456789');
+    setTimeout(() => res.destroy(), 50);
+  });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  const HOME = mkdtempSync(join(tmpdir(), 'cdash-home-'));
+  const agent = join(HOME, 'cdash-agent');
+  writeFileSync(agent, '#!/bin/sh\nexit 0\n');
+  chmodSync(agent, 0o755);
+  const before = readFileSync(agent, 'utf8');
+  try {
+    const file = join(mkdtempSync(join(tmpdir(), 'cdash-paste-')), 'setup.sh');
+    writeFileSync(file, setupScript('curl', `http://127.0.0.1:${server.address().port}/cdash-agent`));
+    await run('bash', [file], { env: { ...process.env, HOME } }).catch(() => {});
+    assert.equal(readFileSync(agent, 'utf8'), before, 'a 10-byte fragment did not replace the agent');
+    assert.ok(!existsSync(`${agent}.new`), 'and the partial download was cleaned up');
+  } finally {
+    server.close();
+    await run('pkill', ['-f', agent]).catch(() => {});
+  }
+});
+
+test('the WSL command survives a Windows path full of shell metacharacters', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'cdash-home-'));
+  // $, backtick, double quote and backslash all stay live inside double quotes.
+  const winDir = mkdtempSync(join(tmpdir(), 'cdash-mnt-')) + '/A $HOME "q" `x` \\y';
+  await run('mkdir', ['-p', winDir]);
+  const source = join(winDir, 'cdash-agent');
+  writeFileSync(source, AGENT);
+  await checkCommon(setupScript('copy', source), HOME);
+});

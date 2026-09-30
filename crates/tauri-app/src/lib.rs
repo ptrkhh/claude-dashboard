@@ -163,7 +163,15 @@ fn validate_profile(input: &ProfileInput) -> Result<(), String> {
     // The client sends requests wherever this points, so refuse anything that is
     // not plainly a web address before it is stored.
     match reqwest::Url::parse(&input.base_url) {
-        Ok(u) if matches!(u.scheme(), "http" | "https") && u.host_str().is_some() => {}
+        // No credentials (they would sit in the store in clear, sidestepping
+        // the "auth none only" rule below), no query or fragment (the path is
+        // appended to this string).
+        Ok(u) if matches!(u.scheme(), "http" | "https")
+            && u.host_str().is_some()
+            && u.username().is_empty()
+            && u.password().is_none()
+            && u.query().is_none()
+            && u.fragment().is_none() => {}
         _ => return Err(format!("base_url {:?} is not an http(s) URL", input.base_url)),
     }
     if input.auth != "none" {
@@ -445,7 +453,8 @@ fn wsl_path(windows_path: &str) -> Option<String> {
 
 /// Writes the bundled agent where the other side can read it, and only when it
 /// is not already there byte for byte: the setup command is pasted more than
-/// once by design, and rewriting a running binary fails on Windows.
+/// once by design, and there is no point rewriting 9 MB that a `cp` in WSL may
+/// be reading at that moment.
 #[cfg(any(windows, test))] // as above
 fn export_agent(dir: &std::path::Path, body: &[u8]) -> Result<std::path::PathBuf, String> {
     if body.is_empty() {
@@ -478,15 +487,19 @@ fn agent_handoff(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
         // itself.
         let dir = std::env::temp_dir().join("cdash");
         let path = export_agent(&dir, handoff::AGENT)?;
+        // %TEMP% is often an 8.3 short path (C:\Users\ADALOV~1\…); canonicalize
+        // returns the long, verbatim form that `wsl_path` is written to expect.
+        let path = std::fs::canonicalize(&path)
+            .map_err(|e| format!("cannot resolve {}: {e}", path.display()))?;
         let win = path.to_string_lossy().to_string();
         let wsl = wsl_path(&win)
             .ok_or_else(|| format!("cannot map {win} into WSL; copy it across yourself"))?;
-        return Ok(serde_json::json!({
+        Ok(serde_json::json!({
             "kind": "copy",
             "source": wsl,
             "bytes": handoff::AGENT.len(),
             "port": LOCAL_AGENT_PORT,
-        }));
+        }))
     }
     #[cfg(not(windows))]
     Ok(serde_json::json!({
@@ -536,8 +549,9 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .manage(ServerState::default())
-        // No redirects: this client has exactly one destination, and a
-        // redirect is the only way a request pinned to loopback could leave it.
+        // No redirects: a redirect is the only way a request to the address the
+        // caller chose (the in-process agent, or the active profile's host)
+        // could end up somewhere else.
         // Timeouts because a request that never returns leaves the UI reading
         // "Connecting…" with no way back — the poll ladder only advances when a
         // tick finishes, whether it succeeded or failed.
@@ -719,8 +733,8 @@ mod tests {
         let path = export_agent(&dir, b"agent v1").expect("writes");
         assert_eq!(std::fs::read(&path).unwrap(), b"agent v1");
 
-        // Pasting the command again must not rewrite an identical file — on
-        // Windows the copy source may be locked by a running agent.
+        // Pasting the command again must not rewrite an identical file — a `cp`
+        // in WSL may be reading it.
         let before = std::fs::metadata(&path).unwrap().modified().unwrap();
         assert_eq!(export_agent(&dir, b"agent v1").unwrap(), path);
         assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before);
@@ -767,9 +781,16 @@ mod tests {
         let _silent = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (conn, _) = listener.accept().unwrap();
 
+        // On a thread, so a missing timeout fails this test instead of hanging CI.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(handoff::respond(conn, b"agent", Duration::from_millis(100)));
+        });
         let started = Instant::now();
-        let outcome = handoff::respond(conn, b"agent", Duration::from_millis(100));
-        assert!(outcome.is_err(), "the read must time out, not wait for a request");
+        let outcome = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("respond must return once its read times out, not wait for a request");
+        assert!(outcome.is_err(), "a client that sent nothing gets dropped");
         assert!(started.elapsed() < Duration::from_secs(2), "and promptly");
     }
 
@@ -781,7 +802,10 @@ mod tests {
             p.base_url = ok.into();
             profile_upsert(&mut doc, p).unwrap_or_else(|e| panic!("{ok}: {e}"));
         }
-        for bad in ["", "localhost:23274", "file:///etc/passwd", "ftp://host/", "javascript:alert(1)", "http://"] {
+        for bad in [
+            "", "localhost:23274", "file:///etc/passwd", "ftp://host/", "javascript:alert(1)", "http://",
+            "http://user:pw@host", "http://user@host", "http://host/?x=1", "http://host/#frag",
+        ] {
             let mut p = input("bad");
             p.base_url = bad.into();
             assert!(profile_upsert(&mut doc, p).unwrap_err().contains("http(s)"), "{bad:?}");

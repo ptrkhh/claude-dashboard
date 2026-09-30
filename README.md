@@ -67,10 +67,17 @@ MediaStore or a permission Termux cannot hold on Android 11+ — and appends a
 guard to `~/.bashrc` so the agent starts itself whenever Termux is opened. After
 one paste the only thing to remember is to open Termux.
 
-Pasting again is how you update: the download lands beside the agent and is
+Pasting again replaces the agent file: the download lands beside it and is
 renamed into place, which works while the old one runs (a direct write fails
-with "Text file busy") and never replaces a good agent with a failed download.
-A running agent keeps its old binary until Termux restarts it.
+with "Text file busy") and never replaces a good agent with a failed or
+truncated download. It does **not** restart anything. The setup dialog only
+appears when the agent is unreachable, and the shell guard only starts an agent
+that is not answering, so a healthy old agent keeps running its old binary until
+you stop it (`pkill -x cdash-agent`; in Termux `pkg install procps` first) and
+open a new shell. If you pasted an earlier version of this command, also delete
+its `# claude-dashboard` block from `~/.bashrc`: the guard is only appended when
+none exists, so an old one is never replaced. The guard lives in `~/.bashrc`, so
+a login shell that does not read it (zsh) never starts the agent.
 
 `test/install-script.test.mjs` runs that command in a scratch `$HOME` — it is
 pasted into a shell we never see, so it is tested as one, using the very
@@ -119,8 +126,10 @@ it are worth knowing:
   is not the answer: its unstripped `.so` makes a 138 MB APK, against 21 MB for
   release.
 - Gradle enables cleartext HTTP for debug only, so the script patches the
-  release build type to allow it. Without that the client cannot reach the agent
-  at `http://localhost:23274`, which is its entire job.
+  release build type to allow it, as insurance for any WebView traffic to
+  `http://localhost:23274`. The client's own API calls go through native sockets,
+  which Android's cleartext policy is not expected to gate, so the patch may
+  prove unnecessary; it has not been tested either way on a device.
 
 Prereqs: `rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-msvc aarch64-pc-windows-msvc`,
 `pip install ziglang && cargo install cargo-zigbuild`,

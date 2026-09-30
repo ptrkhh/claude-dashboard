@@ -56,9 +56,12 @@ if [ -n "${ANDROID_HOME:-}" ] && [ -n "${NDK_HOME:-}" ]; then
     cd crates/tauri-app
     cargo tauri android init
 
-    # Gradle enables cleartext HTTP for debug only, and reaching the agent at
-    # http://localhost:23274 is this client's entire job — a release APK without
-    # this cannot talk to Termux at all.
+    # Gradle enables cleartext HTTP for debug only. The client's own API calls
+    # go through Rust (reqwest), which Android's cleartext policy is not
+    # expected to gate, so this may prove unnecessary — but it is cheap
+    # insurance for any WebView traffic to http://localhost:23274, and a release
+    # APK that cannot reach Termux fails silently. Drop it only after a release
+    # APK has been seen working without it.
     sed -i '/getByName("release")/a\        manifestPlaceholders["usesCleartextTraffic"] = "true"' \
       gen/android/app/build.gradle.kts
     # sed exits 0 when nothing matched, e.g. after a template change in the
@@ -76,7 +79,8 @@ if [ -n "${ANDROID_HOME:-}" ] && [ -n "${NDK_HOME:-}" ]; then
     # Android refuses to install an unsigned APK at all, so "unsigned" is not a
     # shippable state. The SDK debug key makes it installable; it is a local
     # test signature, not a distribution one.
-    BT=$(ls -d "$ANDROID_HOME"/build-tools/* 2>/dev/null | sort -V | tail -n 1)
+    # Newest installed, previews excluded: `sort -V` ranks 36.0.0-rc1 above 36.0.0.
+    BT=$(ls -d "$ANDROID_HOME"/build-tools/* 2>/dev/null | grep -v -e '-rc' -e '-beta' -e '-alpha' | sort -V | tail -n 1)
     [ -x "$BT/apksigner" ] || {
       echo "FAILED: no build-tools with apksigner under $ANDROID_HOME/build-tools" >&2
       exit 1

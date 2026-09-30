@@ -2,7 +2,7 @@
    `const`s are instantiated before any statement runs, so a re-run of this
    file threw "Identifier 'isTauri' has already been declared" at parse time —
    which then masked the error that had actually broken the first run. Inside a
-   function scope, a re-run just redoes the setup. */
+   function scope, a re-run is stopped by the boot guard below. */
 (() => {
 // A second evaluation should also not start a second poll loop over the same
 // DOM, so the boot is claimed once per page.
@@ -570,10 +570,12 @@ const SHELL = { android: 'Termux', windows: 'WSL' };
 /// straight over a running agent fails with "Text file busy", and re-pasting is
 /// exactly the case this dialog exists for; a rename works on a running binary
 /// and never leaves a half-written one at the real path. The `&&` chain stops
-/// a failed download from being renamed over a good agent.
+/// a failed or truncated download from being renamed over a good agent, and the
+/// `||` tidies the leftover.
 const setupScript = (fetch, port, keepAwake) => `${fetch} &&
 chmod +x "$HOME/cdash-agent.new" &&
-mv -f "$HOME/cdash-agent.new" "$HOME/cdash-agent"
+mv -f "$HOME/cdash-agent.new" "$HOME/cdash-agent" ||
+rm -f "$HOME/cdash-agent.new"
 grep -q cdash-agent "$HOME/.bashrc" 2>/dev/null || cat >> "$HOME/.bashrc" <<'CDASH'
 
 # claude-dashboard: start the agent whenever this shell opens, unless it is up
@@ -584,10 +586,11 @@ CDASH
 . "$HOME/.bashrc"`;
 
 /// `curl` out of the app's own loopback server, or `cp` from the Windows
-/// filesystem that WSL already mounts. The source is quoted: a Windows path
-/// runs through the user's name, and names have spaces in them.
+/// filesystem that WSL already mounts. The source is quoted — a Windows path
+/// runs through the user's name, and names have spaces in them — and the four
+/// characters that stay live inside double quotes are escaped.
 const fetchLine = (kind, source) => kind === 'copy'
-  ? `cp "${source}" "$HOME/cdash-agent.new"`
+  ? `cp "${source.replace(/[\\"$\x60]/g, '\\$&')}" "$HOME/cdash-agent.new"`
   : `curl -fsS -o "$HOME/cdash-agent.new" ${source}`;
 
 /// Android kills background processes that hold no wake lock. Nothing on
