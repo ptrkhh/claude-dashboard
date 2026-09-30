@@ -14,6 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const OAUTH_BETA: &str = "oauth-2025-04-20";
+const USER_AGENT: &str = concat!("cdash-agent/", env!("CARGO_PKG_VERSION"));
+const DEFAULT_BASE: &str = "https://api.anthropic.com";
 
 /// Time-box on the lookup, so a stalled API can never hold a refresh open.
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -23,10 +25,37 @@ pub const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// per-poll round trip to the API.
 pub const USAGE_TTL: Duration = Duration::from_secs(60);
 
+/// How long the last good reading is still shown once refreshes start failing.
+/// Past this the tiles go away: an expired token or a logout would otherwise
+/// freeze them, reset times long gone, until the agent restarts.
+pub const USAGE_MAX_AGE: Duration = Duration::from_secs(600);
+
+/// Each consecutive failed request doubles the wait before the next one, up to
+/// `USAGE_TTL << MAX_BACKOFF` (16 min) — the endpoint rate-limits, and hammering
+/// it at the TTL only prolongs that.
+const MAX_BACKOFF: u32 = 4;
+
+/// The subscription token goes wherever this points, so `ANTHROPIC_BASE_URL` is
+/// honoured only for https or a loopback http (a local proxy or test double).
+/// Anything else falls back to the real API rather than sending the token in
+/// clear text or to a host the URL merely resembles.
+fn base_url_from(raw: Option<&str>) -> String {
+    let trusted = |u: &&str| match reqwest::Url::parse(u) {
+        Ok(url) => match url.scheme() {
+            "https" => true,
+            "http" => matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")),
+            _ => false,
+        },
+        Err(_) => false,
+    };
+    raw.map(|r| r.trim_end_matches('/'))
+        .filter(trusted)
+        .unwrap_or(DEFAULT_BASE)
+        .to_string()
+}
+
 fn base_url() -> String {
-    let raw = std::env::var("ANTHROPIC_BASE_URL")
-        .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
-    raw.trim_end_matches('/').to_string()
+    base_url_from(std::env::var("ANTHROPIC_BASE_URL").ok().as_deref())
 }
 
 /// One limit tile. `short` is the stat-tile label (shown as "Claude <short>");
@@ -122,73 +151,128 @@ async fn oauth_token(claude_dir: &Path) -> Option<String> {
     oauth.get("accessToken").and_then(|t| t.as_str()).filter(|t| !t.is_empty()).map(String::from)
 }
 
-/// Fetch and parse the live limits, or `None` if unavailable (no token,
-/// network error, non-2xx). Never an error the caller must handle: the tiles
-/// are optional, and a failed lookup must not colour the sessions payload.
-pub async fn fetch_usage(claude_dir: &Path) -> Option<Vec<UsageLimit>> {
-    let token = oauth_token(claude_dir).await?;
-    let client = reqwest::Client::builder().timeout(FETCH_TIMEOUT).build().ok()?;
-    let resp = client
+/// Why a lookup came back empty. Only `Request` cost a round trip to the API,
+/// so only it backs the next attempt off; `NoToken` is a local file read.
+#[derive(Debug, PartialEq)]
+pub enum Miss {
+    NoToken,
+    Request(String),
+}
+
+impl std::fmt::Display for Miss {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Miss::NoToken => f.write_str("no usable subscription token"),
+            Miss::Request(why) => f.write_str(why),
+        }
+    }
+}
+
+/// Fetch and parse the live limits. The tiles are optional, so the cache folds
+/// every `Miss` into "no tiles" and never lets it colour the sessions payload.
+pub async fn fetch_usage(claude_dir: &Path) -> Result<Vec<UsageLimit>, Miss> {
+    let token = oauth_token(claude_dir).await.ok_or(Miss::NoToken)?;
+    let failed = |e: reqwest::Error| Miss::Request(e.without_url().to_string());
+    let resp = reqwest::Client::builder()
+        .timeout(FETCH_TIMEOUT)
+        .user_agent(USER_AGENT)
+        .build()
+        .map_err(failed)?
         .get(format!("{}/api/oauth/usage", base_url()))
         .bearer_auth(token)
         .header("anthropic-beta", OAUTH_BETA)
         .header("Content-Type", "application/json")
         .send()
         .await
-        .ok()?;
+        .map_err(failed)?;
     if !resp.status().is_success() {
-        return None;
+        return Err(Miss::Request(format!("http {}", resp.status().as_u16())));
     }
-    Some(parse_usage(&resp.json::<serde_json::Value>().await.ok()?))
+    resp.json::<serde_json::Value>().await.map(|v| parse_usage(&v)).map_err(failed)
 }
 
+#[derive(Default)]
 struct UsageState {
     data: Option<Vec<UsageLimit>>,
+    /// Last successful refresh; `data` is only shown while this is recent.
+    ok: Option<Instant>,
+    /// Last attempt, success or not.
     fetched: Option<Instant>,
+    /// Consecutive failed requests, capped at `MAX_BACKOFF`.
+    fails: u32,
+    /// An outage has been logged and not yet recovered from.
+    failing: bool,
     busy: bool,
+}
+
+impl UsageState {
+    /// Time for another lookup. `busy` is what keeps a slow fetch from being
+    /// re-entered once per poll: without it a 5-second lookup and a 4-second
+    /// poll stack refreshes.
+    fn due(&self, now: Instant) -> bool {
+        !self.busy
+            && self.fetched.is_none_or(|t| now.duration_since(t) > USAGE_TTL * 2u32.pow(self.fails))
+    }
+
+    fn shown(&self, now: Instant) -> Option<Vec<UsageLimit>> {
+        self.ok.filter(|t| now.duration_since(*t) < USAGE_MAX_AGE)?;
+        self.data.clone()
+    }
+
+    /// Fold in a finished lookup. A failure still stamps `fetched`, so a
+    /// signed-out user retries on the TTL rather than on every poll. The return
+    /// value is the log line, if one is due: once per outage, not once a minute.
+    fn record(&mut self, res: Result<Vec<UsageLimit>, Miss>, now: Instant) -> Option<String> {
+        self.busy = false;
+        self.fetched = Some(now);
+        match res {
+            Ok(data) => {
+                (self.data, self.ok, self.fails, self.failing) = (Some(data), Some(now), 0, false);
+                None
+            }
+            Err(miss) => {
+                self.fails = match miss {
+                    Miss::Request(_) => (self.fails + 1).min(MAX_BACKOFF),
+                    Miss::NoToken => 0,
+                };
+                (!std::mem::replace(&mut self.failing, true))
+                    .then(|| format!("claude usage unavailable: {miss}"))
+            }
+        }
+    }
 }
 
 /// The limits, refreshed in the background so a 4-second poll never waits on
 /// the network. The first poll returns `None`; a transient failure keeps the
-/// last good value rather than blanking the tiles.
+/// last good value for `USAGE_MAX_AGE` rather than blanking the tiles.
 pub struct UsageCache {
     state: Mutex<UsageState>,
 }
 
 impl UsageCache {
     pub fn new() -> Self {
-        Self { state: Mutex::new(UsageState { data: None, fetched: None, busy: false }) }
+        Self { state: Mutex::new(UsageState::default()) }
     }
 
-    /// Return what is cached, kicking off a refresh when it has gone stale.
+    /// Return what is cached, kicking off a refresh when it is due.
     /// Returns immediately either way.
-    ///
-    /// `busy` is what keeps a slow fetch from being re-entered once per poll:
-    /// without it a 5-second lookup and a 4-second poll stack refreshes.
     pub fn get(self: &Arc<Self>, claude_dir: &Path, log: &Arc<LogBuffer>) -> Option<Vec<UsageLimit>> {
+        let now = Instant::now();
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let stale = st.fetched.is_none_or(|t| t.elapsed() > USAGE_TTL);
-        if stale && !st.busy {
+        if st.due(now) {
             st.busy = true;
             self.clone().spawn_refresh(claude_dir.to_path_buf(), Arc::clone(log));
         }
-        st.data.clone()
+        st.shown(now)
     }
 
     fn spawn_refresh(self: Arc<Self>, claude_dir: PathBuf, log: Arc<LogBuffer>) {
         tokio::spawn(async move {
-            let fresh = fetch_usage(&claude_dir).await;
+            let res = fetch_usage(&claude_dir).await;
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            // A failed lookup still stamps `fetched`, so a signed-out user
-            // retries on the TTL rather than on every poll — and says so once
-            // rather than filing a line every minute for the process's life.
-            if fresh.is_some() {
-                st.data = fresh;
-            } else if st.data.is_none() && st.fetched.is_none() {
-                log.push("claude usage unavailable");
+            if let Some(line) = st.record(res, Instant::now()) {
+                log.push(line);
             }
-            st.fetched = Some(Instant::now());
-            st.busy = false;
         });
     }
 }
@@ -339,6 +423,104 @@ mod tests {
 
         // Second call while the refresh is in flight must not queue another.
         assert_eq!(cache.get(&dir, &log), None);
-        assert!(cache.state.lock().unwrap().busy || cache.state.lock().unwrap().fetched.is_some());
+        let st = cache.state.lock().unwrap();
+        assert!(st.busy || st.fetched.is_some());
+    }
+
+    fn reading(pct: u32) -> Vec<UsageLimit> {
+        parse_usage(&json!({ "five_hour": { "utilization": pct } }))
+    }
+
+    fn req_err() -> Result<Vec<UsageLimit>, Miss> {
+        Err(Miss::Request("http 429".into()))
+    }
+
+    #[test]
+    fn a_failing_refresh_keeps_the_last_reading_only_until_max_age() {
+        let t0 = Instant::now();
+        let mut st = UsageState::default();
+        assert_eq!(st.shown(t0), None, "nothing to show before the first success");
+        st.record(Ok(reading(40)), t0);
+        assert_eq!(st.shown(t0), Some(reading(40)));
+
+        // The token dies: every later refresh fails, the old numbers ride along…
+        st.record(req_err(), t0 + USAGE_TTL * 2);
+        assert_eq!(st.shown(t0 + USAGE_MAX_AGE - Duration::from_secs(1)), Some(reading(40)));
+        // …but not forever.
+        assert_eq!(st.shown(t0 + USAGE_MAX_AGE), None);
+
+        st.record(Ok(reading(55)), t0 + USAGE_MAX_AGE);
+        assert_eq!(st.shown(t0 + USAGE_MAX_AGE), Some(reading(55)), "a success revives the tiles");
+    }
+
+    #[test]
+    fn failed_requests_back_off_and_a_success_resets_it() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs(1);
+        let mut st = UsageState::default();
+        assert!(st.due(t0), "the first poll looks it up");
+
+        for (n, wait) in [(1u32, 2), (2, 4), (3, 8), (4, 16), (5, 16)] {
+            st.record(req_err(), t0);
+            assert!(!st.due(t0 + USAGE_TTL * wait), "after {n} failures wait over {wait}x TTL");
+            assert!(st.due(t0 + USAGE_TTL * wait + s), "after {n} failures due past {wait}x TTL");
+        }
+
+        st.record(Ok(reading(1)), t0);
+        assert!(!st.due(t0 + USAGE_TTL));
+        assert!(st.due(t0 + USAGE_TTL + s), "a success is back on the plain TTL");
+    }
+
+    #[test]
+    fn a_missing_token_retries_on_the_plain_ttl() {
+        // No request was made, so there is nothing to back off from — and a user
+        // who signs in should see the tiles within a minute, not sixteen.
+        let t0 = Instant::now();
+        let mut st = UsageState::default();
+        for _ in 0..6 {
+            st.record(Err(Miss::NoToken), t0);
+        }
+        assert!(st.due(t0 + USAGE_TTL + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn an_in_flight_lookup_is_never_doubled() {
+        let t0 = Instant::now();
+        let st = UsageState { busy: true, ..Default::default() };
+        assert!(!st.due(t0 + USAGE_TTL * 100));
+    }
+
+    #[test]
+    fn an_outage_is_logged_once_and_again_after_it_recovers() {
+        let t0 = Instant::now();
+        let mut st = UsageState::default();
+        assert_eq!(st.record(req_err(), t0).as_deref(), Some("claude usage unavailable: http 429"));
+        assert_eq!(st.record(req_err(), t0), None, "same outage, no second line");
+        assert_eq!(st.record(Ok(reading(1)), t0), None);
+        assert!(st.record(req_err(), t0).is_some(), "a fresh outage is news again");
+    }
+
+    #[test]
+    fn the_token_only_goes_to_https_or_loopback() {
+        let real = "https://api.anthropic.com";
+        for ok in [
+            "https://proxy.internal/base",
+            "http://localhost:9999",
+            "http://127.0.0.1:9999/",
+            "http://[::1]:9999",
+        ] {
+            assert_eq!(base_url_from(Some(ok)), ok.trim_end_matches('/'), "{ok}");
+        }
+        for bad in [
+            "http://proxy.internal",
+            "http://localhost.evil.com",
+            "http://127.0.0.1:80@evil.com",
+            "ftp://127.0.0.1",
+            "not a url",
+            "",
+        ] {
+            assert_eq!(base_url_from(Some(bad)), real, "{bad:?}");
+        }
+        assert_eq!(base_url_from(None), real);
     }
 }
