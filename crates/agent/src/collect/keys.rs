@@ -80,17 +80,46 @@ pub fn parse_send_keys(name: &str, text: Option<&str>) -> Result<SendKeys, BadRe
     Ok(SendKeys { name: name.to_string(), text })
 }
 
-/// tmux argv for typing `text` into the pane, then submitting.
+/// tmux argv for typing `text` into the pane — one or more commands — and then
+/// the one that submits it.
 ///
-/// Two commands because `-l` sends its operand literally: "Enter" typed
+/// Enter is separate because `-l` sends its operand literally: "Enter" typed
 /// literally is the five characters, not the key. The `--` is load-bearing —
 /// without it tmux reads a leading-dash command (`--version`) as its own flag
 /// and errors.
-pub fn send_keys_args(k: &SendKeys) -> (Vec<&str>, Vec<&str>) {
-    (
-        vec!["send-keys", "-t", &k.name, "-l", "--", &k.text],
-        vec!["send-keys", "-t", &k.name, "Enter"],
-    )
+///
+/// Two more things tmux does that "literal" does not cover:
+/// - A `;` ending any argument is a command separator, even after `-l`, and it
+///   eats a `\` in front of it: `echo hi;` arrives as `echo hi`, and
+///   `find . -exec rm {} \;` as `find . -exec rm {} ;`. Trailing semicolons are
+///   split off and sent as hex keys (`-H 3b`) instead. Only the end of the
+///   argument matters; a `;` anywhere else in the text goes through as typed.
+/// - `-t name` falls back to prefix matching, so when the session has just died
+///   the keystrokes land in a sibling (`…-k2p` becomes `…-k2pX`). `=name:` is an
+///   exact match and fails instead.
+pub fn send_keys_args(k: &SendKeys) -> (Vec<Vec<String>>, Vec<String>) {
+    let target = format!("={}:", k.name);
+    let cmd = |tail: &[&str]| -> Vec<String> {
+        ["send-keys", "-t", &target].iter().chain(tail).map(|a| a.to_string()).collect()
+    };
+
+    let body = k.text.trim_end_matches(';');
+    let semicolons = k.text.len() - body.len(); // `;` is one byte
+    let mut typed = Vec::new();
+    if !body.is_empty() {
+        typed.push(cmd(&["-l", "--", body]));
+    }
+    if semicolons > 0 {
+        let mut hex = vec!["-H"];
+        hex.extend(std::iter::repeat_n("3b", semicolons));
+        typed.push(cmd(&hex));
+    }
+    (typed, cmd(&["Enter"]))
+}
+
+async fn tmux(ctx: &Arc<Ctx>, args: &[String], key: &str) -> Result<(), Refused> {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    ctx.runner.run_checked("tmux", &args, key).await.map(drop).map_err(Refused::Failed)
 }
 
 /// Type into a session's TUI, then submit.
@@ -99,17 +128,13 @@ pub fn send_keys_args(k: &SendKeys) -> (Vec<&str>, Vec<&str>) {
 /// keystroke that never reached the pane is worse than reporting the error.
 pub async fn send_keys(ctx: &Arc<Ctx>, name: &str, text: Option<&str>) -> Result<(), Refused> {
     let keys = parse_send_keys(name, text)?;
-    let (literal, enter) = send_keys_args(&keys);
+    let (typed, enter) = send_keys_args(&keys);
 
-    ctx.runner
-        .run_checked("tmux", &literal, "tmux send-keys")
-        .await
-        .map_err(Refused::Failed)?;
+    for args in &typed {
+        tmux(ctx, args, "tmux send-keys").await?;
+    }
     tokio::time::sleep(ENTER_DELAY).await;
-    ctx.runner
-        .run_checked("tmux", &enter, "tmux send-keys Enter")
-        .await
-        .map_err(Refused::Failed)?;
+    tmux(ctx, &enter, "tmux send-keys Enter").await?;
 
     ctx.host.log.push(log_line(&keys));
     Ok(())
@@ -190,12 +215,40 @@ mod tests {
         assert_eq!(log_line(&k), "keys cdash-a: 19 chars");
     }
 
+    fn args(text: &str) -> (Vec<Vec<String>>, Vec<String>) {
+        send_keys_args(&SendKeys { name: "cdash-a".to_string(), text: text.to_string() })
+    }
+
     #[test]
     fn send_keys_args_passes_text_as_a_literal_operand_after_the_separator() {
         // Without `--`, tmux reads a leading-dash command as its own flag.
-        let k = SendKeys { name: "cdash-a".to_string(), text: "--version".to_string() };
-        let (literal, enter) = send_keys_args(&k);
-        assert_eq!(literal, ["send-keys", "-t", "cdash-a", "-l", "--", "--version"]);
-        assert_eq!(enter, ["send-keys", "-t", "cdash-a", "Enter"]);
+        let (typed, enter) = args("--version");
+        assert_eq!(typed, [["send-keys", "-t", "=cdash-a:", "-l", "--", "--version"]]);
+        assert_eq!(enter, ["send-keys", "-t", "=cdash-a:", "Enter"]);
+    }
+
+    #[test]
+    fn the_target_is_an_exact_session_match_not_a_prefix() {
+        // Bare `cdash-a` would type into `cdash-ab` once `cdash-a` is gone.
+        let (typed, enter) = args("hi");
+        assert!(typed.iter().chain([&enter]).all(|c| c[2] == "=cdash-a:"));
+    }
+
+    #[test]
+    fn trailing_semicolons_go_as_hex_keys_because_tmux_eats_them_as_separators() {
+        let hex = |n: usize| {
+            ["send-keys", "-t", "=cdash-a:", "-H"].into_iter().chain(vec!["3b"; n]).collect::<Vec<_>>()
+        };
+        // `echo hi;` -> "echo hi" then one `;`
+        let (typed, _) = args("echo hi;");
+        assert_eq!(typed, [vec!["send-keys", "-t", "=cdash-a:", "-l", "--", "echo hi"], hex(1)]);
+        // A backslash before the `;` is ordinary text once the `;` is not tmux's to parse.
+        let (typed, _) = args(r"find . -exec rm {} \;");
+        assert_eq!(typed[0][5], r"find . -exec rm {} \");
+        assert_eq!(typed[1], hex(1));
+        // Nothing but semicolons: no empty literal, one hex command.
+        assert_eq!(args(";;").0, [hex(2)]);
+        // A `;` that does not end the text is not special and is sent as typed.
+        assert_eq!(args("a;b ; c").0, [vec!["send-keys", "-t", "=cdash-a:", "-l", "--", "a;b ; c"]]);
     }
 }

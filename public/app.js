@@ -3,6 +3,7 @@ const MODELS = ['sonnet', 'opus', 'haiku', 'fable'];
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 let armedKill = null; // ponytail: survives render() replacing #running.innerHTML
 const drafts = {}; // half-typed send-bar text by session name, for the same reason
+const sending = new Set(); // sessions with a send in flight: a re-render hands back a fresh, enabled button
 const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 
 /* ---------- Inline icons (stroke = currentColor, sized via CSS) ---------- */
@@ -283,16 +284,18 @@ document.body.addEventListener('submit', async e => {
   const input = form.querySelector('.send-input');
   const btn = form.querySelector('.send-btn');
   const text = input.value.trim();
-  if (!text) return;
+  const name = form.dataset.send;
+  if (!text || sending.has(name)) return;
+  sending.add(name);
   btn.disabled = true;
   try {
-    await api('/api/keys', { name: form.dataset.send, text });
-    delete drafts[form.dataset.send]; input.value = ''; toast('Sent to session');
+    await api('/api/keys', { name, text });
+    delete drafts[name]; input.value = ''; toast('Sent to session');
     // A focused input freezes the grid (see render), so let go of it and poll
     // now: the point of sending is to watch the session answer.
     input.blur(); poll();
   } catch (err) { toast(err.message); }
-  finally { btn.disabled = false; }
+  finally { sending.delete(name); btn.disabled = false; }
 });
 
 // Launch: submitting the command bar (button or Enter in the directory field).
