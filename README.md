@@ -14,7 +14,7 @@ or 403 halts the poll until you act; throttling never does. The service worker
 caches at runtime (network-first navigations, stale-while-revalidate assets), so
 offline works from the second visit; there is no precache manifest to maintain.
 
-## Desktop client (Linux)
+## Desktop client (Linux, Windows)
 
 ```
 cargo run -p cdash-tauri
@@ -22,17 +22,129 @@ cargo run -p cdash-tauri
 
 A Tauri desktop wrapper around the same UI. The agent runs in-process (no separate server, no port to remember), started at app setup on a tokio task. The HTTP boundary is kept even in-process: the same `/api/*` calls still speak HTTP to loopback, tunnelled through the `api_request` Tauri command rather than webview `fetch`. Connection profiles are stored in the app's config directory via `tauri-plugin-store`. Secrets handling arrives in step 10.
 
+**On Windows the client links no agent at all** — `cdash-agent` is a
+`cfg(not(windows))` dependency. tmux, `claude` and `/proc` live in a WSL distro,
+so the agent runs there and the client talks to it over WSL2's loopback relay.
+With no profile saved it defaults to `http://localhost:23274`; a profile
+overrides that. Launching the distro for you is step 6 — for now the distro is
+yours to start.
+
+There are two Windows builds, x64 and ARM64, because Snapdragon machines run
+Windows natively and an x64 build only gets there under Prism emulation. Each
+bundles the agent for its own architecture — WSL is native to the host, so an
+ARM64 host means an ARM64 distro. Running the wrong one copies an agent the
+distro cannot exec; the reason lands in `~/cdash-agent.log`, not at copy time.
+
+When the agent is unreachable the client shows the same setup dialog the
+Android app does, with a command to paste into WSL. It hands the binary over
+**through the filesystem, not a socket**: the app writes the bundled agent into
+`%TEMP%\cdash` and the command copies it from `/mnt/c/…`, which WSL mounts by
+default. Temp rather than app data because the copy is staging — dead once the
+distro has it — and the dialog re-exports it every time it opens, so a cleaned
+temp heals itself. A loopback handoff would not work —
+under WSL2's default NAT networking the distro's `127.0.0.1` is its own, not
+the host's, and that only changes under `networkingMode=mirrored`. Binding a
+routable interface instead would serve the binary to the whole network.
+
+Note the asymmetry: Windows→WSL loopback *does* work by default, which is why
+the client reaches the agent on `localhost:23274` with no configuration. It is
+only the reverse direction that needs `/mnt/c`.
+
+## Android client
+
+An APK thin client for the phone. It links no agent either — Android cannot
+spawn the processes the agent drives, so the agent runs in **F-Droid Termux**
+(the Play-store build cannot `exec` from its own data directory; see the design
+doc's Android section) and the app talks to it on `localhost:23274`, which
+Android does not isolate between apps.
+
+The point of the app over "Add to home screen" is onboarding: the PWA is served
+*by* the agent, so it cannot tell anyone how to install one. The APK carries its
+own UI, so when the agent is unreachable it shows a setup screen with a
+copy-paste command for Termux. The command downloads the agent — bundled in the
+APK and served over loopback, since every route through shared storage needs
+MediaStore or a permission Termux cannot hold on Android 11+ — and appends a
+guard to `~/.bashrc` so the agent starts itself whenever Termux is opened. After
+one paste the only thing to remember is to open Termux.
+
+Pasting again replaces the agent file: the download lands beside it and is
+renamed into place, which works while the old one runs (a direct write fails
+with "Text file busy") and never replaces a good agent with a failed or
+truncated download. It does **not** restart anything. The setup dialog only
+appears when the agent is unreachable, and the shell guard only starts an agent
+that is not answering, so a healthy old agent keeps running its old binary until
+you stop it (`pkill -x cdash-agent`; in Termux `pkg install procps` first) and
+open a new shell. If you pasted an earlier version of this command, also delete
+its `# claude-dashboard` block from `~/.bashrc`: the guard is only appended when
+none exists, so an old one is never replaced. The guard lives in `~/.bashrc`, so
+a login shell that does not read it (zsh) never starts the agent.
+
+`test/install-script.test.mjs` runs that command in a scratch `$HOME` — it is
+pasted into a shell we never see, so it is tested as one, using the very
+functions `app.js` ships rather than a copy.
+
+**Security.** Android does not isolate loopback between apps, and this client
+cannot yet authenticate (profiles accept only `auth: none` until the keyring
+step lands), so the agent in Termux is open to every app on the phone that holds
+the `INTERNET` permission — and the agent launches sessions with
+`--dangerously-skip-permissions`. Run it only on a phone where you trust every
+installed app. The binary the app hands to Termux is the public release
+artifact. Its loopback listener starts the first time the setup screen opens —
+not at launch — and then stays up until the app exits. It is not the sensitive
+part.
+
 ## Run
 
 ```
-cargo run -p cdash-agent     # http://127.0.0.1:8080
+cargo run -p cdash-agent     # http://127.0.0.1:23274
 ```
 
-### Static release builds
+### Release builds
 
-`scripts/release.sh` builds static musl binaries for VPS/WSL (`x86_64`) and VPS/Termux (`aarch64`) and boots both as the release gate — the gate is the startup banner, since a binary that dies instantly would otherwise pass. Prereqs: `rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl`, `sudo apt install musl-tools qemu-user`, and the [musl.cc](https://musl.cc) `aarch64-linux-musl-cross` toolchain unpacked at `~/.local/opt/`.
+`scripts/release.sh` builds all five artifacts:
 
-CI gates the same two targets but sources its cross-toolchain from `taiki-e/setup-cross-toolchain-action` rather than musl.cc, which stopped responding from GitHub's runners and took every release build down with it. Use the same action if the local prereq above fails.
+| Artifact | Target | Runs on |
+|---|---|---|
+| `cdash-agent` | `x86_64-unknown-linux-musl` | VPS, WSL |
+| `cdash-agent` | `aarch64-unknown-linux-musl` | VPS, Termux on Android (F-Droid Termux — see the design doc's Android section) |
+| `cdash-tauri.exe` | `x86_64-pc-windows-msvc` | Windows desktop client (x64), bundling the x86_64 agent |
+| `cdash-tauri.exe` | `aarch64-pc-windows-msvc` | Windows desktop client (ARM64), bundling the aarch64 agent |
+| `cdash-dashboard-android-arm64.apk` | `aarch64-linux-android` | Android thin client |
+
+Both agents are **booted** as the release gate — the gate is the startup banner,
+since a binary that dies instantly would otherwise pass. The Windows client
+cannot run on a Linux builder, so its gate is that it links, which is also the
+gate on the `cfg(not(windows))` split that keeps the agent out of it.
+
+The APK step is skipped unless `ANDROID_HOME` and `NDK_HOME` are set, and
+`gen/android/` is regenerated on every run rather than tracked. Two things about
+it are worth knowing:
+
+- It builds **release**, then signs with the SDK's debug key. Android refuses to
+  install an unsigned APK at all, so "unsigned" is not a shippable state — the
+  debug key is a local test signature, not a distribution one. The debug *build*
+  is not the answer: its unstripped `.so` makes a 138 MB APK, against 21 MB for
+  release.
+- Gradle enables cleartext HTTP for debug only, so the script patches the
+  release build type to allow it, as insurance for any WebView traffic to
+  `http://localhost:23274`. The client's own API calls go through native sockets,
+  which Android's cleartext policy is not expected to gate, so the patch may
+  prove unnecessary; it has not been tested either way on a device.
+
+Prereqs: `rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-msvc aarch64-pc-windows-msvc`,
+`pip install ziglang && cargo install cargo-zigbuild`,
+`cargo install cargo-xwin`, `sudo apt install clang lld qemu-user-static`, and
+for the APK `cargo install tauri-cli --version "^2"` plus an Android SDK, an
+NDK, the `aarch64-linux-android` Rust target and a JDK (`keytool` creates the
+debug keystore if you have none). Use the **Rust** Tauri CLI, not the npm one: the npm CLI templates
+`node tauri` into the generated gradle, which only resolves in an npm-layout
+project, and this is a Rust workspace.
+
+`cargo-zigbuild` supplies musl libc and a cross C compiler for `aws-lc-sys` from
+one download, replacing both `musl-tools` and the [musl.cc](https://musl.cc)
+toolchain that stopped responding and took every release build down with it. CI
+gates the two musl targets through `taiki-e/setup-cross-toolchain-action`
+instead, which serves the same purpose on a runner.
 
 The `aarch64` binary is confirmed working on-device under Termux (Android, 2026-08-29): UI, host stats and live session data all functional.
 
@@ -42,7 +154,7 @@ Requires `tmux`, `claude` and `git` on `PATH`; the agent reports any that are mi
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PORT` | `8080` | Port to listen on. `0` picks any free port. |
+| `PORT` | `23274` | Port to listen on. `0` picks any free port. **Breaking change:** the default was `8080`, so a tunnel, unit file or bookmark that relied on it must set `PORT=8080` or move. The default is CDASH on a phone keypad, picked to collide with nothing: below the 32768 ephemeral range so the kernel never hands it out, and clear of 3000/5000/8000/8080/8888. |
 | `CDASH_BIND` | `127.0.0.1` | Address to bind. **Breaking change:** the Node agent bound every interface. LAN access now requires setting `CDASH_BIND=0.0.0.0` explicitly. |
 | `CLAUDE_DIR` | `~/.claude` | Path to the Claude config/projects directory. The subscription token for usage limits is read from `$CLAUDE_DIR/.credentials.json`. |
 | `DISK_EXTRA` | — | Optional second mount to report alongside `/`, e.g. `/mnt/d`. |
@@ -88,7 +200,7 @@ outward and proxies to loopback, so there is no inbound port to bypass and
 nothing for a guard to protect; Cloudflare's own documentation says a tunnelled
 origin need not validate the token. Keep `cf-access` on anyway if **other users
 or services share the box** — with `none`, any local user reaching
-`127.0.0.1:8080` gets code execution as *you*, which is a real escalation rather
+`127.0.0.1:23274` gets code execution as *you*, which is a real escalation rather
 than a no-op. `bearer` does not substitute here: browsers do not send
 `Authorization` headers.
 

@@ -1,3 +1,13 @@
+/* Wrapped so a second evaluation in the same page is harmless. Top-level
+   `const`s are instantiated before any statement runs, so a re-run of this
+   file threw "Identifier 'isTauri' has already been declared" at parse time —
+   which then masked the error that had actually broken the first run. Inside a
+   function scope, a re-run is stopped by the boot guard below. */
+(() => {
+// A second evaluation should also not start a second poll loop over the same
+// DOM, so the boot is claimed once per page.
+if (window.__cdashBooted) return;
+window.__cdashBooted = true;
 const $ = s => document.querySelector(s);
 const MODELS = ['sonnet', 'opus', 'haiku', 'fable'];
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -31,9 +41,20 @@ const ICONS = {
    'system' (the default, no stored value) follows the OS via prefers-color-scheme
    and stays live if the OS setting changes. */
 const THEME_KEY = 'cdash-theme';
+
+/* An Android WebView can have DOM storage disabled, where *reading*
+   `window.localStorage` throws rather than returning null. Unguarded, that
+   killed this file on its first line of theme code — before the launcher, the
+   dropdowns or the poll loop existed — and the app came up as a dead shell on
+   "Connecting…". A theme that does not persist is the acceptable cost. */
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* not persisted */ } },
+  remove(k) { try { localStorage.removeItem(k); } catch { /* nothing to clear */ } },
+};
 const MODES = ['system', 'light', 'dark'];
 const systemDark = () => matchMedia('(prefers-color-scheme: dark)').matches;
-const themeMode = () => { const s = localStorage.getItem(THEME_KEY); return s === 'light' || s === 'dark' ? s : 'system'; };
+const themeMode = () => { const s = store.get(THEME_KEY); return s === 'light' || s === 'dark' ? s : 'system'; };
 const resolved = mode => mode === 'system' ? (systemDark() ? 'dark' : 'light') : mode;
 
 function applyMode(mode) {
@@ -52,8 +73,8 @@ function applyMode(mode) {
 }
 $('#theme-toggle').onclick = () => {
   const next = MODES[(MODES.indexOf(themeMode()) + 1) % MODES.length];
-  if (next === 'system') localStorage.removeItem(THEME_KEY);
-  else localStorage.setItem(THEME_KEY, next);
+  if (next === 'system') store.remove(THEME_KEY);
+  else store.set(THEME_KEY, next);
   applyMode(next);
 };
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
@@ -117,10 +138,14 @@ function toast(msg) {
 const isTauri = typeof window !== 'undefined' &&
   ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
 
+const invoke = (...a) => {
+  const f = window.__TAURI__?.core?.invoke;
+  if (!f) throw new Error('Tauri IPC unavailable (withGlobalTauri off?)');
+  return f(...a);
+};
+
 async function api(path, body) {
   if (isTauri) {
-    const invoke = window.__TAURI__?.core?.invoke;
-    if (!invoke) throw new Error('Tauri IPC unavailable (withGlobalTauri off?)');
     let res;
     try {
       res = await invoke('api_request', { method: body ? 'POST' : 'GET', path, body });
@@ -453,6 +478,7 @@ pkCrumbs.addEventListener('click', e => { const c = e.target.closest('[data-nav]
 let bk = cdashBackoff.initial();
 let timer = null;
 let gen = 0; // stale-tick guard: a superseded tick's result is dropped
+let polled = false; // has any tick actually run to completion?
 
 function arm() {
   clearTimeout(timer);
@@ -461,7 +487,11 @@ function arm() {
 
 async function tick() {
   const g = gen;
-  if (document.hidden) { arm(); return; }
+  // Skip background polls, but never the first one. An Android WebView is
+  // hidden until its activity resumes, and `visibilitychange` can fire before
+  // the listener below is attached — which left the app arming forever on
+  // "Connecting…", with no request ever sent.
+  if (document.hidden && polled) { arm(); return; }
   let outcome;
   try {
     const data = await api('/api/sessions');
@@ -469,6 +499,7 @@ async function tick() {
     render(data);
     $('#health').className = 'dot ok';
     $('#health-label').textContent = 'Connected';
+    markConnected();
     outcome = 'ok';
   } catch (err) {
     if (g !== gen) return;
@@ -478,6 +509,9 @@ async function tick() {
     outcome = cdashBackoff.outcomeFor(err.status);
     $('#health').className = 'dot bad';
     $('#health-label').textContent = 'Disconnected';
+    // Only the thin clients have a story the user can act on from here; on
+    // every other platform the agent is in-process and already running.
+    if (isTauri) hostPlatform().then(p => { if (SHELL[p]) showSetup(); });
   }
   // Logs are secondary: their failure must not flip the indicator or
   // advance the ladder once sessions have rendered.
@@ -485,6 +519,7 @@ async function tick() {
     try { $('#logs').textContent = (await api('/api/logs')).lines.join('\n'); } catch {}
   }
   if (g !== gen) return;
+  polled = true;
   bk = cdashBackoff.next(bk, outcome);
   if (!bk.halted) arm();
 }
@@ -498,6 +533,114 @@ function poll() {
   tick();
 }
 
+
+/* ---------- Agent setup (the thin clients: Android and Windows) ----------
+   These builds carry their own UI, so — unlike the PWA, which the agent itself
+   serves — they can say how to install an agent before one exists.
+
+   Android curls the bundled binary out of this process over loopback, which
+   Android does not isolate between apps. Windows cannot: under WSL2's default
+   NAT networking the distro's 127.0.0.1 is its own, not the host's, so the app
+   writes the binary out and WSL reads it through /mnt/c instead.
+
+   Either way the pasted block appends a guard to ~/.bashrc, so the agent comes
+   back by itself every time that shell opens. That is what keeps the reminder
+   down to "open Termux" (or WSL) instead of "run this again". */
+let host = null;          // 'android' | 'windows' | 'linux' | … once resolved
+let setupDismissed = false;
+
+/// Resolved on first use rather than at load: a throw at the top level of this
+/// file would take `poll()` down with it, and the whole UI with that.
+async function hostPlatform() {
+  if (host === null) {
+    try { host = await invoke('host_platform'); } catch { host = 'unknown'; }
+  }
+  return host;
+}
+
+/// The shell the agent lives in, per platform — and the only thing that
+/// differs in the dialog's wording.
+const SHELL = { android: 'Termux', windows: 'WSL' };
+
+/// Fetching the binary is the only part that differs; everything after it —
+/// the executable bit, the startup guard, sourcing it — is identical, so it
+/// lives here once.
+///
+/// The binary lands beside its final name and is renamed into place. Writing
+/// straight over a running agent fails with "Text file busy", and re-pasting is
+/// exactly the case this dialog exists for; a rename works on a running binary
+/// and never leaves a half-written one at the real path. The `&&` chain stops
+/// a failed or truncated download from being renamed over a good agent, and the
+/// `||` tidies the leftover.
+const setupScript = (fetch, port, keepAwake) => `${fetch} &&
+chmod +x "$HOME/cdash-agent.new" &&
+mv -f "$HOME/cdash-agent.new" "$HOME/cdash-agent" ||
+rm -f "$HOME/cdash-agent.new"
+grep -q cdash-agent "$HOME/.bashrc" 2>/dev/null || cat >> "$HOME/.bashrc" <<'CDASH'
+
+# claude-dashboard: start the agent whenever this shell opens, unless it is up
+if ! curl -fsS -m 1 http://127.0.0.1:${port}/api/health >/dev/null 2>&1; then${keepAwake}
+  nohup "$HOME/cdash-agent" >"$HOME/cdash-agent.log" 2>&1 </dev/null &
+fi
+CDASH
+. "$HOME/.bashrc"`;
+
+/// `curl` out of the app's own loopback server, or `cp` from the Windows
+/// filesystem that WSL already mounts. The source is quoted — a Windows path
+/// runs through the user's name, and names have spaces in them — and the four
+/// characters that stay live inside double quotes are escaped.
+const fetchLine = (kind, source) => kind === 'copy'
+  ? `cp "${source.replace(/[\\"$\x60]/g, '\\$&')}" "$HOME/cdash-agent.new"`
+  : `curl -fsS -o "$HOME/cdash-agent.new" ${source}`;
+
+/// Android kills background processes that hold no wake lock. Nothing on
+/// Windows needs this, and a stray termux-* line in a WSL .bashrc is a puzzle
+/// for whoever reads it later.
+const keepAwakeLine = kind => kind === 'copy' ? '' : '\n  termux-wake-lock 2>/dev/null';
+
+async function showSetup() {
+  const dlg = $('#setup');
+  if (dlg.open || setupDismissed) return;
+  document.querySelectorAll('.shell-name').forEach(el => {
+    el.textContent = SHELL[host] || 'your shell';
+  });
+  try {
+    const { kind, source, port } = await invoke('agent_handoff');
+    $('#setup-addr').textContent = `localhost:${port}`;
+    $('#setup-script').textContent =
+      setupScript(fetchLine(kind, source), port, keepAwakeLine(kind));
+  } catch (e) {
+    // No bundled agent (a build without CDASH_AGENT_BIN): say so rather than
+    // showing a command that fetches nothing.
+    $('#setup-script').textContent = String(e?.message ?? e);
+  }
+  if (!dlg.open) dlg.showModal();
+}
+
+function markConnected() {
+  setupDismissed = false;
+  if ($('#setup').open) $('#setup').close();
+}
+
+$('#setup-close').innerHTML = ICONS.x;
+$('#setup-close').onclick = () => { setupDismissed = true; $('#setup').close(); };
+$('#setup-retry').onclick = () => { $('#setup').close(); poll(); };
+$('#setup-copy').onclick = async () => {
+  const text = $('#setup-script').textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(`Copied \u2014 paste it into ${SHELL[host] || 'your shell'}`);
+  } catch {
+    // Android WebView can refuse the async clipboard; selecting the block at
+    // least makes a long-press copy one gesture.
+    const r = document.createRange();
+    r.selectNodeContents($('#setup-script'));
+    getSelection().removeAllRanges();
+    getSelection().addRange(r);
+    toast('Long-press the command to copy');
+  }
+};
+
 // Give the launch button its resting icon + label.
 $('#launch').innerHTML = `${ICONS.play}<span>Launch</span>`;
 
@@ -508,3 +651,23 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) poll
 // Both of sw.js's assumptions (same-origin /api/, http-cache semantics) break
 // in the Tauri webview.
 if (!isTauri && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+// A wry webview swallows target="_blank": the URL never reaches Android's
+// intent router, so https://claude.ai/code/<id> — a verified app link the
+// Claude app claims via pathAdvancedPattern "/code/[^/]+" — loads inside the
+// webview against its own empty cookie jar instead of handing off to the app.
+// open_external routes it through the OS, which is what makes the app link fire.
+// Delegated on body so it covers every external anchor, not just "Open in Claude".
+if (isTauri) document.body.addEventListener('click', e => {
+  const a = e.target.closest('a[target="_blank"]');
+  if (!a?.href) return;
+  e.preventDefault();
+  // `invoke` throws synchronously when the IPC is missing, so the rejection
+  // path alone would not catch it.
+  try {
+    invoke('open_external', { url: a.href })
+      .catch(err => toast(String(err?.message ?? err)));
+  } catch (err) {
+    toast(String(err?.message ?? err));
+  }
+});
+})();

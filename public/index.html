@@ -101,7 +101,56 @@
   </div>
 </dialog>
 
+<dialog id="setup" class="dialog" aria-label="Set up the agent">
+  <div class="dialog-body">
+    <div class="dialog-head">
+      <h2 class="dialog-title">Can’t reach the agent</h2>
+      <button id="setup-close" class="icon-btn" type="button" aria-label="Close"></button>
+    </div>
+    <div class="setup-body">
+      <p class="setup-lede">cdash-agent isn’t answering on <code id="setup-addr">the agent's port</code>.</p>
+      <ul class="setup-cases">
+        <li><b>First time here?</b> Paste the command below into <span class="shell-name">your shell</span>.</li>
+        <li><b>Installed already?</b> Just open <span class="shell-name">your shell</span> — it starts the agent for you.</li>
+        <li><b><span class="shell-name">Your shell</span> already open?</b> Paste it again to reinstall.</li>
+      </ul>
+      <pre id="setup-script" class="setup-script" tabindex="0"></pre>
+      <p class="setup-note">One paste is enough: it also teaches
+        <span class="shell-name">your shell</span> to start the agent every time you open it.</p>
+    </div>
+    <div class="setup-foot">
+      <button id="setup-copy" class="btn-launch" type="button">Copy</button>
+      <button id="setup-retry" class="btn-ghost" type="button">Try again</button>
+    </div>
+  </div>
+</dialog>
+
 <div id="toast" role="status" aria-live="polite"></div>
+<!-- Before app.js, deliberately: an error thrown while app.js is still loading
+     leaves a dead shell reading "Connecting…", and a phone has no console to
+     ask. Registered here, the header reports it instead. -->
+<script>
+  (function () {
+    // The FIRST error, with where it came from: a later failure is usually a
+    // consequence of the first one, and overwriting the label loses the cause.
+    var first = null, seen = 0;
+    addEventListener('error', function (e) {
+      seen++;
+      if (!first) {
+        first = e.message || 'script failed';
+        if (e.filename) {
+          first += ' @ ' + e.filename.split('/').pop() + ':' + e.lineno + ':' + e.colno;
+        }
+      }
+      var dot = document.getElementById('health');
+      var label = document.getElementById('health-label');
+      if (dot) dot.className = 'dot bad';
+      if (label) {
+        label.textContent = 'Error: ' + first + (seen > 1 ? ' (+' + (seen - 1) + ' more)' : '');
+      }
+    });
+  })();
+</script>
 <script src="transport/backoff.js"></script>
 <script src="app.js"></script>
 </body>
