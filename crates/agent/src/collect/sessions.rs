@@ -36,6 +36,10 @@ pub struct Stats {
     #[serde(rename = "ramTotalKb")]
     pub ram_total_kb: u64,
     pub disks: Vec<DiskUsage>,
+    /// Absent for API-key users and until the first refresh lands; the strip
+    /// simply shows no Claude tiles rather than empty ones.
+    #[serde(rename = "claudeUsage", skip_serializing_if = "Option::is_none")]
+    pub claude_usage: Option<Vec<crate::collect::usage::UsageLimit>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -200,6 +204,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>) -> SessionsResponse {
             ram_used_kb: machine.ram_used_kb,
             ram_total_kb: machine.ram_total_kb,
             disks,
+            claude_usage: ctx.usage.get(&ctx.claude_dir, &ctx.host.log),
         },
     }
 }

@@ -259,6 +259,7 @@ button, input, select { font: inherit; }
 }
 .meter-fill.warn { background: var(--warn); }
 .meter-fill.crit { background: var(--danger); }
+.stat-sub { margin-top: 7px; font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
 
 /* ---------- Sections ---------- */
 .section { margin-bottom: 28px; }
