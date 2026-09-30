@@ -58,7 +58,7 @@ fn base_url() -> String {
     base_url_from(std::env::var("ANTHROPIC_BASE_URL").ok().as_deref())
 }
 
-/// One limit tile. `short` is the stat-tile label (shown as "Claude <short>");
+/// One limit tile. `short` is the stat-tile label ("Session", "Week", a model);
 /// `long` is the tooltip.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct UsageLimit {
@@ -268,7 +268,11 @@ impl UsageCache {
 
     fn spawn_refresh(self: Arc<Self>, claude_dir: PathBuf, log: Arc<LogBuffer>) {
         tokio::spawn(async move {
-            let res = fetch_usage(&claude_dir).await;
+            // FETCH_TIMEOUT bounds the request, not the credentials read before
+            // it; a stalled mount would otherwise leave `busy` set for good.
+            let res = tokio::time::timeout(FETCH_TIMEOUT * 2, fetch_usage(&claude_dir))
+                .await
+                .unwrap_or_else(|_| Err(Miss::Request("timed out".to_string())));
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(line) = st.record(res, Instant::now()) {
                 log.push(line);
