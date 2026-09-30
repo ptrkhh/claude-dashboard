@@ -82,8 +82,9 @@ step lands), so the agent in Termux is open to every app on the phone that holds
 the `INTERNET` permission — and the agent launches sessions with
 `--dangerously-skip-permissions`. Run it only on a phone where you trust every
 installed app. The binary the app hands to Termux is the public release
-artifact and is served only while the setup screen is open; it is not the
-sensitive part.
+artifact. Its loopback listener starts the first time the setup screen opens —
+not at launch — and then stays up until the app exits. It is not the sensitive
+part.
 
 ## Run
 
