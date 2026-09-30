@@ -2,6 +2,7 @@ const $ = s => document.querySelector(s);
 const MODELS = ['sonnet', 'opus', 'haiku', 'fable'];
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 let armedKill = null; // ponytail: survives render() replacing #running.innerHTML
+const drafts = {}; // half-typed send-bar text by session name, for the same reason
 const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 
 /* ---------- Inline icons (stroke = currentColor, sized via CSS) ---------- */
@@ -187,7 +188,7 @@ function runningCard(r) {
   const send = r.external ? ''
     : `<form class="send" data-send="${esc(r.name)}">
          <input class="send-input" type="text" placeholder="! gcloud auth login" aria-label="Type into the Claude TUI"
-                autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
+                value="${esc(drafts[r.name])}" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
          <button class="send-btn" type="submit" aria-label="Send to session">${ICONS.send}</button>
        </form>`;
   return `
@@ -240,9 +241,9 @@ function render(d) {
   ];
   $('#stats').innerHTML = tiles.map(statTile).join('');
 
-  // The poll replaces this grid wholesale, which would wipe a half-typed
-  // command (and drop the phone keyboard) mid-sentence. Leave it alone while
-  // someone is typing into a card; it refreshes on the next poll after blur.
+  // The poll replaces this grid wholesale, which would drop the phone keyboard
+  // mid-sentence. Leave it alone while someone is typing into a card; it
+  // refreshes on the next poll after blur (the text itself survives in `drafts`).
   if (!document.activeElement?.classList.contains('send-input'))
     $('#running').innerHTML = d.running.map(runningCard).join('') || '<div class="empty">No running sessions</div>';
   $('#resumable').innerHTML = d.resumable.map(resumableCard).join('') || '<div class="empty">No resumable sessions</div>';
@@ -271,6 +272,10 @@ document.body.addEventListener('click', async e => {
 });
 
 // Send-to-TUI: delegated, because render() replaces the cards every poll.
+document.body.addEventListener('input', e => {
+  const form = e.target.closest('form.send');
+  if (form) drafts[form.dataset.send] = e.target.value;
+});
 document.body.addEventListener('submit', async e => {
   const form = e.target.closest('form.send');
   if (!form) return;
@@ -280,8 +285,13 @@ document.body.addEventListener('submit', async e => {
   const text = input.value.trim();
   if (!text) return;
   btn.disabled = true;
-  try { await api('/api/keys', { name: form.dataset.send, text }); input.value = ''; toast('Sent to session'); }
-  catch (err) { toast(err.message); }
+  try {
+    await api('/api/keys', { name: form.dataset.send, text });
+    delete drafts[form.dataset.send]; input.value = ''; toast('Sent to session');
+    // A focused input freezes the grid (see render), so let go of it and poll
+    // now: the point of sending is to watch the session answer.
+    input.blur(); poll();
+  } catch (err) { toast(err.message); }
   finally { btn.disabled = false; }
 });
 

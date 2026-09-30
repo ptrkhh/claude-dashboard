@@ -111,9 +111,15 @@ pub async fn send_keys(ctx: &Arc<Ctx>, name: &str, text: Option<&str>) -> Result
         .await
         .map_err(Refused::Failed)?;
 
-    let preview: String = keys.text.chars().take(60).collect();
-    ctx.host.log.push(format!("keys {}: {}", keys.name, preview));
+    ctx.host.log.push(log_line(&keys));
     Ok(())
+}
+
+/// What the log panel gets. Never the text: this bar exists to answer prompts,
+/// and what people type at them is a login code or a token, which `/api/logs`
+/// would then serve to anyone who can open the dashboard.
+fn log_line(k: &SendKeys) -> String {
+    format!("keys {}: {} chars", k.name, k.text.chars().count())
 }
 
 #[cfg(test)]
@@ -176,6 +182,12 @@ mod tests {
     #[test]
     fn keeps_tab_which_the_node_class_also_spared() {
         assert_eq!(parse("cdash-a", "a\tb").unwrap().text, "a\tb");
+    }
+
+    #[test]
+    fn the_log_line_says_how_much_was_sent_not_what() {
+        let k = SendKeys { name: "cdash-a".to_string(), text: "sk-ant-oat01-secret".to_string() };
+        assert_eq!(log_line(&k), "keys cdash-a: 19 chars");
     }
 
     #[test]
