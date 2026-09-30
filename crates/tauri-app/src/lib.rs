@@ -160,6 +160,12 @@ fn validate_profile(input: &ProfileInput) -> Result<(), String> {
     if input.managed != "in-process" && input.managed != "external" {
         return Err("managed must be \"in-process\" or \"external\"".into());
     }
+    // The client sends requests wherever this points, so refuse anything that is
+    // not plainly a web address before it is stored.
+    match reqwest::Url::parse(&input.base_url) {
+        Ok(u) if matches!(u.scheme(), "http" | "https") && u.host_str().is_some() => {}
+        _ => return Err(format!("base_url {:?} is not an http(s) URL", input.base_url)),
+    }
     if input.auth != "none" {
         // Fail closed: a secret-bearing profile must never be silently accepted.
         return Err(format!(
@@ -251,8 +257,10 @@ fn base_url(inproc: Option<String>, active: Option<&ProfileRecord>) -> Option<St
         .or_else(|| (!cfg!(inproc_agent)).then(local_agent_base))
 }
 
-/// The entire data path: JS names a path, we resolve it against the bound
-/// loopback address only. No cookie jar; the client is built once.
+/// The entire data path: JS names a path, we resolve it against the address
+/// the caller picked — the in-process agent's loopback address, else the active
+/// profile's validated http(s) `base_url`, else the local default on a thin
+/// client. No cookie jar; the client is built once.
 async fn request_inner(
     http: &reqwest::Client,
     addr: Option<String>,
@@ -350,12 +358,21 @@ mod handoff {
     use std::net::{TcpListener, TcpStream};
     #[cfg(any(not(windows), test))]
     use std::sync::Mutex;
+    #[cfg(any(not(windows), test))]
+    use std::time::Duration;
+
+    /// Any app on the phone can connect here, and the accept loop serves one
+    /// connection at a time: without a bound, a client that connects and says
+    /// nothing would starve the one fetch that matters. Loopback moves 9 MB in
+    /// milliseconds, so this is generous.
+    #[cfg(any(not(windows), test))]
+    const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
     /// The `aarch64-unknown-linux-musl` agent, embedded when `CDASH_AGENT_BIN`
     /// named one at build time; empty otherwise.
     pub const AGENT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cdash-agent.bin"));
 
-    #[cfg(not(windows))]
+    #[cfg(any(not(windows), test))]
     static URL: Mutex<Option<String>> = Mutex::new(None);
 
     #[cfg(not(windows))]
@@ -380,7 +397,7 @@ mod handoff {
             // One connection at a time is right for a file fetched once by
             // hand; `flatten` drops connections that failed to accept.
             for conn in listener.incoming().flatten() {
-                let _ = respond(conn, body);
+                let _ = respond(conn, body, IO_TIMEOUT);
             }
         });
         let addr = format!("http://127.0.0.1:{port}/cdash-agent");
@@ -392,7 +409,9 @@ mod handoff {
     /// asked for. Reading it at all is what keeps the client from seeing a
     /// reset instead of the body.
     #[cfg(any(not(windows), test))]
-    fn respond(mut conn: TcpStream, body: &[u8]) -> std::io::Result<()> {
+    pub(super) fn respond(mut conn: TcpStream, body: &[u8], timeout: Duration) -> std::io::Result<()> {
+        conn.set_read_timeout(Some(timeout))?;
+        conn.set_write_timeout(Some(timeout))?;
         let mut scratch = [0u8; 1024];
         let _ = conn.read(&mut scratch)?;
         let head = format!(
@@ -563,6 +582,9 @@ pub fn run() {
 mod tests {
     use super::*;
 
+    // Thin clients (Windows, Android) link no agent, so `start_locked` is an
+    // error there by design; the tests that need a live server stay off them.
+    #[cfg(inproc_agent)]
     #[test]
     fn start_returns_loopback_url_and_is_idempotent() {
         let state = Mutex::new(None);
@@ -575,6 +597,7 @@ mod tests {
         assert_eq!(addr_locked(&state).unwrap(), None, "stop must clear the state");
     }
 
+    #[cfg(inproc_agent)]
     #[test]
     fn stop_then_start_binds_again() {
         let state = Mutex::new(None);
@@ -590,16 +613,19 @@ mod tests {
 
     /// `start_locked`/`stop_locked` block on tauri's own runtime; they must
     /// not run inside this test's tokio context.
+    #[cfg(inproc_agent)]
     fn boot() -> (Mutex<Option<Bound>>, String) {
         let state = Mutex::new(None);
         let addr = std::thread::scope(|s| s.spawn(|| start_locked(&state).unwrap()).join().unwrap());
         (state, addr)
     }
 
+    #[cfg(inproc_agent)]
     fn shutdown(state: &Mutex<Option<Bound>>) {
         std::thread::scope(|s| s.spawn(|| stop_locked(state).unwrap()).join().unwrap());
     }
 
+    #[cfg(inproc_agent)]
     #[tokio::test]
     async fn request_round_trips_health() {
         let (state, addr) = boot();
@@ -614,13 +640,13 @@ mod tests {
 
     #[tokio::test]
     async fn relative_paths_are_rejected() {
-        let (state, addr) = boot();
+        // Rejected before any request is made, so nothing needs to be listening.
         let http = reqwest::Client::new();
-        let err = request_inner(&http, Some(addr), None, "GET".into(), "api/x".into(), None)
+        let addr = Some("http://127.0.0.1:9".to_string());
+        let err = request_inner(&http, addr, None, "GET".into(), "api/x".into(), None)
             .await
             .unwrap_err();
         assert!(err.contains("absolute"), "got: {err}");
-        shutdown(&state);
     }
 
     #[tokio::test]
@@ -729,6 +755,38 @@ mod tests {
         assert!(head.starts_with("HTTP/1.0 200 OK"), "got: {head}");
         assert!(head.contains(&format!("Content-Length: {}", BODY.len())), "got: {head}");
         assert_eq!(body, BODY);
+    }
+
+    #[test]
+    fn a_silent_client_cannot_hold_the_handoff_open() {
+        use std::net::{TcpListener, TcpStream};
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        // Connects and never sends a byte: what a stray app on the phone can do.
+        let _silent = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (conn, _) = listener.accept().unwrap();
+
+        let started = Instant::now();
+        let outcome = handoff::respond(conn, b"agent", Duration::from_millis(100));
+        assert!(outcome.is_err(), "the read must time out, not wait for a request");
+        assert!(started.elapsed() < Duration::from_secs(2), "and promptly");
+    }
+
+    #[test]
+    fn profiles_must_point_at_a_web_address() {
+        let mut doc = ProfilesDoc::new();
+        for ok in ["http://127.0.0.1:23274", "https://dash.example.com/base"] {
+            let mut p = input("ok");
+            p.base_url = ok.into();
+            profile_upsert(&mut doc, p).unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+        for bad in ["", "localhost:23274", "file:///etc/passwd", "ftp://host/", "javascript:alert(1)", "http://"] {
+            let mut p = input("bad");
+            p.base_url = bad.into();
+            assert!(profile_upsert(&mut doc, p).unwrap_err().contains("http(s)"), "{bad:?}");
+        }
+        assert!(!doc.contains_key("bad"), "a refused profile is not stored");
     }
 
     #[test]
@@ -854,7 +912,7 @@ mod tests {
     /// Bounded to one mutation via `LazyLock` and done before any store call.
     /// The clean upgrade is a `tests/store.rs` of its own — which needs this
     /// binary crate split into lib + bin, more surgery than the risk is worth.
-    static STORE_DIR: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
+    static STORE_DIR: std::sync::LazyLock<std::path::PathBuf> = std::sync::LazyLock::new(|| {
         let dir = std::env::temp_dir().join(format!("cdash-tauri-store-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::env::set_var("XDG_DATA_HOME", &dir);

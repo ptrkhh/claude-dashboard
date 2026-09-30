@@ -19,7 +19,16 @@ fn main() {
         // Copied rather than `include_bytes!`d from its own path so that a
         // build without it still compiles — the empty file is what the setup
         // screen reports as "no agent bundled".
-        Some(src) => std::fs::copy(&src, &out).map(drop),
+        Some(src) => {
+            // release.sh rebuilds the agent in place, so the variable never
+            // changes between runs; the file itself has to be watched. It works
+            // without this today only because tauri-build watches a
+            // `capabilities/` directory that does not exist, which makes this
+            // script rerun on every build. The day one is added, an unwatched
+            // agent would be embedded stale.
+            println!("cargo::rerun-if-changed={}", std::path::Path::new(&src).display());
+            std::fs::copy(&src, &out).map(drop)
+        }
         None => std::fs::write(&out, []),
     }
     .expect("staging the bundled agent");

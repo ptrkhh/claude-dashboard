@@ -1,11 +1,13 @@
 // The setup command is copy-pasted by hand into a shell we never see — Termux
-// on Android, WSL on Windows — so it is tested as a shell script, against the
-// real templates read out of app.js. A second copy of the text here could
-// drift from the one that ships.
+// on Android, WSL on Windows — so it is tested as a shell script. The three
+// functions that build it are evaluated as written in app.js, not re-typed
+// here: a second copy of the text could drift from the one that ships.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, mkdtempSync, chmodSync, existsSync, statSync } from 'node:fs';
-import { execFile } from 'node:child_process';
+import { readFileSync, writeFileSync, mkdtempSync, chmodSync, copyFileSync, existsSync, statSync } from 'node:fs';
+import { execFile, spawn } from 'node:child_process';
+import { once } from 'node:events';
+import vm from 'node:vm';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,18 +24,17 @@ const PORT = 23274;
 
 const src = () => readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 
-function template(name, re, subs) {
-  const m = src().match(re);
-  assert.ok(m, `app.js still defines ${name} as a template literal`);
-  return Object.entries(subs).reduce((t, [k, v]) => t.replaceAll('${' + k + '}', v), m[1]);
-}
+const shipped = (() => {
+  const js = src();
+  const from = js.indexOf('const setupScript =');
+  const to = js.indexOf('async function showSetup');
+  assert.ok(from > 0 && to > from, 'app.js still defines the setup helpers in one block');
+  return vm.runInNewContext(`${js.slice(from, to)}; ({ setupScript, fetchLine, keepAwakeLine })`);
+})();
 
 /** The shipped command for one platform, assembled the way showSetup does. */
-function setupScript(fetch, keepAwake) {
-  return template('setupScript', /const setupScript = \(fetch, port, keepAwake\) => `([\s\S]*?)`;\n/, {
-    fetch, port: String(PORT), keepAwake,
-  });
-}
+const setupScript = (kind, source) =>
+  shipped.setupScript(shipped.fetchLine(kind, source), PORT, shipped.keepAwakeLine(kind));
 
 /** Stands in for the app's loopback handoff on Android. */
 async function handoff() {
@@ -59,6 +60,7 @@ async function checkCommon(script, HOME) {
   const agent = join(HOME, 'cdash-agent');
   assert.equal(readFileSync(agent, 'utf8'), AGENT, 'delivered byte for byte');
   assert.ok(statSync(agent).mode & 0o111, 'executable');
+  assert.ok(!existsSync(`${agent}.new`), 'no staging file left behind');
 
   const bashrc = () => readFileSync(join(HOME, '.bashrc'), 'utf8');
   const blocks = () => bashrc().split('claude-dashboard: start the agent').length - 1;
@@ -87,8 +89,7 @@ test('the Termux command curls the agent out of the app and arms the shell', asy
   const { url, server } = await handoff();
   const HOME = mkdtempSync(join(tmpdir(), 'cdash-home-'));
   try {
-    const fetch = `curl -fsS -o "$HOME/cdash-agent" ${url}`;
-    const script = setupScript(fetch, '\n  termux-wake-lock 2>/dev/null');
+    const script = setupScript('curl', url);
     assert.match(script, /termux-wake-lock/, 'Android holds a wake lock');
     await checkCommon(script, HOME);
   } finally {
@@ -104,7 +105,45 @@ test('the WSL command copies the agent off the Windows filesystem', async () => 
   const source = join(winDir, 'cdash-agent');
   writeFileSync(source, AGENT);
 
-  const script = setupScript(`cp "${source}" "$HOME/cdash-agent"`, '');
+  const script = setupScript('copy', source);
   assert.doesNotMatch(script, /termux-wake-lock/, 'nothing termux-shaped in a WSL .bashrc');
   await checkCommon(script, HOME);
+});
+
+test('pasting again replaces an agent that is running', async () => {
+  const { url, server } = await handoff();
+  const HOME = mkdtempSync(join(tmpdir(), 'cdash-home-'));
+  const agent = join(HOME, 'cdash-agent');
+  // A real executable: Linux refuses to open a *running* binary for writing
+  // ("Text file busy"), which a shell-script stub would never show.
+  copyFileSync('/bin/sleep', agent);
+  chmodSync(agent, 0o755);
+  const running = spawn(agent, ['30'], { stdio: 'ignore' });
+  try {
+    await once(running, 'spawn');
+    const file = join(mkdtempSync(join(tmpdir(), 'cdash-paste-')), 'setup.sh');
+    writeFileSync(file, setupScript('curl', url));
+    await run('bash', [file], { env: { ...process.env, HOME } });
+    assert.equal(readFileSync(agent, 'utf8'), AGENT, 'the new agent is in place');
+    assert.ok(!existsSync(`${agent}.new`), 'no staging file left behind');
+  } finally {
+    running.kill();
+    server.close();
+    await run('pkill', ['-f', agent]).catch(() => {});
+  }
+});
+
+test('a failed download leaves the agent that was already there', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'cdash-home-'));
+  const agent = join(HOME, 'cdash-agent');
+  writeFileSync(agent, '#!/bin/sh\nexit 0\n');
+  chmodSync(agent, 0o755);
+  const before = readFileSync(agent, 'utf8');
+  const file = join(mkdtempSync(join(tmpdir(), 'cdash-paste-')), 'setup.sh');
+  // Nothing listens on port 1: curl fails, and the rename must not happen.
+  writeFileSync(file, setupScript('curl', 'http://127.0.0.1:1/cdash-agent'));
+  await run('bash', [file], { env: { ...process.env, HOME } }).catch(() => {});
+  assert.equal(readFileSync(agent, 'utf8'), before, 'the old agent is untouched');
+  assert.ok(!existsSync(`${agent}.new`), 'no partial download left behind');
+  await run('pkill', ['-f', agent]).catch(() => {});
 });

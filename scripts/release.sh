@@ -14,6 +14,7 @@
 # Prereqs:
 #   rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
 #                     x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+#   (the APK also needs the aarch64-linux-android target and a JDK for keytool)
 #   pip install ziglang && cargo install cargo-zigbuild   # musl libc + a cross
 #       C compiler for aws-lc-sys, replacing musl-tools and the musl.cc
 #       toolchain that stopped responding
@@ -60,6 +61,13 @@ if [ -n "${ANDROID_HOME:-}" ] && [ -n "${NDK_HOME:-}" ]; then
     # this cannot talk to Termux at all.
     sed -i '/getByName("release")/a\        manifestPlaceholders["usesCleartextTraffic"] = "true"' \
       gen/android/app/build.gradle.kts
+    # sed exits 0 when nothing matched, e.g. after a template change in the
+    # Tauri CLI. Fail here rather than ship an APK that cannot reach Termux. The
+    # debug block already carries this line, so look right after the release one.
+    grep -A1 'getByName("release")' gen/android/app/build.gradle.kts | grep -q usesCleartextTraffic || {
+      echo "FAILED: could not patch cleartext into gen/android/app/build.gradle.kts" >&2
+      exit 1
+    }
 
     # Release, not debug: the debug APK carries an unstripped 137 MB .so, which
     # is 138 MB of download for a phone. Release is 21 MB.
@@ -68,11 +76,22 @@ if [ -n "${ANDROID_HOME:-}" ] && [ -n "${NDK_HOME:-}" ]; then
     # Android refuses to install an unsigned APK at all, so "unsigned" is not a
     # shippable state. The SDK debug key makes it installable; it is a local
     # test signature, not a distribution one.
-    BT="$ANDROID_HOME/build-tools/35.0.0"
+    BT=$(ls -d "$ANDROID_HOME"/build-tools/* 2>/dev/null | sort -V | tail -n 1)
+    [ -x "$BT/apksigner" ] || {
+      echo "FAILED: no build-tools with apksigner under $ANDROID_HOME/build-tools" >&2
+      exit 1
+    }
     KS="$HOME/.android/debug.keystore"
-    [ -f "$KS" ] || keytool -genkeypair -dname "CN=Android Debug,O=Android,C=US" \
-      -alias androiddebugkey -keypass android -keystore "$KS" -storepass android \
-      -validity 10000 -keyalg RSA -keysize 2048
+    if [ ! -f "$KS" ]; then
+      command -v keytool >/dev/null || {
+        echo "FAILED: keytool (from a JDK) is needed to create $KS" >&2
+        exit 1
+      }
+      mkdir -p "$(dirname "$KS")"
+      keytool -genkeypair -dname "CN=Android Debug,O=Android,C=US" \
+        -alias androiddebugkey -keypass android -keystore "$KS" -storepass android \
+        -validity 10000 -keyalg RSA -keysize 2048
+    fi
     OUT=gen/android/app/build/outputs/apk/universal/release
     "$BT/zipalign" -p -f 4 "$OUT/app-universal-release-unsigned.apk" \
       "$OUT/cdash-dashboard-android-arm64.apk"
@@ -103,4 +122,6 @@ test -s ./target/aarch64-pc-windows-msvc/release/cdash-tauri.exe
 echo "both agents booted; both windows clients linked"
 
 APK=crates/tauri-app/gen/android/app/build/outputs/apk/universal/release/cdash-dashboard-android-arm64.apk
-[ -f "$APK" ] && echo "apk: $APK"
+# `if`, not `[ ] && echo`: with no APK that list exits 1 and, as the last
+# command, fails a run in which every step passed.
+if [ -f "$APK" ]; then echo "apk: $APK"; fi

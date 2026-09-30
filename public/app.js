@@ -565,8 +565,15 @@ const SHELL = { android: 'Termux', windows: 'WSL' };
 /// Fetching the binary is the only part that differs; everything after it —
 /// the executable bit, the startup guard, sourcing it — is identical, so it
 /// lives here once.
-const setupScript = (fetch, port, keepAwake) => `${fetch}
-chmod +x "$HOME/cdash-agent"
+///
+/// The binary lands beside its final name and is renamed into place. Writing
+/// straight over a running agent fails with "Text file busy", and re-pasting is
+/// exactly the case this dialog exists for; a rename works on a running binary
+/// and never leaves a half-written one at the real path. The `&&` chain stops
+/// a failed download from being renamed over a good agent.
+const setupScript = (fetch, port, keepAwake) => `${fetch} &&
+chmod +x "$HOME/cdash-agent.new" &&
+mv -f "$HOME/cdash-agent.new" "$HOME/cdash-agent"
 grep -q cdash-agent "$HOME/.bashrc" 2>/dev/null || cat >> "$HOME/.bashrc" <<'CDASH'
 
 # claude-dashboard: start the agent whenever this shell opens, unless it is up
@@ -580,8 +587,8 @@ CDASH
 /// filesystem that WSL already mounts. The source is quoted: a Windows path
 /// runs through the user's name, and names have spaces in them.
 const fetchLine = (kind, source) => kind === 'copy'
-  ? `cp "${source}" "$HOME/cdash-agent"`
-  : `curl -fsS -o "$HOME/cdash-agent" ${source}`;
+  ? `cp "${source}" "$HOME/cdash-agent.new"`
+  : `curl -fsS -o "$HOME/cdash-agent.new" ${source}`;
 
 /// Android kills background processes that hold no wake lock. Nothing on
 /// Windows needs this, and a stray termux-* line in a WSL .bashrc is a puzzle
@@ -619,7 +626,7 @@ $('#setup-copy').onclick = async () => {
   const text = $('#setup-script').textContent;
   try {
     await navigator.clipboard.writeText(text);
-    toast('Copied \u2014 paste it into Termux');
+    toast(`Copied \u2014 paste it into ${SHELL[host] || 'your shell'}`);
   } catch {
     // Android WebView can refuse the async clipboard; selecting the block at
     // least makes a long-press copy one gesture.

@@ -67,9 +67,23 @@ MediaStore or a permission Termux cannot hold on Android 11+ — and appends a
 guard to `~/.bashrc` so the agent starts itself whenever Termux is opened. After
 one paste the only thing to remember is to open Termux.
 
+Pasting again is how you update: the download lands beside the agent and is
+renamed into place, which works while the old one runs (a direct write fails
+with "Text file busy") and never replaces a good agent with a failed download.
+A running agent keeps its old binary until Termux restarts it.
+
 `test/install-script.test.mjs` runs that command in a scratch `$HOME` — it is
-pasted into a shell we never see, so it is tested as one, against the template
-read out of `app.js` rather than a copy.
+pasted into a shell we never see, so it is tested as one, using the very
+functions `app.js` ships rather than a copy.
+
+**Security.** Android does not isolate loopback between apps, and this client
+cannot yet authenticate (profiles accept only `auth: none` until the keyring
+step lands), so the agent in Termux is open to every app on the phone that holds
+the `INTERNET` permission — and the agent launches sessions with
+`--dangerously-skip-permissions`. Run it only on a phone where you trust every
+installed app. The binary the app hands to Termux is the public release
+artifact and is served only while the setup screen is open; it is not the
+sensitive part.
 
 ## Run
 
@@ -79,7 +93,7 @@ cargo run -p cdash-agent     # http://127.0.0.1:23274
 
 ### Release builds
 
-`scripts/release.sh` builds all three artifacts:
+`scripts/release.sh` builds all five artifacts:
 
 | Artifact | Target | Runs on |
 |---|---|---|
@@ -107,11 +121,12 @@ it are worth knowing:
   release build type to allow it. Without that the client cannot reach the agent
   at `http://localhost:23274`, which is its entire job.
 
-Prereqs: `rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-msvc`,
+Prereqs: `rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-msvc aarch64-pc-windows-msvc`,
 `pip install ziglang && cargo install cargo-zigbuild`,
 `cargo install cargo-xwin`, `sudo apt install clang lld qemu-user-static`, and
-for the APK `cargo install tauri-cli --version "^2"` plus an Android SDK and
-NDK. Use the **Rust** Tauri CLI, not the npm one: the npm CLI templates
+for the APK `cargo install tauri-cli --version "^2"` plus an Android SDK, an
+NDK, the `aarch64-linux-android` Rust target and a JDK (`keytool` creates the
+debug keystore if you have none). Use the **Rust** Tauri CLI, not the npm one: the npm CLI templates
 `node tauri` into the generated gradle, which only resolves in an npm-layout
 project, and this is a Rust workspace.
 
@@ -129,7 +144,7 @@ Requires `tmux`, `claude` and `git` on `PATH`; the agent reports any that are mi
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PORT` | `23274` | Port to listen on. `0` picks any free port. The default is CDASH on a phone keypad, picked to collide with nothing: below the 32768 ephemeral range so the kernel never hands it out, and clear of 3000/5000/8000/8080/8888. |
+| `PORT` | `23274` | Port to listen on. `0` picks any free port. **Breaking change:** the default was `8080`, so a tunnel, unit file or bookmark that relied on it must set `PORT=8080` or move. The default is CDASH on a phone keypad, picked to collide with nothing: below the 32768 ephemeral range so the kernel never hands it out, and clear of 3000/5000/8000/8080/8888. |
 | `CDASH_BIND` | `127.0.0.1` | Address to bind. **Breaking change:** the Node agent bound every interface. LAN access now requires setting `CDASH_BIND=0.0.0.0` explicitly. |
 | `CLAUDE_DIR` | `~/.claude` | Path to the Claude config/projects directory. The subscription token for usage limits is read from `$CLAUDE_DIR/.credentials.json`. |
 | `DISK_EXTRA` | — | Optional second mount to report alongside `/`, e.g. `/mnt/d`. |
