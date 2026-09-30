@@ -259,6 +259,7 @@ button, input, select { font: inherit; }
 }
 .meter-fill.warn { background: var(--warn); }
 .meter-fill.crit { background: var(--danger); }
+.stat-sub { margin-top: 7px; font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
 
 /* ---------- Sections ---------- */
 .section { margin-bottom: 28px; }
@@ -372,6 +373,33 @@ button, input, select { font: inherit; }
 .action.danger[data-arm="1"] { background: var(--danger); border-color: transparent; color: #fff; }
 .action.ghost { flex: 0 0 auto; color: var(--text-faint); background: transparent; border-color: var(--border); }
 .action.ghost:hover { color: var(--text-muted); background: var(--surface-hover); }
+
+/* Send-to-TUI bar — mirrors the launcher's directory field (button nested in
+   the input) so the card reads as one family with the command bar. */
+.send { position: relative; display: flex; align-items: center; margin-top: 8px; }
+.send-input {
+  flex: 1; min-width: 0; width: 100%;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: 10px 42px 10px 12px; color: var(--text);
+  font-family: var(--font-mono); font-size: 13px;
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease),
+    background-color var(--dur) var(--ease);
+}
+.send-input::placeholder { color: var(--text-faint); }
+.send-input:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring); background: var(--surface);
+}
+.send-btn {
+  position: absolute; right: 5px; top: 50%; transform: translateY(-50%);
+  width: 30px; height: 30px; display: grid; place-items: center; border: 0;
+  background: transparent; color: var(--text-faint); cursor: pointer; border-radius: var(--r-sm);
+  transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.send-btn:hover { background: var(--surface-hover); color: var(--accent); }
+.send-btn:disabled { opacity: 0.5; cursor: default; }
+.send-btn svg { width: 16px; height: 16px; }
+.send:focus-within .send-btn { color: var(--accent); }
 
 .empty {
   color: var(--text-faint); font-size: 13.5px; padding: 28px; text-align: center;
