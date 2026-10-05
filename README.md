@@ -131,6 +131,24 @@ it are worth knowing:
   which Android's cleartext policy is not expected to gate, so the patch may
   prove unnecessary; it has not been tested either way on a device.
 
+**Setting up and building, repeatably.** On a Linux x86_64 host (Ubuntu, Debian,
+WSL2) with `rustup`, two scripts do everything below without root:
+
+```
+scripts/toolchain.sh --accept-licenses   # once: ~8 GB under ~/.cdash-toolchain
+scripts/build-all.sh                     # builds all five, into dist/ with SHA256SUMS.txt
+```
+
+`toolchain.sh` is idempotent (re-run it to resume or repair; `--check` only
+reports; `--skip-android` leaves out the JDK and Android SDK; `CDASH_TOOLCHAIN`
+moves the directory), pins every version in `scripts/toolchain-env.sh`, and
+requires `--accept-licenses` because it pulls in the Android SDK and Microsoft's
+CRT/SDK terms. `build-all.sh --no-apk` needs no Android toolchain, and it checks
+that each client really embeds the agent for its own architecture. To build by
+hand: `. scripts/toolchain-env.sh && sh scripts/release.sh`. The first APK build
+also downloads gradle and Android platform packages (a few hundred MB). What the
+scripts install, if you would rather do it yourself:
+
 Prereqs: `rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-msvc aarch64-pc-windows-msvc`,
 `pip install ziglang && cargo install cargo-zigbuild`,
 `cargo install cargo-xwin`, `sudo apt install clang lld qemu-user-static`, and

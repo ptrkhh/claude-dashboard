@@ -11,7 +11,9 @@
 # links at all — which is also the gate on the cfg(not(windows)) split that
 # keeps the agent out of it.
 #
-# Prereqs:
+# Prereqs (scripts/toolchain.sh --accept-licenses installs all of this, without
+# root, into ~/.cdash-toolchain; scripts/build-all.sh then runs this script and
+# collects the artifacts into dist/):
 #   rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
 #                     x86_64-pc-windows-msvc aarch64-pc-windows-msvc
 #   (the APK also needs the aarch64-linux-android target and a JDK for keytool)
