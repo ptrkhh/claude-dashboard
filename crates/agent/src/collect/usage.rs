@@ -21,19 +21,20 @@ const DEFAULT_BASE: &str = "https://api.anthropic.com";
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How stale the cached limits may get. The strip is a status readout, not a
-/// billing ledger; a minute-old percentage is the right trade against a
-/// per-poll round trip to the API.
-pub const USAGE_TTL: Duration = Duration::from_secs(60);
+/// billing ledger. The endpoint rate-limits hard — a request a minute drew a 429
+/// every few minutes, with no usable `Retry-After` — so ask rarely.
+pub const USAGE_TTL: Duration = Duration::from_secs(300);
 
 /// How long the last good reading is still shown once refreshes start failing.
 /// Past this the tiles go away: an expired token or a logout would otherwise
-/// freeze them, reset times long gone, until the agent restarts.
-pub const USAGE_MAX_AGE: Duration = Duration::from_secs(600);
+/// freeze them, reset times long gone, until the agent restarts. Long enough to
+/// ride out one backed-off retry.
+pub const USAGE_MAX_AGE: Duration = Duration::from_secs(1200);
 
 /// Each consecutive failed request doubles the wait before the next one, up to
-/// `USAGE_TTL << MAX_BACKOFF` (16 min) — the endpoint rate-limits, and hammering
-/// it at the TTL only prolongs that.
-const MAX_BACKOFF: u32 = 4;
+/// `USAGE_TTL << MAX_BACKOFF` (20 min) — hammering a rate-limited endpoint at
+/// the TTL only prolongs that.
+const MAX_BACKOFF: u32 = 2;
 
 /// The subscription token goes wherever this points, so `ANTHROPIC_BASE_URL` is
 /// honoured only for https or a loopback http (a local proxy or test double).
@@ -221,7 +222,10 @@ impl UsageState {
 
     /// Fold in a finished lookup. A failure still stamps `fetched`, so a
     /// signed-out user retries on the TTL rather than on every poll. The return
-    /// value is the log line, if one is due: once per outage, not once a minute.
+    /// value is the log line, if one is due: once per outage, and only once the
+    /// outage has cost the tiles. A failure the last good reading still covers
+    /// is the endpoint rate-limiting us, not news — logging each one filled the
+    /// panel with a "429" line every few minutes while the tiles stayed up.
     fn record(&mut self, res: Result<Vec<UsageLimit>, Miss>, now: Instant) -> Option<String> {
         self.busy = false;
         self.fetched = Some(now);
@@ -235,7 +239,7 @@ impl UsageState {
                     Miss::Request(_) => (self.fails + 1).min(MAX_BACKOFF),
                     Miss::NoToken => 0,
                 };
-                (!std::mem::replace(&mut self.failing, true))
+                (self.shown(now).is_none() && !std::mem::replace(&mut self.failing, true))
                     .then(|| format!("claude usage unavailable: {miss}"))
             }
         }
@@ -464,7 +468,7 @@ mod tests {
         let mut st = UsageState::default();
         assert!(st.due(t0), "the first poll looks it up");
 
-        for (n, wait) in [(1u32, 2), (2, 4), (3, 8), (4, 16), (5, 16)] {
+        for (n, wait) in [(1u32, 2), (2, 4), (3, 4), (4, 4)] {
             st.record(req_err(), t0);
             assert!(!st.due(t0 + USAGE_TTL * wait), "after {n} failures wait over {wait}x TTL");
             assert!(st.due(t0 + USAGE_TTL * wait + s), "after {n} failures due past {wait}x TTL");
@@ -495,13 +499,27 @@ mod tests {
     }
 
     #[test]
-    fn an_outage_is_logged_once_and_again_after_it_recovers() {
+    fn an_outage_is_logged_once_it_costs_the_tiles_and_again_after_it_recovers() {
         let t0 = Instant::now();
         let mut st = UsageState::default();
+        // Nothing was ever shown, so the first failure is news — once.
         assert_eq!(st.record(req_err(), t0).as_deref(), Some("claude usage unavailable: http 429"));
         assert_eq!(st.record(req_err(), t0), None, "same outage, no second line");
         assert_eq!(st.record(Ok(reading(1)), t0), None);
-        assert!(st.record(req_err(), t0).is_some(), "a fresh outage is news again");
+
+        // A rate-limit blip the old reading still covers is silent, however
+        // often it flaps — this is the 429 line that used to repeat every few minutes.
+        let mut t = t0;
+        for _ in 0..3 {
+            t += USAGE_TTL;
+            assert_eq!(st.record(req_err(), t), None, "the tiles are still up");
+            t += USAGE_TTL;
+            assert_eq!(st.record(Ok(reading(1)), t), None);
+        }
+
+        // A full MAX_AGE with no success: the tiles are gone, so it is news again.
+        assert!(st.record(req_err(), t + USAGE_MAX_AGE).is_some());
+        assert_eq!(st.record(req_err(), t + USAGE_MAX_AGE), None, "once per outage");
     }
 
     #[test]
