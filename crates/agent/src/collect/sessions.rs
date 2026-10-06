@@ -14,8 +14,13 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Mirrors the `resumable.length >= 20` break (`lib/collect.js:269`).
+/// First page of the resumable list, and how far each "Show more" grows it
+/// (mirrors the `resumable.length >= 20` break, `lib/collect.js:269`).
 pub const RESUMABLE_MAX: usize = 20;
+
+/// How far "Show more" can grow the list. Each entry can occupy a slot in the
+/// 200-entry transcript cache; a list past that wipes it and reparses every poll.
+pub const RESUMABLE_CEILING: usize = 100;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Resumable {
@@ -56,7 +61,7 @@ fn now_ms() -> f64 {
         .unwrap_or(0.0)
 }
 
-pub async fn collect_sessions(ctx: &Arc<Ctx>) -> SessionsResponse {
+pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse {
     let panes_out = ctx
         .runner
         .run("tmux", &["list-panes", "-a", "-F", PANE_FORMAT], "tmux list-panes")
@@ -150,8 +155,10 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>) -> SessionsResponse {
     let hist = read_if(&ctx.claude_dir.join("history.jsonl")).await.unwrap_or_default();
 
     let mut resumable = Vec::new();
-    for g in group_history(&hist) {
-        if resumable.len() >= RESUMABLE_MAX {
+    // Scan three candidates per entry wanted, so ghosts (history without a
+    // transcript) and abandoned starts do not starve the list.
+    for g in group_history(&hist).into_iter().take(limit.saturating_mul(3)) {
+        if resumable.len() >= limit {
             break;
         }
         if running_sids.contains(&g.sid)
@@ -253,7 +260,7 @@ mod tests {
         let b = seed(&d, "bbb", "/p/shallow", 200, 2);
         std::fs::write(d.join("history.jsonl"), format!("{a}{b}")).unwrap();
 
-        let r = collect_sessions(&ctx_for(d)).await;
+        let r = collect_sessions(&ctx_for(d), RESUMABLE_MAX).await;
         let sids: Vec<&str> = r.resumable.iter().map(|x| x.sid.as_str()).collect();
         assert_eq!(sids, vec!["aaa"]);
     }
@@ -267,7 +274,7 @@ mod tests {
             "{\"sessionId\":\"ghost\",\"project\":\"/p\",\"timestamp\":1,\"display\":\"x\"}\n",
         )
         .unwrap();
-        let r = collect_sessions(&ctx_for(d)).await;
+        let r = collect_sessions(&ctx_for(d), RESUMABLE_MAX).await;
         assert!(r.resumable.is_empty());
     }
 
@@ -279,21 +286,25 @@ mod tests {
         std::fs::write(d.join("history.jsonl"), a).unwrap();
         let ctx = ctx_for(d);
         ctx.purged.lock().unwrap().insert("ccc".to_string());
-        assert!(collect_sessions(&ctx).await.resumable.is_empty());
+        assert!(collect_sessions(&ctx, RESUMABLE_MAX).await.resumable.is_empty());
     }
 
     #[tokio::test]
-    async fn the_resumable_list_is_capped() {
-        // B5: history holds 60 groups; the UI gets at most 20.
+    async fn the_resumable_list_is_capped_and_grows_with_the_limit() {
+        // B5: the UI gets one page; "Show more" asks for a bigger limit.
         let d = tempdir("cap");
         let mut hist = String::new();
-        for i in 0..(RESUMABLE_MAX + 5) {
+        for i in 0..(RESUMABLE_MAX * 2 + 5) {
             let sid = format!("{i:08}-0000-4000-8000-000000000000");
             hist.push_str(&seed(&d, &sid, &format!("/p{i}"), 1000 - i as i64, 3));
         }
         std::fs::write(d.join("history.jsonl"), hist).unwrap();
-        let r = collect_sessions(&ctx_for(d)).await;
-        assert_eq!(r.resumable.len(), RESUMABLE_MAX);
+        let ctx = ctx_for(d);
+        let page = collect_sessions(&ctx, RESUMABLE_MAX).await.resumable;
+        assert_eq!(page.len(), RESUMABLE_MAX);
+        let more = collect_sessions(&ctx, RESUMABLE_MAX * 2).await.resumable;
+        assert_eq!(more.len(), RESUMABLE_MAX * 2);
+        assert_eq!(more[..RESUMABLE_MAX], page[..], "a bigger limit extends the list, never reorders it");
     }
 
     #[tokio::test]
@@ -301,7 +312,7 @@ mod tests {
         let d = tempdir("title");
         let a = seed(&d, "ddd", "/p", 300, 3);
         std::fs::write(d.join("history.jsonl"), a).unwrap();
-        let r = collect_sessions(&ctx_for(d)).await;
+        let r = collect_sessions(&ctx_for(d), RESUMABLE_MAX).await;
         assert_eq!(r.resumable[0].title, "do the thing");
     }
 
@@ -309,7 +320,7 @@ mod tests {
     async fn the_response_serializes_with_nodes_field_names() {
         let d = tempdir("shape");
         std::fs::write(d.join("history.jsonl"), "").unwrap();
-        let r = collect_sessions(&ctx_for(d)).await;
+        let r = collect_sessions(&ctx_for(d), RESUMABLE_MAX).await;
         let j = serde_json::to_string(&r).unwrap();
         assert!(j.contains("\"running\":"));
         assert!(j.contains("\"resumable\":"));
@@ -323,7 +334,7 @@ mod tests {
     async fn the_root_disk_is_always_reported() {
         let d = tempdir("disks");
         std::fs::write(d.join("history.jsonl"), "").unwrap();
-        let r = collect_sessions(&ctx_for(d)).await;
+        let r = collect_sessions(&ctx_for(d), RESUMABLE_MAX).await;
         assert_eq!(r.stats.disks[0].mount, "/");
         assert!(r.stats.disks[0].total_kb > 0);
     }
@@ -367,7 +378,7 @@ mod tests {
         let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000|/proj");
         let ctx = ctx_with_path(d, path);
 
-        let r = collect_sessions(&ctx).await;
+        let r = collect_sessions(&ctx, RESUMABLE_MAX).await;
         assert_eq!(r.running.len(), 1);
         assert_eq!(r.running[0].name, "cdash-test-1200-abc");
         assert_eq!(r.running[0].dir, "/proj");
@@ -393,7 +404,7 @@ mod tests {
         let ctx = ctx_with_path(d, path);
 
         assert!(ctx.meta_get("cdash-memo-1200-xyz").is_none());
-        collect_sessions(&ctx).await;
+        collect_sessions(&ctx, RESUMABLE_MAX).await;
         assert_eq!(
             ctx.meta_get("cdash-memo-1200-xyz").unwrap().rc_link.as_deref(),
             Some("https://claude.ai/code/session_memo"),

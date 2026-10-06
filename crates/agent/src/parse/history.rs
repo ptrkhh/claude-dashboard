@@ -92,7 +92,6 @@ pub fn group_history(jsonl: &str) -> Vec<HistoryGroup> {
         .collect();
 
     groups.sort_by(|a, b| b.ts.partial_cmp(&a.ts).unwrap_or(std::cmp::Ordering::Equal));
-    groups.truncate(60);
     groups
 }
 
@@ -128,6 +127,16 @@ mod tests {
         assert_eq!(g[1].ts, 260.0);
         assert_eq!(g[1].cwd.as_deref(), Some("/x"));
         assert_eq!(g[1].prompts, s(&["p2", "p3", "p4"]));
+    }
+
+    #[test]
+    fn group_history_keeps_every_session() {
+        // Resume looks a sid up here, so a cap would strand every session past
+        // it: listed by "Show more", then refused as unknown.
+        let jsonl: String = (0..70)
+            .map(|i| format!("{{\"sessionId\":\"s{i}\",\"project\":\"/x\",\"timestamp\":{i},\"display\":\"p\"}}\n"))
+            .collect();
+        assert_eq!(group_history(&jsonl).len(), 70);
     }
 
     #[test]

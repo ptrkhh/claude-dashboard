@@ -13,6 +13,7 @@ const MODELS = ['sonnet', 'opus', 'haiku', 'fable'];
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 let armedKill = null; // ponytail: survives render() replacing #running.innerHTML
 const drafts = {}; // half-typed send-bar text by session name, for the same reason
+let resLimit = 20; // resumable entries asked for; "Show more" raises it, and it matches the server's first page
 const sending = new Set(); // sessions with a send in flight: a re-render hands back a fresh, enabled button
 const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 
@@ -283,17 +284,20 @@ function render(d) {
   // refreshes on the next poll after blur (the text itself survives in `drafts`).
   if (!document.activeElement?.classList.contains('send-input'))
     $('#running').innerHTML = d.running.map(runningCard).join('') || '<div class="empty">No running sessions</div>';
-  $('#resumable').innerHTML = d.resumable.map(resumableCard).join('') || '<div class="empty">No resumable sessions</div>';
+  // A full page means there may be more; a short one is the whole list (or the server's ceiling).
+  const more = d.resumable.length >= resLimit ? '<button class="action more" type="button" data-more>Show more…</button>' : '';
+  $('#resumable').innerHTML = (d.resumable.map(resumableCard).join('') || '<div class="empty">No resumable sessions</div>') + more;
 
   const dirs = [...new Set(d.resumable.map(s => s.dir).filter(Boolean))];
   $('#dirs').innerHTML = dirs.map(x => `<option value="${esc(x)}">`).join('');
 }
 
 document.body.addEventListener('click', async e => {
-  const el = e.target.closest('[data-kill],[data-resume],[data-purge]');
+  const el = e.target.closest('[data-kill],[data-resume],[data-purge],[data-more]');
   if (!el) return;
   try {
-    if (el.dataset.kill) {
+    if (el.dataset.more !== undefined) { resLimit += 20; poll(); }
+    else if (el.dataset.kill) {
       if (armedKill === el.dataset.kill) { armedKill = null; await api('/api/kill', { name: el.dataset.kill }); poll(); }
       else {
         armedKill = el.dataset.kill; el.dataset.arm = '1'; el.textContent = 'Sure?';
@@ -494,7 +498,7 @@ async function tick() {
   if (document.hidden && polled) { arm(); return; }
   let outcome;
   try {
-    const data = await api('/api/sessions');
+    const data = await api(`/api/sessions?resumable=${resLimit}`);
     if (g !== gen) return; // superseded mid-flight: never paint the old snapshot
     render(data);
     $('#health').className = 'dot ok';

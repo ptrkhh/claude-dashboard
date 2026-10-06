@@ -371,6 +371,7 @@ button, input, select { font: inherit; }
 .action.danger { flex: 0 0 auto; padding: 10px 13px; color: var(--danger); background: transparent; border-color: var(--border); }
 .action.danger:hover { background: var(--danger-weak); border-color: var(--danger); }
 .action.danger[data-arm="1"] { background: var(--danger); border-color: transparent; color: #fff; }
+.action.more { grid-column: 1 / -1; justify-self: center; flex: none; padding-inline: 28px; }
 .action.ghost { flex: 0 0 auto; color: var(--text-faint); background: transparent; border-color: var(--border); }
 .action.ghost:hover { color: var(--text-muted); background: var(--surface-hover); }
 
