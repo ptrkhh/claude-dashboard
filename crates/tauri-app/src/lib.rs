@@ -534,6 +534,23 @@ fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
     app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
 }
 
+/// SHA-256 of the bundled agent, hex — the digest `/api/hostinfo` reports as
+/// `build` for a running one. The crate version is the same across rebuilds, so
+/// the two digests are how the app tells whether the agent in WSL or Termux is
+/// the one it carries.
+fn build_id(agent: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(agent))
+}
+
+#[tauri::command]
+fn agent_build() -> Result<String, String> {
+    if handoff::AGENT.is_empty() {
+        return Err("this build bundles no agent: rebuild with CDASH_AGENT_BIN set".into());
+    }
+    Ok(build_id(handoff::AGENT))
+}
+
 #[tauri::command]
 fn host_platform() -> String {
     std::env::consts::OS.to_string()
@@ -584,6 +601,7 @@ pub fn run() {
             profile_delete,
             profile_activate,
             agent_handoff,
+            agent_build,
             host_platform,
             open_external
         ])
@@ -719,6 +737,16 @@ mod tests {
         assert_eq!(wsl_path(r"CD:\x"), None);
         assert_eq!(wsl_path("/already/unix"), None);
         assert_eq!(wsl_path(""), None);
+    }
+
+    #[test]
+    fn build_id_is_the_lowercase_sha256_hex_the_agent_reports() {
+        // The agent formats its own digest the same way (`build_id` in its
+        // routes.rs); a different case or truncation would never compare equal.
+        assert_eq!(
+            build_id(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]
