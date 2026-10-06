@@ -110,7 +110,7 @@ test('the WSL command copies the agent off the Windows filesystem', async () => 
   await checkCommon(script, HOME);
 });
 
-test('pasting again replaces an agent that is running', async () => {
+test('pasting again replaces an agent that is running, and stops the old one', async () => {
   const { url, server } = await handoff();
   const HOME = mkdtempSync(join(tmpdir(), 'cdash-home-'));
   const agent = join(HOME, 'cdash-agent');
@@ -119,15 +119,23 @@ test('pasting again replaces an agent that is running', async () => {
   copyFileSync('/bin/sleep', agent);
   chmodSync(agent, 0o755);
   const running = spawn(agent, ['30'], { stdio: 'ignore' });
+  // Mentions the agent's path but is not the agent — an editor on its log, say.
+  // The stop is anchored on the full command line, so this must survive.
+  const decoy = spawn('/bin/sh', ['-c', 'sleep 30', 'tail', `${agent}.log`], { stdio: 'ignore' });
   try {
-    await once(running, 'spawn');
+    await Promise.all([once(running, 'spawn'), once(decoy, 'spawn')]);
     const file = join(mkdtempSync(join(tmpdir(), 'cdash-paste-')), 'setup.sh');
     writeFileSync(file, setupScript('curl', url));
     await run('bash', [file], { env: { ...process.env, HOME } });
     assert.equal(readFileSync(agent, 'utf8'), AGENT, 'the new agent is in place');
     assert.ok(!existsSync(`${agent}.new`), 'no staging file left behind');
+    // Left running, the old agent keeps answering the health check and the
+    // startup guard never starts the new one — the stale-agent bug.
+    assert.equal(running.signalCode ?? (await once(running, 'exit'))[1], 'SIGTERM', 'the old agent was stopped');
+    assert.equal(decoy.exitCode ?? decoy.signalCode, null, 'a process that only names the path was left alone');
   } finally {
     running.kill();
+    decoy.kill();
     server.close();
     await run('pkill', ['-f', agent]).catch(() => {});
   }

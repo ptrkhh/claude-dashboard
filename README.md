@@ -70,14 +70,22 @@ one paste the only thing to remember is to open Termux.
 Pasting again replaces the agent file: the download lands beside it and is
 renamed into place, which works while the old one runs (a direct write fails
 with "Text file busy") and never replaces a good agent with a failed or
-truncated download. It does **not** restart anything. The setup dialog only
-appears when the agent is unreachable, and the shell guard only starts an agent
-that is not answering, so a healthy old agent keeps running its old binary until
-you stop it (`pkill -x cdash-agent`; in Termux `pkg install procps` first) and
-open a new shell. If you pasted an earlier version of this command, also delete
-its `# claude-dashboard` block from `~/.bashrc`: the guard is only appended when
-none exists, so an old one is never replaced. The guard lives in `~/.bashrc`, so
-a login shell that does not read it (zsh) never starts the agent.
+truncated download. It then stops the old agent, found by scanning `/proc` for
+its exact command line (so Termux needs no `procps`), and the shell guard starts
+the new one. Only the agent restarts; the tmux sessions it launched keep
+running. If you pasted an earlier version of this command, delete its
+`# claude-dashboard` block from `~/.bashrc` once: the guard is only appended
+when none exists, so an old one is never replaced. The guard lives in
+`~/.bashrc`, so a login shell that does not read it (zsh) never starts the
+agent.
+
+**Keeping the agent current.** Once an agent is installed the setup dialog never
+appears, so the app checks instead. After its first good poll it compares the
+SHA-256 of the agent it bundles with the `build` the running agent reports in
+`/api/hostinfo` — the crate version stays `0.1.0` across rebuilds, so it cannot
+say. If they differ, or the agent is too old to report one, the dialog opens in
+update mode with the command to paste. The download icon in the header opens the
+same dialog on demand, with the two builds side by side, to force a reinstall.
 
 `test/install-script.test.mjs` runs that command in a scratch `$HOME` — it is
 pasted into a shell we never see, so it is tested as one, using the very

@@ -550,6 +550,9 @@ button, input, select { font: inherit; }
 .setup-cases b { font-weight: 600; }
 .setup-lede code { font-family: var(--font-mono); font-size: 12px; }
 .setup-note { font-size: 12px; color: var(--text-muted); margin: 10px 0 0; }
+#setup[data-mode="update"] .when-down,
+#setup:not([data-mode="update"]) .when-update { display: none; }
+.icon-btn[hidden] { display: none; }
 .setup-foot { display: flex; gap: 8px; padding: 14px 16px 16px; }
 .setup-foot .btn-launch { flex: 1; }
 .btn-ghost {

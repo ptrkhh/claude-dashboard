@@ -7,8 +7,9 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Mirrors the error shape of `server.js:41`: a status and `{ error: message }`.
 pub struct ApiError {
@@ -44,12 +45,30 @@ pub async fn get_sessions(State(ctx): State<Arc<Ctx>>) -> Response {
     Json(collect_sessions(&ctx).await).into_response()
 }
 
+/// SHA-256 of this executable, hex. The crate version stays put across
+/// rebuilds, so it cannot tell a thin client whether the agent it bundles is
+/// the one already running; the digest of the bytes can.
+///
+/// Read from `/proc/self/exe`, not `current_exe()`: an update renames a new file
+/// over this one, and the latter then names a path that is no longer ours.
+/// Without `/proc` (macOS) there is no answer — and there the client runs the
+/// agent in process, so nothing asks.
+fn build_id() -> Option<&'static str> {
+    static ID: OnceLock<Option<String>> = OnceLock::new();
+    ID.get_or_init(|| {
+        let exe = std::fs::read("/proc/self/exe").ok()?;
+        Some(format!("{:x}", Sha256::digest(exe)))
+    })
+    .as_deref()
+}
+
 /// Authenticated: it names the host's platform and which binaries are absent.
 /// `/api/health` is the unauthenticated one and says only `{ok:true}`.
 pub async fn get_hostinfo(State(ctx): State<Arc<Ctx>>) -> Response {
     Json(serde_json::json!({
         "platform": std::env::consts::OS,
         "version": env!("CARGO_PKG_VERSION"),
+        "build": build_id(),
         // Re-probed per request, never a boot-time cache: the setup screen's
         // re-check button is worthless against a stale answer.
         "missing": ctx.host.missing(),
@@ -244,6 +263,18 @@ mod tests {
         assert_eq!(v["platform"], std::env::consts::OS);
         assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
         assert!(v["missing"].is_array(), "the setup screen reads this array");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn hostinfo_build_is_the_digest_of_the_running_binary() {
+        // The thin clients hash the agent they bundle and compare, so this has
+        // to be the plain lowercase SHA-256 of the file's bytes.
+        let b = serve(cfg_for(tempdir("hostinfo-build"))).await.unwrap();
+        let body = reqwest_get(&format!("http://{}/api/hostinfo", b.addr)).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let exe = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        assert_eq!(v["build"], format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(exe)));
     }
 
     #[tokio::test]

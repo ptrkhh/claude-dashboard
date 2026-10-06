@@ -22,6 +22,7 @@ const ICONS = {
   play: `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15a1 1 0 0 0 1.5.87l12-7.5a1 1 0 0 0 0-1.74l-12-7.5A1 1 0 0 0 7 4.5z"/></svg>`,
   external: svg('<path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/>'),
   x: svg('<path d="M18 6 6 18"/><path d="M6 6l12 12"/>'),
+  download: svg('<path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/>'),
   refresh: svg('<path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/>'),
   trash: svg('<path d="M4 7h16"/><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/><path d="M18 7l-.8 12a2 2 0 0 1-2 1.9H8.8a2 2 0 0 1-2-1.9L6 7"/>'),
   spinner: svg('<path d="M12 3a9 9 0 1 0 9 9"/>'),
@@ -500,6 +501,7 @@ async function tick() {
     $('#health').className = 'dot ok';
     $('#health-label').textContent = 'Connected';
     markConnected();
+    checkAgent();
     outcome = 'ok';
   } catch (err) {
     if (g !== gen) return;
@@ -572,9 +574,22 @@ const SHELL = { android: 'Termux', windows: 'WSL' };
 /// and never leaves a half-written one at the real path. The `&&` chain stops
 /// a failed or truncated download from being renamed over a good agent, and the
 /// `||` tidies the leftover.
+///
+/// A rename leaves the old process running its old, now unlinked, binary — and
+/// the guard below sees it answering and starts nothing. So once the new file is
+/// in place the old agent is stopped, and the guard brings the new one up. It is
+/// found by scanning /proc for a command line that starts with the agent's full
+/// path: Termux ships no pkill unless procps is installed, and matching on a bare
+/// name would also take out an editor or `tail` that merely has cdash-agent.log
+/// open. The subshell keeps the loop variable out of the user's own shell.
 const setupScript = (fetch, port, keepAwake) => `${fetch} &&
 chmod +x "$HOME/cdash-agent.new" &&
-mv -f "$HOME/cdash-agent.new" "$HOME/cdash-agent" ||
+mv -f "$HOME/cdash-agent.new" "$HOME/cdash-agent" &&
+( for p in /proc/[0-9]*; do
+    case "$(tr '\\0' ' ' 2>/dev/null <"$p/cmdline")" in
+      "$HOME/cdash-agent "*) kill "\${p#/proc/}" ;;
+    esac
+  done; sleep 1 ) ||
 rm -f "$HOME/cdash-agent.new"
 grep -q cdash-agent "$HOME/.bashrc" 2>/dev/null || cat >> "$HOME/.bashrc" <<'CDASH'
 
@@ -598,9 +613,15 @@ const fetchLine = (kind, source) => kind === 'copy'
 /// for whoever reads it later.
 const keepAwakeLine = kind => kind === 'copy' ? '' : '\n  termux-wake-lock 2>/dev/null';
 
-async function showSetup() {
+/// `mode` is 'down' (no agent answering) or 'update' (one answers, but not the
+/// one this app carries); `status` is the update dialog's first line.
+async function showSetup(mode = 'down', status = '') {
   const dlg = $('#setup');
-  if (dlg.open || setupDismissed) return;
+  if (dlg.open || (mode === 'down' && setupDismissed)) return;
+  dlg.dataset.mode = mode;
+  $('#setup-title').textContent = mode === 'update' ? 'Update the agent' : 'Can’t reach the agent';
+  $('#setup-status').textContent = status;
+  $('#setup-retry').textContent = mode === 'update' ? 'Done' : 'Try again';
   document.querySelectorAll('.shell-name').forEach(el => {
     el.textContent = SHELL[host] || 'your shell';
   });
@@ -617,9 +638,57 @@ async function showSetup() {
   if (!dlg.open) dlg.showModal();
 }
 
+/* ---------- Is the agent the one this app carries? ----------
+   The dialog above appears only when no agent answers, so once one is installed
+   nothing ever says it has gone stale: a new app build left the old agent in WSL
+   or Termux running, untouched, indefinitely. The crate version is the same
+   across rebuilds, so the two sides compare a digest of the binary instead: the
+   app hashes the agent it bundles, the agent hashes itself (`build` in
+   /api/hostinfo). An agent too old to report one counts as different. */
+const shortBuild = b => b ? b.slice(0, 8) : 'a build too old to report one';
+
+/// `running` is null for an agent that predates the digest — or /api/hostinfo.
+async function agentBuilds() {
+  const [bundled, info] = await Promise.all([
+    invoke('agent_build'),
+    api('/api/hostinfo').catch(e => { if (e.status === 404) return {}; throw e; }),
+  ]);
+  return { bundled, running: info.build ?? null };
+}
+
+let agentChecked = false;
+/// Once per launch, after the first good poll. Anything that stops the check
+/// from finishing is "can't tell", which is not "out of date" — stay quiet.
+async function checkAgent() {
+  if (agentChecked) return;
+  agentChecked = true;
+  try {
+    if (!SHELL[await hostPlatform()]) return; // the agent runs in process here
+    const { bundled, running } = await agentBuilds();
+    if (running !== bundled) {
+      showSetup('update', `The agent running in ${SHELL[host]} (${shortBuild(running)}) is not the one this app carries (${shortBuild(bundled)}). Paste the command below to replace it.`);
+    }
+  } catch {}
+}
+
+// The same dialog on demand, for when the check said "up to date" and it isn't.
+$('#agent-update').innerHTML = ICONS.download;
+$('#agent-update').onclick = async () => {
+  let status = 'Reinstalls the agent this app carries and restarts it, whether or not the versions differ.';
+  try {
+    const { bundled, running } = await agentBuilds();
+    status = `Running ${shortBuild(running)}; this app carries ${shortBuild(bundled)}${running === bundled ? ' — already up to date' : ''}. ${status}`;
+  } catch {}
+  showSetup('update', status);
+};
+if (isTauri) hostPlatform().then(p => { if (SHELL[p]) $('#agent-update').hidden = false; });
+
 function markConnected() {
   setupDismissed = false;
-  if ($('#setup').open) $('#setup').close();
+  // The update dialog is not about a lost connection, so reconnecting (which the
+  // paste itself causes) must not close it under the user.
+  const dlg = $('#setup');
+  if (dlg.open && dlg.dataset.mode !== 'update') dlg.close();
 }
 
 $('#setup-close').innerHTML = ICONS.x;

@@ -50,6 +50,7 @@
     </div>
     <div class="topbar-actions">
       <span class="health"><span id="health" class="dot"></span><span id="health-label">Connecting…</span></span>
+      <button id="agent-update" class="icon-btn" type="button" aria-label="Update the agent" title="Update the agent" hidden></button>
       <button id="theme-toggle" class="icon-btn" type="button" aria-label="Toggle color theme"></button>
     </div>
   </header>
@@ -104,12 +105,13 @@
 <dialog id="setup" class="dialog" aria-label="Set up the agent">
   <div class="dialog-body">
     <div class="dialog-head">
-      <h2 class="dialog-title">Can’t reach the agent</h2>
+      <h2 id="setup-title" class="dialog-title">Can’t reach the agent</h2>
       <button id="setup-close" class="icon-btn" type="button" aria-label="Close"></button>
     </div>
     <div class="setup-body">
-      <p class="setup-lede">cdash-agent isn’t answering on <code id="setup-addr">the agent's port</code>.</p>
-      <ul class="setup-cases">
+      <p class="setup-lede when-down">cdash-agent isn’t answering on <code id="setup-addr">the agent's port</code>.</p>
+      <p id="setup-status" class="setup-lede when-update"></p>
+      <ul class="setup-cases when-down">
         <li><b>First time here?</b> Paste the command below into <span class="shell-name">your shell</span>.</li>
         <li><b>Installed already?</b> Just open <span class="shell-name">your shell</span> — it starts the agent for you.</li>
         <li><b><span class="shell-name">Your shell</span> already open?</b> Paste it again to reinstall.</li>
@@ -117,6 +119,7 @@
       <pre id="setup-script" class="setup-script" tabindex="0"></pre>
       <p class="setup-note">One paste is enough: it also teaches
         <span class="shell-name">your shell</span> to start the agent every time you open it.</p>
+      <p class="setup-note when-update">Only the dashboard’s agent restarts; the Claude sessions it launched keep running.</p>
     </div>
     <div class="setup-foot">
       <button id="setup-copy" class="btn-launch" type="button">Copy</button>
