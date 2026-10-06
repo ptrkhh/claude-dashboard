@@ -448,35 +448,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn static_files_are_served_from_the_configured_directory() {
-        let d = tempdir("static");
-        let pubdir = d.join("pub");
-        std::fs::create_dir_all(&pubdir).unwrap();
-        std::fs::write(pubdir.join("index.html"), "<h1>cdash</h1>").unwrap();
-
-        let mut cfg = cfg_for(d.clone());
-        cfg.public_dir = pubdir;
-        let b = serve(cfg).await.unwrap();
-
-        let body = reqwest_get(&format!("http://{}/index.html", b.addr)).await;
-        assert_eq!(body, "<h1>cdash</h1>");
-    }
-
-    #[tokio::test]
-    async fn an_api_route_is_not_shadowed_by_a_static_file_of_the_same_name() {
-        // Express mounted static FIRST, so this file would have won there. The
-        // route winning is the safer order; asserted so the change is deliberate.
-        let d = tempdir("shadow");
-        let pubdir = d.join("pub");
-        std::fs::create_dir_all(pubdir.join("api")).unwrap();
-        std::fs::write(pubdir.join("api/health"), "STATIC").unwrap();
-
-        let mut cfg = cfg_for(d.clone());
-        cfg.public_dir = pubdir;
-        let b = serve(cfg).await.unwrap();
-
-        let body = reqwest_get(&format!("http://{}/api/health", b.addr)).await;
-        assert_eq!(body, "{\"ok\":true}");
+    async fn embedded_ui_is_served() {
+        let b = serve(cfg_for(tempdir("embedded-ui"))).await.unwrap();
+        let body = reqwest_get(&format!("http://{}/", b.addr)).await;
+        assert!(body.contains("<title>Claude Dashboard</title>"));
     }
 
     #[tokio::test]

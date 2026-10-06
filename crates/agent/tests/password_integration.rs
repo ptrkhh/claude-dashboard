@@ -36,10 +36,6 @@ fn password_cfg(dir: PathBuf, guards: Vec<GuardKind>, token: Option<String>) -> 
         port: 0,
         claude_dir: dir,
         disk_extra: None,
-        // Integration tests run with the crate root as CWD, so a relative
-        // "public" would not resolve and every asset would 404 once the guard
-        // let it through.
-        public_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../public"),
         auth: Arc::new(
             AuthConfig::build(guards, token, "X-Forwarded-Email".into(), vec![]).unwrap(),
         ),

@@ -3,10 +3,14 @@ use crate::auth::config::{AuthConfig, GuardKind};
 use crate::auth::layer::{guard_mw, GuardState};
 use crate::collect::ctx::Ctx;
 use crate::host;
+use axum::body::Body;
+use axum::extract::OriginalUri;
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use std::net::{IpAddr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// CDASH on a phone keypad. Chosen to be unmemorable to everything else: it is
@@ -20,7 +24,6 @@ pub struct Config {
     pub port: u16,
     pub claude_dir: PathBuf,
     pub disk_extra: Option<String>,
-    pub public_dir: PathBuf,
     pub auth: Arc<AuthConfig>,
     /// Present exactly when `CDASH_AUTH` includes `password`. Built at boot so
     /// a misconfiguration is refused before anything listens.
@@ -92,27 +95,48 @@ impl Config {
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from(&home).join(".claude")),
             disk_extra: std::env::var("DISK_EXTRA").ok().filter(|s| !s.is_empty()),
-            public_dir: std::env::var("CDASH_PUBLIC")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| default_public_dir()),
             auth: Arc::new(auth),
         })
     }
 }
 
-/// `CDASH_PUBLIC` unset: `public/` under the working directory when it exists
-/// (`cargo run` from the repo root), else beside the binary. Without the
-/// fallback, a systemd unit with no `WorkingDirectory=` serves 404s for the
-/// whole UI.
-fn default_public_dir() -> PathBuf {
-    let cwd = PathBuf::from("public");
-    if cwd.is_dir() {
-        return cwd;
-    }
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| Some(exe.parent()?.join("public")))
-        .unwrap_or(cwd)
+/// Serve an asset included in the agent binary.
+async fn embedded_asset(uri: OriginalUri) -> Response {
+    let path = uri.0.path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+    // ponytail: fixed asset list must track public/; generate it in build.rs if it grows.
+    let (content_type, body): (&'static str, &'static [u8]) = match path {
+        "index.html" => (
+            "text/html; charset=utf-8",
+            include_bytes!("../../../../public/index.html"),
+        ),
+        "app.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("../../../../public/app.js"),
+        ),
+        "style.css" => (
+            "text/css; charset=utf-8",
+            include_bytes!("../../../../public/style.css"),
+        ),
+        "manifest.json" => (
+            "application/manifest+json",
+            include_bytes!("../../../../public/manifest.json"),
+        ),
+        "sw.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("../../../../public/sw.js"),
+        ),
+        "icon.svg" => (
+            "image/svg+xml",
+            include_bytes!("../../../../public/icon.svg"),
+        ),
+        "transport/backoff.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("../../../../public/transport/backoff.js"),
+        ),
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    ([(header::CONTENT_TYPE, content_type)], Body::from(body)).into_response()
 }
 
 /// What `serve` hands back. The address is the readiness signal — an in-process
@@ -155,7 +179,6 @@ pub const UNAUTH_PATHS: &[&str] = &["/api/health", "/login", "/api/login"];
 /// escape the layer regardless of where it is written.
 pub fn router(
     ctx: Arc<Ctx>,
-    public_dir: &Path,
     auth: Arc<AuthConfig>,
     password: Option<crate::auth::login::PasswordState>,
     cf: Option<Arc<crate::auth::cfaccess::CfState>>,
@@ -163,7 +186,7 @@ pub fn router(
     let st = GuardState { auth, log: Arc::clone(&ctx.host.log), password: password.clone(), cf };
 
     let guarded = guarded_router()
-        .fallback_service(tower_http::services::ServeDir::new(public_dir))
+        .fallback_service(Router::new().fallback(get(embedded_asset)))
         .layer(axum::middleware::from_fn_with_state(st, guard_mw))
         .with_state(ctx);
 
@@ -232,7 +255,7 @@ pub async fn serve(cfg: Config) -> std::io::Result<Bound> {
         crate::auth::cfaccess::spawn_refresh(cf, Arc::clone(&ctx.host.log));
     }
     let app =
-        router(Arc::clone(&ctx), &cfg.public_dir, Arc::clone(&cfg.auth), cfg.password.clone(), cf);
+        router(Arc::clone(&ctx), Arc::clone(&cfg.auth), cfg.password.clone(), cf);
 
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
     let task = tokio::spawn(async move {
@@ -287,7 +310,6 @@ pub(crate) mod tests {
             port: 0, // let the OS choose, so tests never collide
             claude_dir: dir,
             disk_extra: None,
-            public_dir: PathBuf::from("public"),
             auth: Arc::new(
                 AuthConfig::build(
                     vec![crate::auth::config::GuardKind::None],
@@ -299,16 +321,6 @@ pub(crate) mod tests {
             ),
             password: None,
         }
-    }
-
-    #[test]
-    fn default_public_dir_falls_back_beside_the_binary() {
-        // Test cwd is `crates/agent`, which has no `public/`, so the cwd
-        // branch must not win: a bare relative path here is the systemd-unit
-        // 404 bug this function exists to prevent.
-        let d = super::default_public_dir();
-        assert!(d.is_absolute(), "expected exe-relative fallback, got {d:?}");
-        assert!(d.ends_with("public"), "got {d:?}");
     }
 
     #[tokio::test]

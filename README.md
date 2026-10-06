@@ -177,7 +177,6 @@ Requires `tmux`, `claude` and `git` on `PATH`; the agent reports any that are mi
 | `CLAUDE_DIR` | `~/.claude` | Path to the Claude config/projects directory. The subscription token for usage limits is read from `$CLAUDE_DIR/.credentials.json`. |
 | `DISK_EXTRA` | — | Optional second mount to report alongside `/`, e.g. `/mnt/d`. |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | API base for the usage-limits lookup. Only `https://` or a loopback `http://` URL is honoured — the subscription token is sent there, so anything else is ignored in favour of the default. |
-| `CDASH_PUBLIC` | `public` | Directory served as static files. |
 | `CDASH_AUTH` | `none` | Comma-composable guard chain, **AND** semantics: `none`, `bearer`, `password`, `trusted-proxy`, `cf-access`. An unknown value refuses to boot rather than falling back to `none`. |
 | `CDASH_TOKEN` | — | Required by `bearer`. |
 | `CDASH_PASSWORD_HASH` | — | Required by `password`. Produce it with `cdash-agent set-password`. |
