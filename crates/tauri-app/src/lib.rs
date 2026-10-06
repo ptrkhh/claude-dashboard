@@ -47,7 +47,6 @@ fn server_config() -> cdash_agent::http::serve::Config {
         port: 0, // OS chooses; the bound address is the readiness signal
         claude_dir: PathBuf::from(home).join(".claude"),
         disk_extra: None,
-        public_dir: PathBuf::from("public"),
         auth: Arc::new(
             AuthConfig::build(vec![GuardKind::None], None, String::new(), vec![])
                 .expect("none is always buildable"),
