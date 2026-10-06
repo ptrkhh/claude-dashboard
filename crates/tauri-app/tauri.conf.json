@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "claude-dashboard",
+  "productName": "Claude Dashboard",
   "version": "0.1.0",
   "identifier": "dev.cdash.app",
   "build": {
@@ -9,13 +9,14 @@
   "app": {
     "withGlobalTauri": true,
     "windows": [
-      { "title": "claude-dashboard", "width": 1100, "height": 800 }
+      { "title": "Claude Dashboard", "width": 1100, "height": 800 }
     ],
     "security": {
       "csp": null
     }
   },
   "bundle": {
-    "active": false
+    "active": false,
+    "icon": ["icons/icon.png", "icons/icon.ico"]
   }
 }

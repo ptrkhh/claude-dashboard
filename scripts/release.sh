@@ -57,6 +57,7 @@ if [ -n "${ANDROID_HOME:-}" ] && [ -n "${NDK_HOME:-}" ]; then
   (
     cd crates/tauri-app
     cargo tauri android init
+    cargo tauri icon "$PWD/../../public/icon.svg"
 
     # Gradle enables cleartext HTTP for debug only. The client's own API calls
     # go through Rust (reqwest), which Android's cleartext policy is not

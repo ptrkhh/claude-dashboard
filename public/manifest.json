@@ -1,6 +1,6 @@
 {
   "name": "Claude Dashboard",
-  "short_name": "ClaudeDash",
+  "short_name": "Claude Dashboard",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#f2f0e9",
