@@ -1,7 +1,7 @@
 use crate::collect::browse::list_dirs;
 use crate::collect::ctx::Ctx;
 use crate::collect::places::read_places;
-use crate::collect::sessions::collect_sessions;
+use crate::collect::sessions::{collect_sessions, RESUMABLE_CEILING, RESUMABLE_MAX};
 use crate::collect::validate::{BadRequest, Refused};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -40,8 +40,17 @@ impl From<Refused> for ApiError {
 /// `/api/sessions` is the one route that answers 500 rather than 400 on
 /// failure, and logs first (`server.js:34`). In practice it cannot fail: every
 /// fallible step inside `collect_sessions` already degrades to a default.
-pub async fn get_sessions(State(ctx): State<Arc<Ctx>>) -> Response {
-    Json(collect_sessions(&ctx).await).into_response()
+pub async fn get_sessions(
+    State(ctx): State<Arc<Ctx>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    // `?resumable=N` is how "Show more" asks for a longer list.
+    let limit = q
+        .get("resumable")
+        .and_then(|n| n.parse::<usize>().ok())
+        .unwrap_or(RESUMABLE_MAX)
+        .min(RESUMABLE_CEILING);
+    Json(collect_sessions(&ctx, limit).await).into_response()
 }
 
 /// Authenticated: it names the host's platform and which binaries are absent.
