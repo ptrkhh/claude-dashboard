@@ -13,3 +13,7 @@ docs/superpowers/*
 
 # Tauri build-time generated schemas
 crates/tauri-app/gen/schemas/
+crates/tauri-app/gen/android/
+
+# Output of scripts/build-all.sh
+dist/
