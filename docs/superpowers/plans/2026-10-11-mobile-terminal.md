@@ -35,11 +35,12 @@
 
 ## Review Focus
 
-1. **Agent started inside a tmux session** (Termux users often run it from a shell inside tmux, so `TMUX` is set). `tmux attach` refuses with "sessions should be nested with care". Expected: attach works. Pinned by the `attach_command` test in Task 4 (`TMUX` removed from the child env).
+1. **Agent started inside a tmux session** (Termux users often run it from a shell inside tmux, so `TMUX` is set). Expected: attach works and reaches the same server `spawn_claude`'s `new-session` used. tmux refuses to nest only when the client's tty is one of its own pane ttys, and the bridge's tty is a fresh PTY, so attach works with `TMUX` set (checked on tmux 3.4). `TMUX` also names the server socket, so removing it would send attach to the default socket while `new-session` and `has-session` follow `TMUX`: under a non-default socket every terminal would close 4000 "session ended". Pinned by the `attach_command` test in Task 4 (`TMUX` inherited).
 2. **Agent environment without a UTF-8 locale** (boot script, systemd unit). The tmux client replaces every non-ASCII glyph, including Claude's box drawing, with `_`. Expected: correct glyphs. Pinned by the `attach_command` test in Task 4 (`-u` flag).
 3. **Large paste or burst of input** larger than the PTY buffer. A non-blocking write returns short or `EAGAIN`. Expected: every byte arrives, in order. Pinned by `write_all_delivers_every_byte_through_a_full_pipe` in Task 4.
-4. **Phone drops the connection without a close frame** (sleep, network loss). Expected: the `tmux attach` client goes away, the session stays. Pinned by `an_unclean_drop_detaches_the_client` in Task 4.
-5. **Session name that is a prefix of another session's name.** `tmux -t cdash-a` would match `cdash-ab`. Expected: no attach to the wrong session; the socket closes 4000. Pinned by `a_prefix_name_does_not_attach_a_longer_session` in Task 4.
+4. **Phone drops the connection without a close frame** (sleep, network loss). Expected: the `tmux attach` client goes away, the session stays. A TCP close is pinned by `an_unclean_drop_detaches_the_client`. Network loss sends no FIN at all, and neither axum nor the server sets a keepalive, so only the bridge's own ping (`PING_EVERY`) reveals it. Pinned by `a_client_that_stops_answering_is_detached` in Task 4.
+5. **Close code lost to a TCP reset.** The bridge sends 4000/4001 and drops the socket. A frame the browser sent just before (a pong to the bridge's ping, a keystroke) is then unread, so Linux answers RST, and the browser can discard the close frame and see 1006, which shows "Disconnected" and auto-retries instead of "Session ended". Expected: the code arrives. `bridge` drains until the browser's Close reply (1 s cap). Pinned by the 4000/4001 tests: without the drain they failed 72 of 150 isolated runs, with it 0 of 150.
+6. **Session name that is a prefix of another session's name.** `tmux -t cdash-a` would match `cdash-ab`. Expected: no attach to the wrong session; the socket closes 4000. Pinned by `a_prefix_name_does_not_attach_a_longer_session` in Task 4.
 
 ---
 
@@ -194,7 +195,7 @@ In `public/app.js`:
 
 - Delete the whole `// Send-to-TUI:` block: the `input` listener and the `submit` listener (lines 316-339).
 
-In `public/style.css`, delete lines 380-403 (every `.send`, `.send-input`, `.send-btn` rule).
+In `public/style.css`, delete lines 378-403 (the `/* Send-to-TUI bar … */` comment and every `.send`, `.send-input`, `.send-btn` rule).
 
 - [ ] **Step 4: Remove the agent half**
 
@@ -578,14 +579,15 @@ Append inside `mod tests` in `term.rs`. These need a real tmux and skip themselv
     #[test]
     fn attach_command_survives_a_nested_and_non_utf8_environment() {
         // Review focus 1 and 2: an agent started inside tmux inherits TMUX,
-        // which makes `tmux attach` refuse; an agent without a UTF-8 locale
-        // makes the tmux client draw every box character as `_`.
+        // which names the server `new-session` used, so attach must keep it;
+        // an agent without a UTF-8 locale makes the tmux client draw every
+        // box character as `_`.
         let cmd = attach_command("cdash-a", "/usr/bin:/bin");
         let std = cmd.as_std();
         let args: Vec<_> = std.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(args, ["-u", "attach-session", "-t", "=cdash-a"]);
         let envs: Vec<_> = std.get_envs().collect();
-        assert!(envs.contains(&(std::ffi::OsStr::new("TMUX"), None)), "TMUX is removed: {envs:?}");
+        assert!(envs.iter().all(|(k, _)| *k != "TMUX"), "TMUX is inherited: {envs:?}");
         assert!(envs.contains(&(
             std::ffi::OsStr::new("TERM"),
             Some(std::ffi::OsStr::new("xterm-256color"))
@@ -667,6 +669,22 @@ Append inside `mod tests` in `term.rs`. These need a real tmux and skip themselv
     }
 
     #[tokio::test]
+    async fn a_client_that_stops_answering_is_detached() {
+        // Review focus 4: a phone that loses its network sends no FIN, so
+        // only the missing pong reveals it. This client never reads, so it
+        // never answers the bridge's ping.
+        if !have_tmux() {
+            return;
+        }
+        let s = Session::new("silent");
+        let b = serve(cfg_for(tempdir("silent"))).await.unwrap();
+        let _ws = connect(b.addr, &format!("name={}&cols=80&rows=24", s.0), None).await.unwrap();
+        eventually("attached", || !s.clients().is_empty()).await;
+        eventually("client gone", || s.clients().is_empty()).await;
+        assert!(tmux(&["has-session", "-t", &format!("={}", s.0)]).status.success());
+    }
+
+    #[tokio::test]
     async fn killing_the_session_closes_with_4000() {
         if !have_tmux() {
             return;
@@ -695,7 +713,7 @@ Append inside `mod tests` in `term.rs`. These need a real tmux and skip themselv
 
     #[tokio::test]
     async fn a_prefix_name_does_not_attach_a_longer_session() {
-        // Review focus 5: plain `-t cdash-x` would match `cdash-xy`.
+        // Review focus 6: plain `-t cdash-x` would match `cdash-xy`.
         if !have_tmux() {
             return;
         }
@@ -763,16 +781,16 @@ fn open_pty(cols: u16, rows: u16) -> io::Result<(OwnedFd, OwnedFd)> {
 
 /// `tmux attach` as the bridge runs it. `-u` because the agent's environment
 /// may carry no UTF-8 locale, and the tmux client would then draw every box
-/// character as `_`. `TMUX` is removed because an agent started inside tmux
-/// inherits it, and tmux refuses to nest. `=name` is an exact match, where a
-/// bare name would also match a longer session it prefixes.
+/// character as `_`. `TMUX` stays: it names the server `new-session` used, and
+/// tmux refuses to nest only when the client's tty is one of its pane ttys,
+/// which this fresh PTY never is. `=name` is an exact match, where a bare name
+/// would also match a longer session it prefixes.
 #[allow(clippy::disallowed_types)] // a PTY child, which Runner (piped output, timeout) cannot express
 fn attach_command(name: &str, path: &str) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("tmux");
     cmd.args(["-u", "attach-session", "-t", &format!("={name}")])
         .env("PATH", path)
         .env("TERM", "xterm-256color")
-        .env_remove("TMUX")
         .kill_on_drop(true);
     cmd
 }
@@ -811,6 +829,13 @@ async fn write_all(fd: &AsyncFd<OwnedFd>, mut b: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// How often the bridge pings the browser. A phone that loses its network
+/// sends no FIN, so without this `recv` waits forever and the `tmux attach`
+/// child leaks; a peer that answers nothing for one full interval is gone.
+/// Short under test so a silent client is caught within the test's patience.
+const PING_EVERY: std::time::Duration =
+    std::time::Duration::from_secs(if cfg!(test) { 2 } else { 30 });
+
 enum Ended {
     /// The browser went away; nothing left to tell it.
     Client,
@@ -823,8 +848,22 @@ async fn pump(ctx: &Ctx, name: &str, cols: u16, rows: u16, ws: &mut WebSocket) -
     let _child = spawn_attach(name, &ctx.host.path, slave)?; // killed on drop
     let master = AsyncFd::new(master)?;
     let mut buf = vec![0u8; 16 * 1024];
+    let mut ping = tokio::time::interval(PING_EVERY);
+    // Burst (the default) would fire missed ticks back to back after a stall
+    // (a slow send on a bad mobile link), and the second would see `heard`
+    // still false and cut off a live client.
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut heard = true;
     loop {
         tokio::select! {
+            _ = ping.tick() => {
+                if !std::mem::take(&mut heard) {
+                    return Ok(Ended::Client);
+                }
+                if ws.send(Message::Ping(axum::body::Bytes::new())).await.is_err() {
+                    return Ok(Ended::Client);
+                }
+            }
             r = master.readable() => {
                 let mut g = r?;
                 match g.try_io(|f| Ok(rustix::io::read(f.get_ref(), &mut buf[..])?)) {
@@ -843,15 +882,18 @@ async fn pump(ctx: &Ctx, name: &str, cols: u16, rows: u16, ws: &mut WebSocket) -
                     Err(_would_block) => {}
                 }
             }
-            msg = ws.recv() => match msg {
-                Some(Ok(Message::Binary(b))) => write_all(&master, &b).await?,
-                Some(Ok(Message::Text(t))) => {
-                    if let Some((c, r)) = parse_resize(t.as_str()) {
-                        set_size(master.get_ref(), c, r)?;
+            msg = ws.recv() => {
+                heard = true;
+                match msg {
+                    Some(Ok(Message::Binary(b))) => write_all(&master, &b).await?,
+                    Some(Ok(Message::Text(t))) => {
+                        if let Some((c, r)) = parse_resize(t.as_str()) {
+                            set_size(master.get_ref(), c, r)?;
+                        }
                     }
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return Ok(Ended::Client),
+                    Some(Ok(_)) => {} // ping/pong: axum answers pings itself
                 }
-                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return Ok(Ended::Client),
-                Some(Ok(_)) => {} // ping/pong: axum answers pings itself
             },
         }
     }
@@ -878,6 +920,11 @@ pub async fn bridge(ctx: Arc<Ctx>, name: String, cols: u16, rows: u16, mut ws: W
     };
     if let Some((code, reason)) = close {
         let _ = ws.send(Message::Close(Some(CloseFrame { code, reason: reason.into() }))).await;
+        // Wait for the browser's Close reply. Dropping the socket with a frame
+        // still unread (a pong, a keystroke) makes the kernel answer RST, and
+        // the browser can then lose the close code and see a plain 1006.
+        let drain = async { while let Some(Ok(_)) = ws.recv().await {} };
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), drain).await;
     }
     ctx.host.log.push(format!("term close {name}"));
 }
@@ -1336,7 +1383,13 @@ async function termConnect() {
   ws.binaryType = 'arraybuffer';
   t.ws = ws;
   let opened = false;
-  ws.onopen = () => { opened = true; termStatus('', false); };
+  ws.onopen = () => {
+    opened = true;
+    termStatus('', false);
+    // onResize drops sizes while connecting, and the keyboard that focus()
+    // opens usually lands then; send the size the screen has now.
+    ws.send(JSON.stringify({ resize: [t.xterm.cols, t.xterm.rows] }));
+  };
   ws.onmessage = e => { if (typeof e.data !== 'string') t.xterm.write(new Uint8Array(e.data)); };
   ws.onclose = e => {
     if (term !== t || t.ws !== ws) return; // the UI closed it, or a newer socket replaced it
