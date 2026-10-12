@@ -41,6 +41,12 @@ fn prompt_hidden(prompt: &str) -> Result<String, String> {
 }
 
 fn main() {
+    // SIG_IGN survives exec. A launcher that left SIGCHLD ignored (WSL boot via
+    // `~/.bashrc`) makes the kernel reap every child before tokio can wait on it,
+    // so the first spawn, the PATH probe, fails with ECHILD. Reset before any spawn.
+    unsafe {
+        libc::signal(libc::SIGCHLD, libc::SIG_DFL);
+    }
     if cdash_agent::collect::codex_proxy::run_if_requested() { return; }
     run_agent();
 }
