@@ -14,13 +14,15 @@ or 403 halts the poll until you act; throttling never does. The service worker
 caches at runtime (network-first navigations, stale-while-revalidate assets), so
 offline works from the second visit; there is no precache manifest to maintain.
 
-## Desktop client (Linux, Windows)
+## Desktop client (Linux, macOS, Windows)
 
 ```
 cargo run -p cdash-tauri
 ```
 
-A Tauri desktop wrapper around the same UI. The agent runs in-process (no separate server, no port to remember), started at app setup on a tokio task. The HTTP boundary is kept even in-process: the same `/api/*` calls still speak HTTP to loopback, tunnelled through the `api_request` Tauri command rather than webview `fetch`. Connection profiles are stored in the app's config directory via `tauri-plugin-store`. Secrets handling arrives in step 10.
+A Tauri desktop wrapper around the same UI. On Linux and macOS, the agent runs in-process (no separate server, no port to remember) and starts when the app opens. The HTTP boundary is kept even in-process: the same `/api/*` calls still speak HTTP to loopback, tunnelled through the `api_request` Tauri command rather than webview `fetch`. Connection profiles are stored in the app's config directory via `tauri-plugin-store`. Secrets handling arrives in step 10.
+
+Linux and macOS therefore open directly into the dashboard; there is no separate-agent setup command to paste. The session send bar still types copied prompts or commands into a running terminal session.
 
 **On Windows the client links no agent at all** — `cdash-agent` is a
 `cfg(not(windows))` dependency. tmux, `claude` and `/proc` live in a WSL distro,
@@ -109,15 +111,20 @@ cargo run -p cdash-agent     # http://127.0.0.1:23274
 
 ### Release builds
 
-`scripts/release.sh` builds all five artifacts:
+`scripts/release.sh` builds the five existing artifacts. The native desktop workflow builds three Tauri bundles on native Linux/macOS runners and uploads them as GitHub Actions artifacts:
 
 | Artifact | Target | Runs on |
 |---|---|---|
 | `cdash-agent` | `x86_64-unknown-linux-musl` | VPS, WSL |
 | `cdash-agent` | `aarch64-unknown-linux-musl` | VPS, Termux on Android (F-Droid Termux — see the design doc's Android section) |
+| `cdash-tauri-linux-x64.AppImage` | `x86_64-unknown-linux-gnu` | Linux desktop (x64), with in-process agent |
+| `cdash-tauri-linux-arm64.AppImage` | `aarch64-unknown-linux-gnu` | Linux desktop (ARM64), with in-process agent |
 | `cdash-tauri.exe` | `x86_64-pc-windows-msvc` | Windows desktop client (x64), bundling the x86_64 agent |
 | `cdash-tauri.exe` | `aarch64-pc-windows-msvc` | Windows desktop client (ARM64), bundling the aarch64 agent |
+| `cdash-tauri-macos-arm64.dmg` | `aarch64-apple-darwin` | macOS desktop (Apple Silicon), with in-process agent |
 | `cdash-dashboard-android-arm64.apk` | `aarch64-linux-android` | Android thin client |
+
+Linux AppImages and the unsigned macOS DMG are built by `.github/workflows/native-desktop.yml`. Linux ARM64 AppImages require a native ARM runner. The macOS DMG is unsigned for now, so Gatekeeper may block first launch until the user allows it in Privacy & Security. Download those three Actions artifacts and attach the files to a GitHub Release when publishing.
 
 Both agents are **booted** as the release gate — the gate is the startup banner,
 since a binary that dies instantly would otherwise pass. The Windows client
