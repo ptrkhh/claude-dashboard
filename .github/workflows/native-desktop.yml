@@ -1,0 +1,73 @@
+name: native desktop bundles
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  linux-appimage:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.1
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential file libayatana-appindicator3-dev libfuse2 \
+            libssl-dev libwebkit2gtk-4.1-dev libxdo-dev librsvg2-dev
+      - name: Install Rust target and Tauri CLI
+        run: |
+          rustup target add "${{ matrix.target }}"
+          cargo install --locked tauri-cli --version =2.12.1
+      - name: Build AppImage
+        working-directory: crates/tauri-app
+        run: cargo tauri build --target "${{ matrix.target }}" --bundles appimage -- --locked
+      - name: Name artifact
+        run: |
+          mkdir -p dist
+          shopt -s nullglob
+          files=(target/${{ matrix.target }}/release/bundle/appimage/*.AppImage)
+          test "${#files[@]}" -eq 1
+          cp "${files[0]}" "dist/cdash-tauri-linux-${{ matrix.arch }}.AppImage"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cdash-tauri-linux-${{ matrix.arch }}
+          path: dist/cdash-tauri-linux-${{ matrix.arch }}.AppImage
+          if-no-files-found: error
+
+  macos-dmg:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.1
+      - name: Install Rust target and Tauri CLI
+        run: |
+          rustup target add aarch64-apple-darwin
+          cargo install --locked tauri-cli --version =2.12.1
+      - name: Build unsigned ARM64 DMG
+        working-directory: crates/tauri-app
+        run: cargo tauri build --target aarch64-apple-darwin --bundles dmg --no-sign -- --locked
+      - name: Name artifact
+        run: |
+          mkdir -p dist
+          shopt -s nullglob
+          files=(target/aarch64-apple-darwin/release/bundle/dmg/*.dmg)
+          test "${#files[@]}" -eq 1
+          cp "${files[0]}" dist/cdash-tauri-macos-arm64.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cdash-tauri-macos-arm64
+          path: dist/cdash-tauri-macos-arm64.dmg
+          if-no-files-found: error
