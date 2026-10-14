@@ -20,6 +20,7 @@ const svg = body => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" 
 const ICONS = {
   play: `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15a1 1 0 0 0 1.5.87l12-7.5a1 1 0 0 0 0-1.74l-12-7.5A1 1 0 0 0 7 4.5z"/></svg>`,
   external: svg('<path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/>'),
+  terminal: svg('<path d="M4 17l6-5-6-5"/><path d="M12 19h8"/>'),
   x: svg('<path d="M18 6 6 18"/><path d="M6 6l12 12"/>'),
   download: svg('<path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/>'),
   refresh: svg('<path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/>'),
@@ -211,6 +212,10 @@ function runningCard(r) {
     : `<span class="action pending">${ICONS.spinner}<span>Waiting for link…</span></span>`;
   const kill = r.external ? ''
     : `<button class="action danger" type="button" data-kill="${esc(r.name)}" ${r.name === armedKill ? 'data-arm="1"' : ''} aria-label="Kill session">${r.name === armedKill ? 'Sure?' : ICONS.x}</button>`;
+  // The session's real TUI. tmux-owned panes only: an external session lives
+  // in another terminal app's PTY, which nothing can attach to.
+  const termBtn = r.external ? ''
+    : `<button class="action" type="button" data-term="${esc(r.name)}" data-title="${esc(r.dir.split('/').pop())}">${ICONS.terminal}<span>Terminal</span></button>`;
   return `
     <div class="session ${status} ${r.external ? 'external' : ''}">
       <div class="session-head">
@@ -225,7 +230,7 @@ function runningCard(r) {
         <span class="time">${fmtUp(r.uptimeSec)}</span>
       </div>
       ${peek}
-      <div class="actions">${rc}${kill}</div>
+      <div class="actions">${rc}${termBtn}${kill}</div>
     </div>`;
 }
 
@@ -278,6 +283,8 @@ function render(d) {
 }
 
 document.body.addEventListener('click', async e => {
+  const t = e.target.closest('[data-term]');
+  if (t) { openTerm(t.dataset.term, t.dataset.title); return; }
   const el = e.target.closest('[data-kill],[data-resume],[data-purge],[data-more]');
   if (!el) return;
   try {
@@ -295,6 +302,136 @@ document.body.addEventListener('click', async e => {
       await api('/api/purge', { sid: el.dataset.purge }); poll();
     }
   } catch (err) { toast(err.message); poll(); } // re-arm even when the action failed
+});
+
+/* ---------- Terminal: the session's real TUI over a WebSocket ----------
+   The agent runs `tmux attach` in a PTY and pipes it here. tmux owns the
+   history, so xterm keeps no scrollback; PgUp/PgDn scroll inside Claude Code's
+   fullscreen renderer instead. */
+let term = null; // { name, xterm, fit, ro, ws, ctrl, retry } while the overlay is open
+
+async function termUrl(name, cols, rows) {
+  const q = `/api/term?name=${encodeURIComponent(name)}&cols=${cols}&rows=${rows}`;
+  // The webview cannot proxy a WebSocket through invoke, so it dials the agent.
+  if (isTauri) return (await invoke('agent_base')).replace(/^http/, 'ws') + q;
+  return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${q}`;
+}
+
+function termStatus(text, reconnect) {
+  $('#term-status').textContent = text;
+  $('#term-reconnect').hidden = !reconnect;
+}
+
+function termSend(data) {
+  if (term?.ws?.readyState === WebSocket.OPEN) term.ws.send(new TextEncoder().encode(data));
+}
+
+async function termConnect() {
+  const t = term;
+  t.retry = false;
+  t.xterm.reset();
+  termStatus('Connecting…', false);
+  let url;
+  try { url = await termUrl(t.name, t.xterm.cols, t.xterm.rows); }
+  catch (e) { termStatus(String(e?.message ?? e), true); return; }
+  if (term !== t) return; // closed while resolving the URL
+  const ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+  t.ws = ws;
+  let opened = false;
+  ws.onopen = () => {
+    opened = true;
+    termStatus('', false);
+    // onResize drops sizes while connecting, and the keyboard that focus()
+    // opens usually lands then; send the size the screen has now.
+    ws.send(JSON.stringify({ resize: [t.xterm.cols, t.xterm.rows] }));
+  };
+  ws.onmessage = e => { if (typeof e.data !== 'string') t.xterm.write(new Uint8Array(e.data)); };
+  ws.onclose = e => {
+    if (term !== t || t.ws !== ws) return; // the UI closed it, or a newer socket replaced it
+    t.ws = null;
+    if (e.code === 4000) return termStatus('Session ended', false);
+    if (e.code === 4001) return termStatus('Disconnected', true);
+    // Unexpected: network, agent restart, phone sleep. One automatic retry
+    // when the page is next visible; the button covers the rest.
+    termStatus(e.reason || (opened ? 'Disconnected' : 'Couldn’t connect'), true);
+    t.retry = true;
+  };
+}
+
+function setCtrl(on) {
+  term.ctrl = on;
+  const b = $('#term-keys [data-key="ctrl"]');
+  b.classList.toggle('on', on);
+  b.setAttribute('aria-pressed', String(on));
+}
+
+function openTerm(name, title) {
+  if (term) return;
+  $('#term-title').textContent = title;
+  $('#term').hidden = false;
+  const xterm = new Terminal({
+    fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--font-mono'),
+    fontSize: 13,
+    cursorBlink: true,
+    scrollback: 0,
+    // Dark regardless of the dashboard theme: Claude Code's own colors assume one.
+    theme: { background: '#1a1917', foreground: '#f4f2ec' },
+  });
+  const fit = new FitAddon.FitAddon();
+  xterm.loadAddon(fit);
+  xterm.open($('#term-screen'));
+  // The hidden textarea is what the phone keyboard types into.
+  for (const [k, v] of [['autocapitalize', 'off'], ['autocorrect', 'off'], ['autocomplete', 'off'], ['spellcheck', 'false']])
+    xterm.textarea.setAttribute(k, v);
+  fit.fit();
+  term = { name, xterm, fit, ro: null, ws: null, ctrl: false, retry: false };
+  xterm.onData(d => {
+    if (term.ctrl) { d = cdashKeys.applyCtrl(d); setCtrl(false); }
+    termSend(d);
+  });
+  xterm.onResize(({ cols, rows }) => {
+    if (term.ws?.readyState === WebSocket.OPEN) term.ws.send(JSON.stringify({ resize: [cols, rows] }));
+  });
+  // Rotation and the keyboard opening both resize the container.
+  term.ro = new ResizeObserver(() => fit.fit());
+  term.ro.observe($('#term-screen'));
+  history.pushState({ term: name }, ''); // Android back closes the overlay
+  termConnect();
+  xterm.focus();
+}
+
+function closeTerm() {
+  if (!term) return;
+  const t = term;
+  term = null;
+  t.ro.disconnect();
+  t.ws?.close();
+  t.xterm.dispose();
+  $('#term').hidden = true;
+  poll(); // the poll paused while the overlay was open
+}
+
+$('#term-close').innerHTML = ICONS.x;
+$('#term-close').addEventListener('click', () => history.back()); // popstate closes it
+addEventListener('popstate', closeTerm);
+$('#term-reconnect').addEventListener('click', () => { if (term && !term.ws) termConnect(); });
+// Act on pointerdown and cancel it, so a tap neither moves focus nor closes
+// the phone keyboard; mousedown is cancelled too for browsers that still
+// focus on it.
+$('#term-keys').addEventListener('mousedown', e => e.preventDefault());
+$('#term-keys').addEventListener('pointerdown', e => {
+  const b = e.target.closest('[data-key]');
+  if (!b || !term) return;
+  e.preventDefault();
+  const k = b.dataset.key;
+  if (k === 'ctrl') return setCtrl(!term.ctrl);
+  if (term.ctrl) setCtrl(false); // Ctrl applies to the next typed character only
+  termSend(cdashKeys.KEYS[k]);
+  if (document.activeElement !== term.xterm.textarea) term.xterm.focus();
+});
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && term?.retry && !term.ws) termConnect();
 });
 
 // Launch: submitting the command bar (button or Enter in the directory field).
@@ -449,6 +586,7 @@ function arm() {
 }
 
 async function tick() {
+  if (term) return; // paused under the terminal; closeTerm() restarts it
   const g = gen;
   // Skip background polls, but never the first one. An Android WebView is
   // hidden until its activity resumes, and `visibilitychange` can fire before

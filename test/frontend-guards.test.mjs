@@ -48,3 +48,19 @@ test('the send bar is gone: the terminal replaced it', () => {
   assert.ok(!app.includes('send-input'), 'no send input is rendered');
   assert.ok(!/\.send[\s{.:-]/.test(css), 'no .send styles remain');
 });
+
+test('the Terminal button exists only for tmux-owned sessions', () => {
+  // External sessions live in another terminal app's PTY; nothing can attach.
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const m = app.match(/const termBtn = r\.external \? '' *\n?\s*: `<button[^`]*data-term=/);
+  assert.ok(m, 'termBtn is empty for external sessions and carries data-term otherwise');
+});
+
+test('terminal scripts load before app.js', () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const at = s => html.indexOf(`<script src="${s}"></script>`);
+  for (const s of ['vendor/xterm.js', 'vendor/addon-fit.js', 'term/keys.js']) {
+    assert.ok(at(s) !== -1 && at(s) < at('app.js'), `${s} loads before app.js`);
+  }
+  assert.ok(html.includes('interactive-widget=resizes-content'), 'the IME shrinks the layout');
+});
