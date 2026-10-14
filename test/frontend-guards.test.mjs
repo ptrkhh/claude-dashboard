@@ -38,3 +38,13 @@ test('localStorage is reached only through the guarded store wrapper', () => {
       `${method} swallows the throw`);
   }
 });
+
+test('the send bar is gone: the terminal replaced it', () => {
+  // It typed one line into the pane and could not operate anything that
+  // needs arrow keys (/mcp menus), which is why the terminal replaced it.
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  assert.ok(!app.includes('/api/keys'), 'app.js no longer posts to /api/keys');
+  assert.ok(!app.includes('send-input'), 'no send input is rendered');
+  assert.ok(!/\.send[\s{.:-]/.test(css), 'no .send styles remain');
+});
