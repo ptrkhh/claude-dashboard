@@ -103,6 +103,8 @@ artifact. Its loopback listener starts the first time the setup screen opens —
 not at launch — and then stays up until the app exits. It is not the sensitive
 part.
 
+**Coming from termux-claude-autoremote?** The Termux:Widget shortcut is replaced by the app icon, or by Add to home screen in a browser. Its share-sheet folder picker has no equivalent yet. Install `tmux` and `git` with `pkg install tmux git`, and Claude Code separately. The agent reports any of the three that are missing at startup.
+
 ## Run
 
 ```
