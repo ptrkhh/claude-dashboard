@@ -97,7 +97,21 @@ fn set_size(fd: impl AsFd, cols: u16, rows: u16) -> io::Result<()> {
 fn open_pty(cols: u16, rows: u16) -> io::Result<(OwnedFd, OwnedFd)> {
     use rustix::fs::{Mode, OFlags};
     use rustix::pty::{grantpt, openpt, ptsname, unlockpt, OpenptFlags};
-    let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC)?;
+    let flags = OpenptFlags::RDWR | OpenptFlags::NOCTTY;
+    // rustix defines `OpenptFlags::CLOEXEC` only where `openpt` can honour it
+    // atomically (Linux, FreeBSD, NetBSD); on macOS the flag does not exist.
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    ))]
+    let flags = flags | OpenptFlags::CLOEXEC;
+    let master = openpt(flags)?;
+    // Every platform, so macOS gets it too (a no-op where `openpt` already
+    // did): otherwise a `tmux new-session` that starts the tmux server while
+    // a terminal is open would hand the master to that long-lived server.
+    rustix::io::fcntl_setfd(&master, rustix::io::FdFlags::CLOEXEC)?;
     grantpt(&master)?;
     unlockpt(&master)?;
     let path = ptsname(&master, Vec::new())?;
@@ -800,5 +814,13 @@ mod tests {
         assert!(tmux(&["has-session", "-t", &format!("={}", s.0)])
             .status
             .success());
+    }
+
+    #[test]
+    fn the_pty_master_is_close_on_exec() {
+        // Otherwise a tmux server started while a terminal is open inherits it.
+        let (master, _slave) = open_pty(80, 24).unwrap();
+        let flags = rustix::io::fcntl_getfd(&master).unwrap();
+        assert!(flags.contains(rustix::io::FdFlags::CLOEXEC), "{flags:?}");
     }
 }
