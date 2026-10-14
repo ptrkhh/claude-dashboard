@@ -130,8 +130,10 @@ async fn spawn_claude(
     }
     let name = tmux_name(dir);
 
-    // The explicit Remote Control request must win over this user-level opt-out,
-    // but only for the dashboard child; the user's settings file stays untouched.
+    // Per dashboard child only; the user's settings file stays untouched.
+    // The explicit Remote Control request must win over the user-level
+    // opt-out, and the fullscreen renderer is what makes PgUp/PgDn scroll the
+    // conversation from the phone's terminal key bar.
     let mut args: Vec<&str> = vec![
         "new-session",
         "-d",
@@ -141,7 +143,7 @@ async fn spawn_claude(
         dir,
         "claude",
         "--settings",
-        r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":""}}"#,
+        r#"{"tui":"fullscreen","env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":""}}"#,
     ];
     args.extend_from_slice(claude_args);
     args.extend_from_slice(&["--dangerously-skip-permissions", "--remote-control", &name]);
@@ -541,18 +543,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn launch_overrides_the_setting_that_disables_remote_control() {
+    async fn launch_passes_the_dashboard_settings_override() {
         let d = tempdir("rc-setting");
         let ctx = ctx_with_tmux(d.clone(), 0).await;
 
         launch_session(&ctx, d.to_str().unwrap(), "sonnet", "medium").await.unwrap();
 
         let args = std::fs::read_to_string(d.join("tmux-args")).unwrap();
+        let first = args.lines().next().unwrap();
         assert!(
-            args.lines().next().unwrap().contains(
-                r#"--settings {"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":""}}"#
+            first.contains(
+                r#"--settings {"tui":"fullscreen","env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":""}}"#
             ),
-            "dashboard launches must keep their explicitly requested Remote Control enabled: {args}"
+            "dashboard launches keep Remote Control enabled and start in the \
+             fullscreen renderer, so PgUp/PgDn scroll from the phone: {args}"
         );
     }
 
