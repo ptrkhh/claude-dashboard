@@ -470,6 +470,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_assets_are_embedded() {
+        let b = serve(cfg_for(tempdir("term-assets"))).await.unwrap();
+        for (path, needle) in [
+            ("/vendor/xterm.js", "Terminal"),
+            ("/vendor/addon-fit.js", "FitAddon"),
+            ("/vendor/xterm.css", ".xterm"),
+            ("/term/keys.js", "cdashKeys"),
+        ] {
+            let body = reqwest_get(&format!("http://{}{path}", b.addr)).await;
+            assert!(body.contains(needle), "{path} is served");
+        }
+    }
+
+    #[tokio::test]
     async fn a_missing_body_field_is_rejected_rather_than_defaulted_into_a_subprocess() {
         let b = serve(cfg_for(tempdir("missing"))).await.unwrap();
         let (status, _) = http_post(&format!("http://{}/api/kill", b.addr), "{}").await;

@@ -134,6 +134,22 @@ async fn embedded_asset(uri: OriginalUri) -> Response {
             "text/javascript; charset=utf-8",
             include_bytes!("../../../../public/transport/backoff.js"),
         ),
+        "term/keys.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("../../../../public/term/keys.js"),
+        ),
+        "vendor/xterm.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("../../../../public/vendor/xterm.js"),
+        ),
+        "vendor/addon-fit.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("../../../../public/vendor/addon-fit.js"),
+        ),
+        "vendor/xterm.css" => (
+            "text/css; charset=utf-8",
+            include_bytes!("../../../../public/vendor/xterm.css"),
+        ),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     ([(header::CONTENT_TYPE, content_type)], Body::from(body)).into_response()
