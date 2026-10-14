@@ -305,6 +305,18 @@ async fn api_request(
     request_inner(&http.0, addr, active.as_ref(), method, path, body).await
 }
 
+/// The agent's base URL, for the one connection `api_request` cannot carry:
+/// the terminal's WebSocket, which the webview opens itself.
+#[tauri::command]
+fn agent_base(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, ServerState>,
+) -> Result<String, String> {
+    let inproc = addr_locked(&state.0)?;
+    let active = open_store(&app).ok().and_then(|s| active_record(&s));
+    base_url(inproc, active.as_ref()).ok_or_else(|| "server not running".to_string())
+}
+
 #[tauri::command]
 fn profiles_list<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<Vec<ProfileRecord>, String> {
     let store = open_store(&app)?;
@@ -596,6 +608,7 @@ pub fn run() {
             server_stop,
             server_state,
             api_request,
+            agent_base,
             profiles_list,
             profile_save,
             profile_delete,
