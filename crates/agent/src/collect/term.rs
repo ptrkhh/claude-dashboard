@@ -175,6 +175,22 @@ enum Ended {
     Tmux,
 }
 
+/// Send one frame, giving up after `PING_EVERY`. A peer that vanished without
+/// a FIN while output streams fills the TCP send buffer, and a bare `send`
+/// would then block the ping arm too, leaving the bridge and `tmux attach`
+/// alive until TCP itself gives up. Whether the send failed or timed out, the
+/// peer is gone.
+async fn send_or_drop(ws: &mut WebSocket, msg: Message) -> bool {
+    matches!(
+        tokio::time::timeout(PING_EVERY, ws.send(msg)).await,
+        Ok(Ok(()))
+    )
+}
+
+fn is_eio(e: &io::Error) -> bool {
+    e.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error())
+}
+
 async fn pump(
     ctx: &Ctx,
     name: &str,
@@ -198,7 +214,7 @@ async fn pump(
                 if !std::mem::take(&mut heard) {
                     return Ok(Ended::Client);
                 }
-                if ws.send(Message::Ping(axum::body::Bytes::new())).await.is_err() {
+                if !send_or_drop(ws, Message::Ping(axum::body::Bytes::new())).await {
                     return Ok(Ended::Client);
                 }
             }
@@ -208,14 +224,12 @@ async fn pump(
                     Ok(Ok(0)) => return Ok(Ended::Tmux),
                     Ok(Ok(n)) => {
                         let frame = Message::Binary(axum::body::Bytes::copy_from_slice(&buf[..n]));
-                        if ws.send(frame).await.is_err() {
+                        if !send_or_drop(ws, frame).await {
                             return Ok(Ended::Client);
                         }
                     }
                     // Linux reports a PTY whose last slave closed as EIO.
-                    Ok(Err(e)) if e.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error()) => {
-                        return Ok(Ended::Tmux)
-                    }
+                    Ok(Err(e)) if is_eio(&e) => return Ok(Ended::Tmux),
                     Ok(Err(e)) => return Err(e),
                     Err(_would_block) => {}
                 }
@@ -223,7 +237,12 @@ async fn pump(
             msg = ws.recv() => {
                 heard = true;
                 match msg {
-                    Some(Ok(Message::Binary(b))) => write_all(&master, &b).await?,
+                    Some(Ok(Message::Binary(b))) => match write_all(&master, &b).await {
+                        Ok(()) => {}
+                        // A keystroke racing tmux's exit: the same EIO as the read arm.
+                        Err(e) if is_eio(&e) => return Ok(Ended::Tmux),
+                        Err(e) => return Err(e),
+                    },
                     Some(Ok(Message::Text(t))) => {
                         if let Some((c, r)) = parse_resize(t.as_str()) {
                             set_size(master.get_ref(), c, r)?;
@@ -714,5 +733,72 @@ mod tests {
             .unwrap();
         assert_eq!(close_code(&mut ws).await, 4000);
         assert!(s.clients().is_empty(), "nothing attached to {}", s.0);
+    }
+
+    #[tokio::test]
+    async fn the_close_code_survives_unread_client_frames() {
+        // Review focus 5: the client keeps typing without reading, then the
+        // session dies. Dropping the socket with those frames unread makes
+        // the kernel answer RST and the close code is lost; the bridge must
+        // wait for the browser's Close reply.
+        if !have_tmux() {
+            return;
+        }
+        let s = Session::new("unread");
+        let b = serve(cfg_for(tempdir("unread"))).await.unwrap();
+        let mut ws = connect(b.addr, &format!("name={}&cols=80&rows=24", s.0), None)
+            .await
+            .unwrap();
+        eventually("attached", || !s.clients().is_empty()).await;
+        tmux(&["kill-session", "-t", &format!("={}", s.0)]);
+        // Let the bridge send its Close, then keep typing without reading. The
+        // bridge's drain lasts one second, so stay well inside it.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        for _ in 0..5 {
+            let _ = ws.send(WsMsg::binary(b"x".to_vec())).await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(close_code(&mut ws).await, 4000);
+    }
+
+    #[tokio::test]
+    async fn a_client_that_stops_reading_under_output_load_is_detached() {
+        // Review focus 4 under load: the phone's network dies while output
+        // streams. The send buffers fill and a bare `ws.send` would block
+        // forever, so only the send timeout frees the bridge. The client
+        // keeps writing (a resize frame, which the bridge counts as "heard"),
+        // so the missing-pong check cannot be what detaches it, and it
+        // advertises a tiny receive window so the buffers fill quickly.
+        if !have_tmux() {
+            return;
+        }
+        let s = Session::new("flood");
+        let b = serve(cfg_for(tempdir("flood"))).await.unwrap();
+        let sock = tokio::net::TcpSocket::new_v4().unwrap();
+        sock.set_recv_buffer_size(4096).unwrap();
+        let tcp = sock.connect(b.addr).await.unwrap();
+        let req = format!("ws://{}/api/term?name={}&cols=80&rows=24", b.addr, s.0)
+            .into_client_request()
+            .unwrap();
+        let (mut ws, _) = tokio_tungstenite::client_async(req, tcp).await.unwrap();
+        eventually("attached", || !s.clients().is_empty()).await;
+        ws.send(WsMsg::binary(b"yes flood\r".to_vec()))
+            .await
+            .unwrap();
+        // Never read from `ws` again; it stays open, so there is no FIN.
+        let gone = tokio::time::timeout(Duration::from_secs(40), async {
+            while !s.clients().is_empty() {
+                let _ = ws.send(WsMsg::text(r#"{"resize":[80,24]}"#)).await;
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        })
+        .await;
+        assert!(
+            gone.is_ok(),
+            "bridge still attached after 40s of a dead peer"
+        );
+        assert!(tmux(&["has-session", "-t", &format!("={}", s.0)])
+            .status
+            .success());
     }
 }
