@@ -14,7 +14,7 @@ jobs:
       - run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev tmux
       - run: node --test
       - run: cargo test --all --locked
       - run: cargo clippy --all-targets --locked -- -D warnings -D clippy::disallowed_types

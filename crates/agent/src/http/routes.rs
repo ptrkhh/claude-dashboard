@@ -102,7 +102,8 @@ pub async fn get_browse(Query(q): Query<HashMap<String, String>>) -> Result<Resp
 
 use crate::collect::places::{add_recent, toggle_favorite};
 use crate::collect::spawn::{kill_session, launch_session, purge_session, resume_session};
-use crate::collect::validate::assert_path;
+use crate::collect::term::{bridge, origin_allowed, parse_size};
+use crate::collect::validate::{assert_kill_name, assert_path};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -192,6 +193,44 @@ pub async fn post_kill(
 ) -> Result<Response, ApiError> {
     kill_session(&ctx, &body.name).await?;
     Ok(Json(serde_json::json!({ "ok": true })).into_response())
+}
+
+/// The session's real TUI over a WebSocket. Every check runs before the
+/// upgrade, so a refused request spawns nothing; the browser sees only a
+/// failed handshake, so each refusal is also logged.
+pub async fn get_term(
+    State(ctx): State<Arc<Ctx>>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    let h = |k: axum::http::HeaderName| headers.get(k).and_then(|v| v.to_str().ok());
+    let origin = h(axum::http::header::ORIGIN);
+    let public = std::env::var("CDASH_PUBLIC_URL").ok();
+    if !origin_allowed(origin, h(axum::http::header::HOST), public.as_deref()) {
+        ctx.host
+            .log
+            .push(format!("term refused: origin {origin:?}"));
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: "origin not allowed".into(),
+        });
+    }
+    let name = q.get("name").cloned().unwrap_or_default();
+    let checked = assert_kill_name(&name).and_then(|()| {
+        parse_size(
+            q.get("cols").map(String::as_str),
+            q.get("rows").map(String::as_str),
+        )
+    });
+    let (cols, rows) = match checked {
+        Ok(size) => size,
+        Err(e) => {
+            ctx.host.log.push(format!("term refused: {}", e.0));
+            return Err(e.into());
+        }
+    };
+    Ok(ws.on_upgrade(move |socket| bridge(ctx, name, cols, rows, socket)))
 }
 
 pub async fn post_purge(
