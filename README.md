@@ -185,6 +185,41 @@ The `aarch64` binary is confirmed working on-device under Termux (Android, 2026-
 
 Requires `tmux`, `claude` and `git` on `PATH`; the agent reports any that are missing at startup.
 
+### Managed Codex sessions
+
+Choose **Codex** in the launcher, choose an effort below `max`, then launch.
+The dashboard owns the tmux pane and supports send, kill, resume, and **Open in
+Claude**. Codex uses the model and permissions in its existing configuration.
+The pane accepts text prompts; it is a bridge console rather than the native
+Codex TUI. `/quit` stops it. Only sessions created by this dashboard are added
+to its Codex resume list.
+
+Requires Node.js 22+, `codex`, and a `claude` login eligible for Remote Control,
+all on the agent's PATH. This also applies on Termux and inside WSL. Tested
+with Claude Code 2.1.296 and Codex CLI 0.162.1. Rebuild/restart the agent to use
+the new launcher option.
+
+Claude's authenticated Remote Control runner registers the session and launches
+the bridge through its process wrapper. The bridge drives
+[Codex app-server](https://learn.chatgpt.com/docs/app-server), sends replies to
+Claude's session transport, and preserves the Codex thread ID across resumes.
+Each pane has a separate runner directory under `$CLAUDE_DIR/cdash-codex/controls`
+so Claude cannot reuse another conversation's Remote Control link. Claude's
+remote directory label refers to that runner directory; Codex executes in the
+project directory you selected. Session metadata lives in
+`$CLAUDE_DIR/cdash-codex`, alongside an embedded bridge script materialized at
+launch; no npm install is needed.
+
+The Claude worker protocol is undocumented and can change. Text prompts,
+completed replies, interruption, and command/file approval requests are mapped.
+Images, Codex interactive questions, and MCP elicitation are currently unsupported
+and fail closed. Replies appear when each Codex message completes. A worker
+restart skips previously accepted remote events; if it crashed while dispatching
+a prompt, resend that prompt explicitly. Claude ingress credentials stay out of
+Codex's subprocess environment and are never written to the session snapshots.
+
+Recovered protocol findings and live checks: [CLAUDE_FINDINGS.md](CLAUDE_FINDINGS.md).
+
 ## Configuration
 
 | Variable | Default | Meaning |

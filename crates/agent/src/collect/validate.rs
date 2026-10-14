@@ -21,7 +21,7 @@ impl From<BadRequest> for Refused {
 }
 
 /// Mirrors `MODELS` (`lib/collect.js:108`).
-pub const MODELS: &[&str] = &["sonnet", "opus", "haiku", "fable"];
+pub const MODELS: &[&str] = &["sonnet", "opus", "haiku", "fable", "codex"];
 /// Mirrors `EFFORTS` (`lib/collect.js:109`).
 pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
