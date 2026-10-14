@@ -64,3 +64,12 @@ test('terminal scripts load before app.js', () => {
   }
   assert.ok(html.includes('interactive-widget=resizes-content'), 'the IME shrinks the layout');
 });
+
+test('openTerm resets the Ctrl highlight after creating the session state', () => {
+  // The key bar is shared DOM: a Ctrl left armed by the previous session would
+  // look armed while term.ctrl is false, so the next key goes out unmodified.
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const body = app.slice(app.indexOf('function openTerm'), app.indexOf('function closeTerm'));
+  // Directly after the assignment: later setCtrl(false) calls (onData) don't count.
+  assert.ok(/\n  term = \{[^\n]*\n  setCtrl\(false\);/.test(body), 'setCtrl(false) follows term = {');
+});

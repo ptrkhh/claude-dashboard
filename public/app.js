@@ -386,6 +386,7 @@ function openTerm(name, title) {
     xterm.textarea.setAttribute(k, v);
   fit.fit();
   term = { name, xterm, fit, ro: null, ws: null, ctrl: false, retry: false };
+  setCtrl(false); // the key bar is shared DOM: clear a highlight left by the last session
   xterm.onData(d => {
     if (term.ctrl) { d = cdashKeys.applyCtrl(d); setCtrl(false); }
     termSend(d);
