@@ -157,7 +157,12 @@ async function refreshModels(g) {
     modelDD.setItems(modelChoices, 'sonnet');
     updateEfforts();
   } catch (err) {
-    if (g === gen) toast(`Model discovery failed: ${err.message}`);
+    if (g === gen) {
+      modelChoices = MODELS;
+      modelDD.setItems(modelChoices, 'sonnet');
+      updateEfforts();
+      toast(`Model discovery failed: ${err.message}`);
+    }
   } finally {
     if (g === gen) modelsAt = Date.now();
     modelsLoading = false;

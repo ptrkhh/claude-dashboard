@@ -4,6 +4,7 @@ use super::fsio::{read_if, write_atomic};
 use super::sessions::Resumable;
 use super::spawn::tmux_name;
 use super::validate::{assert_effort, assert_valid_sid, Refused};
+use crate::host::probe::has_binary;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,6 +28,16 @@ pub async fn models(ctx: &Ctx) -> Result<Vec<ModelChoice>, Refused> {
             return Ok(choices.clone());
         }
     }
+    let choices = discover_models(ctx).await?;
+    *cache = Some((Instant::now(), choices.clone()));
+    Ok(choices)
+}
+
+async fn discover_models(ctx: &Ctx) -> Result<Vec<ModelChoice>, Refused> {
+    // Codex and Node are optional: a Claude-only installation is healthy.
+    if !has_binary(&ctx.host.path, "codex") || !has_binary(&ctx.host.path, "node") {
+        return Ok(Vec::new());
+    }
     let json = ctx
         .runner
         .run_checked(
@@ -44,7 +55,6 @@ pub async fn models(ctx: &Ctx) -> Result<Vec<ModelChoice>, Refused> {
         .map_err(Refused::Failed)?;
     let choices: Vec<ModelChoice> = serde_json::from_str(&json)
         .map_err(|e| Refused::Failed(format!("Codex model catalog: {e}")))?;
-    *cache = Some((Instant::now(), choices.clone()));
     Ok(choices)
 }
 
@@ -87,10 +97,23 @@ pub async fn launch(
     effort: &str,
     previous: Option<CodexSession>,
 ) -> Result<String, Refused> {
+    for program in ["codex", "node"] {
+        if !has_binary(&ctx.host.path, program) {
+            return Err(Refused::BadRequest(format!(
+                "{program} not installed or not on the agent's PATH"
+            )));
+        }
+    }
+    // Recheck credentials on every launch/resume; the picker catalog may be cached.
+    let choices = discover_models(ctx).await?;
+    if choices.is_empty() {
+        return Err(Refused::BadRequest(
+            "Codex unavailable: run codex login or check its provider configuration".into(),
+        ));
+    }
     let choice = if previous.is_none() {
         if let Some(model) = model {
-            let choice = models(ctx)
-                .await?
+            let choice = choices
                 .into_iter()
                 .find(|m| m.model == model)
                 .ok_or_else(|| Refused::BadRequest(format!("unknown Codex model: {model}")))?;
@@ -258,4 +281,105 @@ pub async fn history(ctx: &Ctx) -> Vec<Resumable> {
         });
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::{cmd::Runner, init::Host, log::LogBuffer, sample::Sampler};
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn unavailable_codex_does_not_block_claude_or_spawn_phantom_panes() {
+        for installed in [false, true] {
+            let dir = std::env::temp_dir()
+                .join(format!("cdash-no-codex-{installed}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("bin")).unwrap();
+            // Isolated PATH: optional Codex is either absent or reports a signed-out catalog.
+            let tmux = dir.join("bin/tmux");
+            std::fs::write(
+                &tmux,
+                format!("#!/bin/sh\necho called >> '{}/tmux-args'\n", dir.display()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+            for program in ["node", "codex"] {
+                if program == "codex" && !installed {
+                    continue;
+                }
+                let file = dir.join("bin").join(program);
+                std::fs::write(&file, "#!/bin/sh\necho '[]'\n").unwrap();
+                std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let log = Arc::new(LogBuffer::new());
+            let path = dir.join("bin").to_string_lossy().into_owned();
+            let ctx = Arc::new(Ctx::new(
+                Host {
+                    runner: Runner::new(path.clone(), log.clone()),
+                    log: log.clone(),
+                    path,
+                    sampler: std::sync::Mutex::new(Sampler::new()),
+                },
+                dir.join(".claude"),
+                None,
+            ));
+            assert!(models(&ctx).await.unwrap().is_empty());
+            assert!(
+                log.lines().is_empty(),
+                "unavailable optional Codex should not log failures"
+            );
+            // A previously signed-in picker must not bypass the fresh launch check.
+            *ctx.codex_models.lock().await = Some((
+                Instant::now(),
+                vec![ModelChoice {
+                    value: "codex:gpt-check".into(),
+                    model: "gpt-check".into(),
+                    label: "GPT Check".into(),
+                    efforts: vec!["low".into()],
+                    default_effort: "low".into(),
+                }],
+            ));
+            let err = launch(&ctx, dir.to_str().unwrap(), Some("gpt-check"), "low", None)
+                .await
+                .unwrap_err();
+            let reason = if installed {
+                "codex login"
+            } else {
+                "not installed"
+            };
+            assert!(matches!(err, Refused::BadRequest(ref message) if message.contains(reason)));
+            assert!(!dir.join(".claude/cdash-codex").exists());
+            // Old Codex history remains visible; resume refuses before creating a pane.
+            let sid = "01234567-1234-1234-1234-0123456789ab";
+            let history_dir = dir.join(".claude/cdash-codex/history");
+            std::fs::create_dir_all(&history_dir).unwrap();
+            let state = CodexSession {
+                sid: Some(sid.into()),
+                dir: dir.to_string_lossy().into_owned(),
+                title: "Saved session".into(),
+                effort: Some("low".into()),
+                model: Some("gpt-check".into()),
+                ..Default::default()
+            };
+            std::fs::write(
+                history_dir.join(format!("{sid}.json")),
+                serde_json::to_string(&state).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(history(&ctx).await.len(), 1);
+            let err = resume(&ctx, sid).await.unwrap_err();
+            assert!(matches!(err, Refused::BadRequest(ref message) if message.contains(reason)));
+            assert!(!dir.join("tmux-args").exists());
+            assert!(super::super::spawn::launch_session(
+                &ctx,
+                dir.to_str().unwrap(),
+                "sonnet",
+                "medium"
+            )
+            .await
+            .is_ok());
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
 }

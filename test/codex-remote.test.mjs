@@ -49,6 +49,7 @@ createInterface({input:process.stdin}).on('line',line=>{
  const m=JSON.parse(line);
  appendFileSync(process.env.CDASH_CHECK_WIRE,JSON.stringify({rpc:m,credentialLeaked:!!process.env.CLAUDE_CODE_SESSION_ACCESS_TOKEN})+'\\n');
  if(m.method==='initialize')send({id:m.id,result:{}});
+ if(m.method==='account/read')send({id:m.id,result:{account:{type:'apiKey'},requiresOpenaiAuth:true}});
  if(m.method==='model/list')send({id:m.id,result:{data:[{model:'gpt-check',displayName:'GPT Check',supportedReasoningEfforts:[{reasoningEffort:'low'}],defaultReasoningEffort:'low'}],nextCursor:null}});
  if(['thread/start','thread/resume'].includes(m.method))send({id:m.id,result:{thread:{id:'01234567-1234-1234-1234-0123456789ab'},model:'gpt-check',reasoningEffort:'low'}});
  if(m.method==='turn/start'){
@@ -61,6 +62,7 @@ createInterface({input:process.stdin}).on('line',line=>{
  }
  if(m.method==='turn/steer')send({id:m.id,result:{turnId:'first'}});
 });
+
 `, { mode: 0o700 });
   const messages = async () => (await readFile(wire, 'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse);
   const waitFor = async condition => {
@@ -108,4 +110,39 @@ createInterface({input:process.stdin}).on('line',line=>{
   assert.ok(after.some(m => m.rpc?.method === 'thread/resume'));
   assert.ok(after.some(m => m.url?.includes('from_sequence_num=12')));
   assert.equal(after.some(m => ['turn/start', 'turn/steer'].includes(m.rpc?.method)), false, 'replayed prompts must not execute again');
+});
+
+
+test('signed-out Codex hides its bundled models, while authenticated and no-auth providers remain available', { timeout: 15_000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'cdash-codex-auth-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(join(dir, 'codex'), `#!${process.execPath}
+const {createInterface}=require('node:readline');
+createInterface({input:process.stdin}).on('line',line=>{
+ const m=JSON.parse(line);
+ if(m.method==='initialize')process.stdout.write(JSON.stringify({id:m.id,result:{}})+'\\n');
+ if(m.method==='account/read')process.stdout.write(JSON.stringify({id:m.id,result:JSON.parse(process.env.CDASH_CHECK_ACCOUNT)})+'\\n');
+ if(m.method==='model/list')process.stdout.write(JSON.stringify({id:m.id,result:{data:[{model:'gpt-check',displayName:'GPT Check',supportedReasoningEfforts:[{reasoningEffort:'low'}],defaultReasoningEffort:'low'}],nextCursor:null}})+'\\n');
+});
+`, { mode: 0o700 });
+  const discover = account => new Promise((done, reject) => {
+    const child = spawn(process.execPath, [resolve('crates/agent/src/collect/codex-remote.mjs'), '--models'], {
+      env: { ...process.env, PATH: dir, CDASH_CHECK_ACCOUNT: JSON.stringify(account) },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', b => { stdout += b; });
+    child.stderr.on('data', b => { stderr += b; });
+    child.on('error', reject);
+    child.on('exit', code => {
+      if (code) reject(Error(stderr));
+      else { try { done(JSON.parse(stdout)); } catch (e) { reject(e); } }
+    });
+  });
+  assert.deepEqual(await discover({ account: null, requiresOpenaiAuth: true }), []);
+  for (const account of [
+    { account: { type: 'apiKey' }, requiresOpenaiAuth: true },
+    { account: { type: 'chatgpt' }, requiresOpenaiAuth: true },
+    { account: null, requiresOpenaiAuth: false },
+  ]) assert.equal((await discover(account))[0].label, 'GPT Check');
 });

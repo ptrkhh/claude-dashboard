@@ -192,8 +192,14 @@ The agent discovers model names and efforts through Codex's `model/list` RPC,
 refreshing the catalog every minute. Labels use the returned display name
 (for example, **GPT-6.1-Sol**) without a Codex prefix. New catalog entries need
 no dashboard update; discovery still depends on the installed Codex CLI and
-its account/provider catalog. If discovery fails, Claude launch options remain
-available and the dashboard shows the error.
+its account/provider catalog. Codex and Node are optional: if either is absent,
+or Codex requires authentication and is signed out, only Claude launch options
+appear, without recurring discovery errors. Run `codex login` on the agent host
+to enable GPT options; the catalog refreshes within a minute. Providers that do
+not require OpenAI authentication remain usable without a ChatGPT login.
+Launch and resume recheck Codex credentials before creating a tmux pane, even
+when the picker has a cached catalog. Other discovery failures clear stale GPT
+options and show the error while keeping Claude launch options available.
 The dashboard owns the tmux pane and supports send, kill, resume, and **Open in
 Claude**. Codex uses the selected model and effort with its existing permissions.
 Running and resumable sessions retain the effective model, display name, and

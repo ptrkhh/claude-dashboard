@@ -79,6 +79,10 @@ class Codex {
     } while (cursor);
     return models;
   }
+  async ready() {
+    const auth = await this.call('account/read', { refreshToken: false }, 3000);
+    return !auth.requiresOpenaiAuth || auth.account != null;
+  }
   close() {
     if (this.closing) return;
     this.closing = true;
@@ -293,6 +297,7 @@ async function worker() {
   };
   await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', title: 'Claude Dashboard Codex Bridge', version: '0.3.0' } });
   codex.send({ method: 'initialized' });
+  if (!await codex.ready()) throw Error('Codex is signed out; run codex login on the agent host.');
   const savedModel = state.model, savedLabel = state.model_label;
   const result = await codex.call(state.sid ? 'thread/resume' : 'thread/start', {
     ...(state.sid ? { threadId: state.sid, excludeTurns: true } : {}), cwd: state.dir,
@@ -384,7 +389,7 @@ if (process.argv.includes('--models')) {
     try {
       await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', version: '0.3.0' } });
       codex.send({ method: 'initialized' });
-      console.log(JSON.stringify(await codex.models()));
+      console.log(JSON.stringify(await codex.ready() ? await codex.models() : []));
     } finally { clearTimeout(deadline); codex.close(); }
   })().catch(fatal);
 } else if (args[0] === '--worker') {
