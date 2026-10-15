@@ -12,11 +12,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// 60 × 500 ms = the 30 s budget from `lib/collect.js:143`.
 pub const RC_POLL_ATTEMPTS: u32 = 60;
 pub const RC_POLL_INTERVAL: Duration = Duration::from_millis(500);
+// ponytail: serialize settings writes; per-file locks if launch throughput matters.
+static TRUST_WRITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Mark a directory trusted in `~/.claude.json` so `claude` does not open on a
 /// trust prompt no one is sitting in front of. Read-modify-write: every other
 /// key in the file is preserved, and the write is atomic.
 pub async fn trust_dir(claude_json: &Path, dir: &str) -> std::io::Result<()> {
+    let _write = TRUST_WRITE.lock().await;
     let mut cfg: serde_json::Value = read_if(claude_json)
         .await
         .and_then(|t| serde_json::from_str(&t).ok())
@@ -189,6 +192,12 @@ pub async fn launch_session(
     model: &str,
     effort: &str,
 ) -> Result<String, Refused> {
+    if model == "codex" {
+        return super::codex::launch(ctx, dir, None, effort, None).await;
+    }
+    if let Some(model) = model.strip_prefix("codex:") {
+        return super::codex::launch(ctx, dir, Some(model), effort, None).await;
+    }
     assert_model(model)?;
     assert_effort(effort)?;
     // A6: the directory must exist and be a directory before it reaches `-c`.
@@ -207,6 +216,9 @@ pub async fn launch_session(
 
 pub async fn resume_session(ctx: &Arc<Ctx>, sid: &str) -> Result<String, Refused> {
     assert_valid_sid(sid)?;
+    if let Some(name) = super::codex::resume(ctx, sid).await? {
+        return Ok(name);
+    }
     let hist = read_if(&ctx.claude_dir.join("history.jsonl")).await.unwrap_or_default();
     let cwd = group_history(&hist)
         .into_iter()

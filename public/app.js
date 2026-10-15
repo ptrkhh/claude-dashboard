@@ -9,13 +9,15 @@
 if (window.__cdashBooted) return;
 window.__cdashBooted = true;
 const $ = s => document.querySelector(s);
-const MODELS = ['sonnet', 'opus', 'haiku', 'fable'];
+const MODELS = ['sonnet', 'opus', 'haiku', 'fable'].map(value => ({ value, label: `Claude ${value.charAt(0).toUpperCase() + value.slice(1)}` }));
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 let armedKill = null; // ponytail: survives render() replacing #running.innerHTML
 const drafts = {}; // half-typed send-bar text by session name, for the same reason
 let resLimit = 20; // resumable entries asked for; "Show more" raises it, and it matches the server's first page
 const sending = new Set(); // sessions with a send in flight: a re-render hands back a fresh, enabled button
 const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+const esc = s => (s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const effortLabel = value => value === 'xhigh' ? 'xHigh' : cap(value);
 
 /* ---------- Inline icons (stroke = currentColor, sized via CSS) ---------- */
 const svg = body => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
@@ -87,19 +89,21 @@ applyMode(themeMode());
 /* ---------- Launcher controls ----------
    Custom dropdown: a native <select> can't be themed and double-glowed inside
    its wrapper. Fully keyboard-accessible; closes on outside click / Escape. */
-function buildDropdown(el, label, items, initial) {
+function buildDropdown(el, label, items, initial, onChange = () => {}) {
   let value = initial;
+  const choices = items => items.map(i => typeof i === 'string' ? { value: i, label: cap(i) } : i);
+  let entries = choices(items);
+  const text = () => entries.find(i => i.value === value)?.label || value;
   el.innerHTML = `
     <div class="cb-trigger" role="button" tabindex="0" aria-haspopup="listbox" aria-expanded="false" aria-label="${label}">
-      <span class="cb-lead">${label}</span><span class="cb-current">${cap(value)}</span><span class="cb-caret">▾</span>
+      <span class="cb-lead">${label}</span><span class="cb-current">${esc(text())}</span><span class="cb-caret">▾</span>
     </div>
     <ul class="cb-menu" role="listbox" hidden>
-      ${items.map(i => `<li role="option" data-value="${i}" class="${i === value ? 'on' : ''}" aria-selected="${i === value}">${cap(i)}</li>`).join('')}
     </ul>`;
   const trigger = el.querySelector('.cb-trigger');
   const menu = el.querySelector('.cb-menu');
   const current = el.querySelector('.cb-current');
-  const opts = [...menu.querySelectorAll('li')];
+  let opts = [];
   let active = -1;
   const isOpen = () => !menu.hidden;
   const setActive = i => { active = i; opts.forEach((o, idx) => o.classList.toggle('active', idx === i)); if (opts[i]) opts[i].scrollIntoView({ block: 'nearest' }); };
@@ -110,9 +114,10 @@ function buildDropdown(el, label, items, initial) {
   };
   const close = () => { menu.hidden = true; trigger.setAttribute('aria-expanded', 'false'); setActive(-1); };
   const pick = li => {
-    value = li.dataset.value; current.textContent = cap(value);
+    value = li.dataset.value; current.textContent = text();
     opts.forEach(o => { const on = o === li; o.classList.toggle('on', on); o.setAttribute('aria-selected', on); });
     close(); trigger.focus();
+    onChange(value);
   };
   trigger.addEventListener('click', e => { e.stopPropagation(); isOpen() ? close() : open(); });
   menu.addEventListener('click', e => { const li = e.target.closest('[data-value]'); if (li) pick(li); });
@@ -123,10 +128,46 @@ function buildDropdown(el, label, items, initial) {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!isOpen()) open(); else if (opts[active]) pick(opts[active]); }
   });
   document.addEventListener('click', e => { if (isOpen() && !el.contains(e.target)) close(); });
-  return { get value() { return value; } };
+  const setItems = (items, fallback) => {
+    entries = choices(items);
+    if (!entries.some(i => i.value === value)) value = fallback || entries[0]?.value || '';
+    current.textContent = text();
+    menu.innerHTML = entries.map(i => `<li role="option" data-value="${esc(i.value)}" class="${i.value === value ? 'on' : ''}" aria-selected="${i.value === value}">${esc(i.label)}</li>`).join('');
+    opts = [...menu.querySelectorAll('li')];
+    close();
+  };
+  setItems(items, initial);
+  return { get value() { return value; }, setItems };
 }
-const modelDD = buildDropdown($('#model'), 'Model', MODELS, 'sonnet');
-const effortDD = buildDropdown($('#effort'), 'Effort', EFFORTS, 'medium');
+let modelChoices = MODELS;
+const modelDD = buildDropdown($('#model'), 'Model', MODELS, 'sonnet', updateEfforts);
+const effortDD = buildDropdown($('#effort'), 'Effort', EFFORTS.map(value => ({ value, label: effortLabel(value) })), 'medium');
+function updateEfforts() {
+  const model = modelChoices.find(m => m.value === modelDD.value);
+  effortDD.setItems((model?.efforts || EFFORTS).map(value => ({ value, label: effortLabel(value) })), model?.defaultEffort || 'medium');
+}
+let modelsAt = 0, modelsLoading = false;
+async function refreshModels(g) {
+  if (modelsLoading || Date.now() - modelsAt < 60_000) return;
+  modelsLoading = true;
+  try {
+    const models = await api('/api/models');
+    if (g !== gen) return;
+    modelChoices = [...MODELS, ...models];
+    modelDD.setItems(modelChoices, 'sonnet');
+    updateEfforts();
+  } catch (err) {
+    if (g === gen) {
+      modelChoices = MODELS;
+      modelDD.setItems(modelChoices, 'sonnet');
+      updateEfforts();
+      toast(`Model discovery failed: ${err.message}`);
+    }
+  } finally {
+    if (g === gen) modelsAt = Date.now();
+    modelsLoading = false;
+  }
+}
 
 function toast(msg) {
   const t = $('#toast');
@@ -177,7 +218,6 @@ async function api(path, body) {
   return data;
 }
 
-const esc = s => (s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const fmtUp = s => s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m` : s >= 60 ? `${Math.floor(s / 60)}m` : `${s}s`;
 const fmtKb = k => k >= 1048576 ? `${(k / 1048576).toFixed(1)}G` : `${Math.round(k / 1024)}M`;
 const fmtReset = iso => { const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); };
@@ -203,7 +243,7 @@ function statTile({ label, value, pct, sub, title }) {
 
 function runningCard(r) {
   const status = r.working ? 'working' : 'idle';
-  const chips = [r.model, r.effort].filter(Boolean);
+  const chips = [r.model, r.effort && effortLabel(r.effort)].filter(Boolean);
   const chipHtml = chips.length
     ? chips.map(x => `<span class="chip">${esc(x)}</span>`).join('')
     : `<span class="chip">${r.external ? 'external' : 'resumed'}</span>`;
@@ -218,7 +258,7 @@ function runningCard(r) {
   // can't do. tmux-owned panes only; external sessions live elsewhere.
   const send = r.external ? ''
     : `<form class="send" data-send="${esc(r.name)}">
-         <input class="send-input" type="text" placeholder="! gcloud auth login" aria-label="Type into the Claude TUI"
+         <input class="send-input" type="text" placeholder="${r.provider === 'codex' || r.model === 'codex' ? 'Send a prompt' : '! gcloud auth login'}" aria-label="Send input to session"
                 value="${esc(drafts[r.name])}" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
          <button class="send-btn" type="submit" aria-label="Send to session">${ICONS.send}</button>
        </form>`;
@@ -252,6 +292,7 @@ function resumableCard(s) {
         <span class="time">${fmtTs(s.ts)}</span>
       </div>
       <div class="desc">${esc(s.title)}</div>
+      ${s.model ? `<div class="session-meta"><span class="chip">${esc(s.model)}</span>${s.effort ? `<span class="chip">${esc(effortLabel(s.effort))}</span>` : ''}</div>` : ''}
       <div class="prompts">↳ ${esc(s.prompts.join(' · '))}</div>
       <div class="actions">
         <button class="action" type="button" data-resume="${esc(s.sid)}">${ICONS.refresh}<span>Resume</span></button>
@@ -270,7 +311,10 @@ function render(d) {
     { label: 'RAM', value: `${fmtKb(st.ramUsedKb)}<span class="unit"> / ${fmtKb(st.ramTotalKb)}</span>`, pct: st.ramTotalKb ? Math.round(st.ramUsedKb / st.ramTotalKb * 100) : null },
     ...st.disks.map(x => ({ label: esc(x.mount), value: `${fmtKb(x.freeKb)}<span class="unit"> free</span>`, pct: x.totalKb ? Math.round((x.totalKb - x.freeKb) / x.totalKb * 100) : null })),
     // Absent for API-key users and until the first background refresh lands.
-    ...(st.claudeUsage || []).map(u => ({
+    ...[
+      ...(st.claudeUsage || []).map(u => ({ ...u, short: `Claude ${u.short}`, long: `Claude: ${u.long}` })),
+      ...(st.codexUsage || []),
+    ].map(u => ({
       label: esc(u.short),
       value: `${u.pct}<span class="unit">% used</span>`,
       pct: u.pct,
@@ -505,6 +549,7 @@ async function tick() {
     $('#health').className = 'dot ok';
     $('#health-label').textContent = 'Connected';
     markConnected();
+    refreshModels(g);
     checkAgent();
     outcome = 'ok';
   } catch (err) {

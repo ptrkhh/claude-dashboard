@@ -185,6 +185,66 @@ The `aarch64` binary is confirmed working on-device under Termux (Android, 2026-
 
 Requires `tmux`, `claude` and `git` on `PATH`; the agent reports any that are missing at startup.
 
+### Managed Codex sessions
+
+Choose a **GPT** model in the launcher, choose a supported effort, then launch.
+The agent discovers model names and efforts through Codex's `model/list` RPC,
+refreshing the catalog every minute. Labels use the returned display name
+(for example, **GPT-6.1-Sol**) without a Codex prefix. New catalog entries need
+no dashboard update; discovery still depends on the installed Codex CLI and
+its account/provider catalog. Codex and Node are optional: if either is absent,
+or Codex requires authentication and is signed out, only Claude launch options
+appear, without recurring discovery errors. Run `codex login` on the agent host
+to enable GPT options; the catalog refreshes within a minute. Providers that do
+not require OpenAI authentication remain usable without a ChatGPT login.
+Launch and resume recheck Codex credentials before creating a tmux pane, even
+when the picker has a cached catalog. Other discovery failures clear stale GPT
+options and show the error while keeping Claude launch options available.
+The usage strip includes **Claude Session/Week** and **Codex Session/Week**
+with reset times. Codex quotas come from `account/rateLimits/read`, refreshed
+in the background every five minutes, matching Claude's refresh interval.
+Failed Codex refreshes hide old numbers and back off before retrying; Claude
+retains its existing five-minute cache policy. Metadata queries allow 10 seconds
+per RPC and 12 seconds overall, inside a separate 15-second subprocess budget;
+they never block the session poll. Other returned quota buckets carry their own labels. Missing Codex/Node,
+signed-out Codex, and API-key-only providers quietly omit Codex quota tiles;
+Claude usage and session controls remain available. Model availability and
+subscription quota availability are independent.
+The dashboard owns the tmux pane and supports send, kill, resume, and **Open in
+Claude**. Codex uses the selected model and effort with its existing permissions.
+Running and resumable sessions retain the effective model, display name, and
+effort; resuming preserves those choices. Older sessions learn their model
+when resumed with the updated bridge.
+The pane accepts text prompts; it is a bridge console rather than the native
+Codex TUI. `/quit` stops it. Only sessions created by this dashboard are added
+to its Codex resume list.
+
+Requires Node.js 22+, `codex`, and a `claude` login eligible for Remote Control,
+all on the agent's PATH. This also applies on Termux and inside WSL. Tested
+with Claude Code 2.1.296 and Codex CLI 0.162.1. Rebuild/restart the agent to use
+the new launcher option.
+
+Claude's authenticated Remote Control runner registers the session and launches
+the bridge through its process wrapper. The bridge drives
+[Codex app-server](https://learn.chatgpt.com/docs/app-server), sends replies to
+Claude's session transport, and preserves the Codex thread ID across resumes.
+Each pane has a separate runner directory under `$CLAUDE_DIR/cdash-codex/controls`
+so Claude cannot reuse another conversation's Remote Control link. Claude's
+remote directory label refers to that runner directory; Codex executes in the
+project directory you selected. Session metadata lives in
+`$CLAUDE_DIR/cdash-codex`, alongside an embedded bridge script materialized at
+launch; no npm install is needed.
+
+The Claude worker protocol is undocumented and can change. Text prompts,
+completed replies, interruption, and command/file approval requests are mapped.
+Images, Codex interactive questions, and MCP elicitation are currently unsupported
+and fail closed. Replies appear when each Codex message completes. A worker
+restart skips previously accepted remote events; if it crashed while dispatching
+a prompt, resend that prompt explicitly. Claude ingress credentials stay out of
+Codex's subprocess environment and are never written to the session snapshots.
+
+Recovered protocol findings and live checks: [CLAUDE_FINDINGS.md](CLAUDE_FINDINGS.md).
+
 ## Configuration
 
 | Variable | Default | Meaning |

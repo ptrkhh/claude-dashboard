@@ -17,14 +17,15 @@ fn is_executable(p: &Path) -> bool {
 pub fn missing_binaries(path: &str) -> Vec<String> {
     REQUIRED_BINARIES
         .iter()
-        .filter(|bin| {
-            !path
-                .split(':')
-                .filter(|d| !d.is_empty())
-                .any(|dir| is_executable(&Path::new(dir).join(bin)))
-        })
+        .filter(|bin| !has_binary(path, bin))
         .map(|b| b.to_string())
         .collect()
+}
+
+pub fn has_binary(path: &str, bin: &str) -> bool {
+    path.split(':')
+        .filter(|d| !d.is_empty())
+        .any(|dir| is_executable(&Path::new(dir).join(bin)))
 }
 
 #[cfg(test)]

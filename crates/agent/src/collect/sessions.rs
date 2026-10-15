@@ -30,6 +30,10 @@ pub struct Resumable {
     pub branch: Option<String>,
     pub title: String,
     pub prompts: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -45,6 +49,8 @@ pub struct Stats {
     /// simply shows no Claude tiles rather than empty ones.
     #[serde(rename = "claudeUsage", skip_serializing_if = "Option::is_none")]
     pub claude_usage: Option<Vec<crate::collect::usage::UsageLimit>>,
+    #[serde(rename = "codexUsage", skip_serializing_if = "Option::is_none")]
+    pub codex_usage: Option<Vec<crate::collect::usage::UsageLimit>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -78,6 +84,22 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
 
     let mut running: Vec<Session> = Vec::new();
     for p in &panes {
+        if let Some(s) = super::codex::snapshot(ctx, &p.name, p.pid).await {
+            let cpu = ctx.host.sampler.lock().unwrap_or_else(|e| e.into_inner()).tree_usage(p.pid);
+            let git = Arc::clone(&ctx.git).status_for(Arc::clone(&ctx.runner), &p.path, now as u64);
+            running.push(Session {
+                name: p.name.clone(), dir: s.dir, pid: p.pid,
+                uptime_sec: ((now / 1000.0 - p.created as f64).round() as i64).max(0),
+                model: s.model_label.or(s.model).or_else(|| Some("Codex".into())), effort: s.effort,
+                provider: Some("codex".into()),
+                rc_link: super::codex::link(ctx, &p.name).await,
+                git: git.as_deref().map(parse_git_status), working: s.working,
+                last_message: s.last_message, sid: s.sid,
+                cpu: cpu.cpu, rss_kb: cpu.rss_kb, cpu_sample_age_ms: cpu.cpu_sample_age_ms,
+                external: false,
+            });
+            continue;
+        }
         let meta = ctx.meta_get(&p.name).unwrap_or_default();
         let sess = session_file_for(&ctx.claude_dir, p.pid).await;
 
@@ -136,6 +158,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             uptime_sec: ((now / 1000.0 - p.created as f64).round() as i64).max(0),
             model: meta.model.clone(),
             effort: meta.effort.clone(),
+            provider: None,
             rc_link,
             git: git_out.as_deref().map(parse_git_status),
             working,
@@ -186,8 +209,17 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             ts: g.ts,
             branch: t.branch.clone(),
             prompts: g.prompts,
+            model: None,
+            effort: None,
         });
     }
+
+    resumable.extend(super::codex::history(ctx).await.into_iter().filter(|s| {
+        !running_sids.contains(&s.sid)
+            && !ctx.purged.lock().unwrap_or_else(|e| e.into_inner()).contains(&s.sid)
+    }));
+    resumable.sort_by(|a, b| b.ts.total_cmp(&a.ts));
+    resumable.truncate(limit);
 
     let machine = {
         let mut s = ctx.host.sampler.lock().unwrap_or_else(|e| e.into_inner());
@@ -212,6 +244,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             ram_total_kb: machine.ram_total_kb,
             disks,
             claude_usage: ctx.usage.get(&ctx.claude_dir, &ctx.host.log),
+            codex_usage: ctx.codex_usage.get_codex(ctx),
         },
     }
 }
@@ -418,7 +451,7 @@ mod tests {
         // such key at all, and the gate compares keys.
         let s = Session {
             name: "x".into(), dir: "/x".into(), pid: 1, uptime_sec: 0,
-            model: None, effort: None, rc_link: None, git: None, working: false,
+            model: None, effort: None, provider: None, rc_link: None, git: None, working: false,
             last_message: None, sid: None, cpu: None, rss_kb: 0,
             cpu_sample_age_ms: 0, external: false,
         };
