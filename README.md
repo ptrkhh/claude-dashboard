@@ -200,6 +200,13 @@ not require OpenAI authentication remain usable without a ChatGPT login.
 Launch and resume recheck Codex credentials before creating a tmux pane, even
 when the picker has a cached catalog. Other discovery failures clear stale GPT
 options and show the error while keeping Claude launch options available.
+The usage strip includes **Claude Session/Week** and **Codex Session/Week**
+with reset times. Codex quotas come from `account/rateLimits/read`, refreshed
+in the background every five minutes with the same cache/backoff policy as
+Claude. Other returned quota buckets carry their own labels. Missing Codex/Node,
+signed-out Codex, and API-key-only providers quietly omit Codex quota tiles;
+Claude usage and session controls remain available. Model availability and
+subscription quota availability are independent.
 The dashboard owns the tmux pane and supports send, kill, resume, and **Open in
 Claude**. Codex uses the selected model and effort with its existing permissions.
 Running and resumable sessions retain the effective model, display name, and

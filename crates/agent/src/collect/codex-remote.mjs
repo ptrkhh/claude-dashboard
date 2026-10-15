@@ -381,7 +381,8 @@ async function launcher() {
 }
 
 for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(signal, () => { stop(); setTimeout(() => process.exit(0), 5000).unref(); });
-if (process.argv.includes('--models')) {
+const queryMode = ['--models', '--usage'].find(mode => process.argv.includes(mode));
+if (queryMode) {
   const codex = new Codex(async () => {});
   stop = () => codex.close();
   const deadline = setTimeout(() => { codex.close(); process.exitCode = 1; }, 4000);
@@ -389,7 +390,13 @@ if (process.argv.includes('--models')) {
     try {
       await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', version: '0.3.0' } });
       codex.send({ method: 'initialized' });
-      console.log(JSON.stringify(await codex.ready() ? await codex.models() : []));
+      let result;
+      if (queryMode === '--usage') {
+        const auth = await codex.call('account/read', { refreshToken: false }, 3000);
+        // API keys and local/third-party providers have no ChatGPT quota windows.
+        result = auth.account?.type === 'chatgpt' ? await codex.call('account/rateLimits/read', {}, 3000) : null;
+      } else result = await codex.ready() ? await codex.models() : [];
+      console.log(JSON.stringify(result));
     } finally { clearTimeout(deadline); codex.close(); }
   })().catch(fatal);
 } else if (args[0] === '--worker') {

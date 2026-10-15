@@ -123,10 +123,11 @@ createInterface({input:process.stdin}).on('line',line=>{
  if(m.method==='initialize')process.stdout.write(JSON.stringify({id:m.id,result:{}})+'\\n');
  if(m.method==='account/read')process.stdout.write(JSON.stringify({id:m.id,result:JSON.parse(process.env.CDASH_CHECK_ACCOUNT)})+'\\n');
  if(m.method==='model/list')process.stdout.write(JSON.stringify({id:m.id,result:{data:[{model:'gpt-check',displayName:'GPT Check',supportedReasoningEfforts:[{reasoningEffort:'low'}],defaultReasoningEffort:'low'}],nextCursor:null}})+'\\n');
+ if(m.method==='account/rateLimits/read')process.stdout.write(JSON.stringify({id:m.id,result:{rateLimits:{limitId:'codex',primary:{usedPercent:25,windowDurationMins:300,resetsAt:1730947200},secondary:{usedPercent:40,windowDurationMins:10080,resetsAt:1730950800}}}})+'\\n');
 });
 `, { mode: 0o700 });
-  const discover = account => new Promise((done, reject) => {
-    const child = spawn(process.execPath, [resolve('crates/agent/src/collect/codex-remote.mjs'), '--models'], {
+  const discover = (account, mode = '--models') => new Promise((done, reject) => {
+    const child = spawn(process.execPath, [resolve('crates/agent/src/collect/codex-remote.mjs'), mode], {
       env: { ...process.env, PATH: dir, CDASH_CHECK_ACCOUNT: JSON.stringify(account) },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -145,4 +146,12 @@ createInterface({input:process.stdin}).on('line',line=>{
     { account: { type: 'chatgpt' }, requiresOpenaiAuth: true },
     { account: null, requiresOpenaiAuth: false },
   ]) assert.equal((await discover(account))[0].label, 'GPT Check');
+  for (const account of [
+    { account: null, requiresOpenaiAuth: true },
+    { account: { type: 'apiKey' }, requiresOpenaiAuth: true },
+    { account: null, requiresOpenaiAuth: false },
+  ]) assert.equal(await discover(account, '--usage'), null);
+  const usage = await discover({ account: { type: 'chatgpt' }, requiresOpenaiAuth: true }, '--usage');
+  assert.equal(usage.rateLimits.primary.usedPercent, 25);
+  assert.equal(usage.rateLimits.secondary.usedPercent, 40);
 });

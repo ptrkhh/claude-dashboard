@@ -34,9 +34,14 @@ pub async fn models(ctx: &Ctx) -> Result<Vec<ModelChoice>, Refused> {
 }
 
 async fn discover_models(ctx: &Ctx) -> Result<Vec<ModelChoice>, Refused> {
+    serde_json::from_value(query(ctx, "--models").await.map_err(Refused::Failed)?)
+        .map_err(|e| Refused::Failed(format!("Codex model catalog: {e}")))
+}
+
+pub(super) async fn query(ctx: &Ctx, mode: &str) -> Result<serde_json::Value, String> {
     // Codex and Node are optional: a Claude-only installation is healthy.
     if !has_binary(&ctx.host.path, "codex") || !has_binary(&ctx.host.path, "node") {
-        return Ok(Vec::new());
+        return Ok(serde_json::json!([]));
     }
     let json = ctx
         .runner
@@ -47,15 +52,12 @@ async fn discover_models(ctx: &Ctx) -> Result<Vec<ModelChoice>, Refused> {
                 "-e",
                 include_str!("codex-remote.mjs"),
                 "--",
-                "--models",
+                mode,
             ],
-            "Codex model discovery",
+            &format!("Codex metadata {mode}"),
         )
-        .await
-        .map_err(Refused::Failed)?;
-    let choices: Vec<ModelChoice> = serde_json::from_str(&json)
-        .map_err(|e| Refused::Failed(format!("Codex model catalog: {e}")))?;
-    Ok(choices)
+        .await?;
+    serde_json::from_str(&json).map_err(|_| "Codex metadata returned invalid JSON".into())
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -325,6 +327,24 @@ mod tests {
                 None,
             ));
             assert!(models(&ctx).await.unwrap().is_empty());
+            assert!(super::super::usage::fetch_codex_usage(&ctx)
+                .await
+                .unwrap()
+                .is_empty());
+            let start = Instant::now();
+            assert!(ctx.codex_usage.get_codex(&ctx).is_none());
+            assert!(start.elapsed() < Duration::from_secs(1));
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if let Some(tiles) = ctx.codex_usage.get_codex(&ctx) {
+                        assert!(tiles.is_empty());
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
             assert!(
                 log.lines().is_empty(),
                 "unavailable optional Codex should not log failures"

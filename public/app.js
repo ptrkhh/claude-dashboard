@@ -311,7 +311,10 @@ function render(d) {
     { label: 'RAM', value: `${fmtKb(st.ramUsedKb)}<span class="unit"> / ${fmtKb(st.ramTotalKb)}</span>`, pct: st.ramTotalKb ? Math.round(st.ramUsedKb / st.ramTotalKb * 100) : null },
     ...st.disks.map(x => ({ label: esc(x.mount), value: `${fmtKb(x.freeKb)}<span class="unit"> free</span>`, pct: x.totalKb ? Math.round((x.totalKb - x.freeKb) / x.totalKb * 100) : null })),
     // Absent for API-key users and until the first background refresh lands.
-    ...(st.claudeUsage || []).map(u => ({
+    ...[
+      ...(st.claudeUsage || []).map(u => ({ ...u, short: `Claude ${u.short}`, long: `Claude: ${u.long}` })),
+      ...(st.codexUsage || []),
+    ].map(u => ({
       label: esc(u.short),
       value: `${u.pct}<span class="unit">% used</span>`,
       pct: u.pct,

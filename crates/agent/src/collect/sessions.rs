@@ -49,6 +49,8 @@ pub struct Stats {
     /// simply shows no Claude tiles rather than empty ones.
     #[serde(rename = "claudeUsage", skip_serializing_if = "Option::is_none")]
     pub claude_usage: Option<Vec<crate::collect::usage::UsageLimit>>,
+    #[serde(rename = "codexUsage", skip_serializing_if = "Option::is_none")]
+    pub codex_usage: Option<Vec<crate::collect::usage::UsageLimit>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -242,6 +244,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             ram_total_kb: machine.ram_total_kb,
             disks,
             claude_usage: ctx.usage.get(&ctx.claude_dir, &ctx.host.log),
+            codex_usage: ctx.codex_usage.get_codex(ctx),
         },
     }
 }
