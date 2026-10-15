@@ -24,7 +24,7 @@ pub const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// billing ledger. The endpoint rate-limits hard — a request a minute drew a 429
 /// every few minutes, with no usable `Retry-After` — so ask rarely.
 pub const USAGE_TTL: Duration = Duration::from_secs(300);
-pub const CODEX_USAGE_TTL: Duration = Duration::from_secs(60);
+pub const CODEX_USAGE_TTL: Duration = USAGE_TTL;
 
 /// How long the last good reading is still shown once refreshes start failing.
 /// Past this the tiles go away: an expired token or a logout would otherwise
@@ -682,7 +682,8 @@ mod tests {
             let mut st = cache.state.lock().unwrap();
             st.record(Ok(reading(87)), now);
             assert!(st.due(now + CODEX_USAGE_TTL + Duration::from_secs(1), CODEX_USAGE_TTL));
-            assert!(!st.due(now + CODEX_USAGE_TTL + Duration::from_secs(1), USAGE_TTL));
+            assert!(!st.due(now + CODEX_USAGE_TTL, CODEX_USAGE_TTL));
+            assert_eq!(CODEX_USAGE_TTL, USAGE_TTL);
             st.fetched = None;
         }
         cache.get_with("codex", log.clone(), async { Err(Miss::Request("timeout".into())) });
