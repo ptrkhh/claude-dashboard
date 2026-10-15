@@ -350,6 +350,15 @@ button, input, select { font: inherit; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
 }
 
+/* Resume pickers: native selects, themed just enough to sit with the cards. */
+.pick { display: flex; gap: 8px; margin-top: 12px; }
+.pick-sel {
+  flex: 1 1 0; min-width: 0; background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: var(--r-md);
+  padding: 8px 10px; font-size: 13px;
+}
+.pick-sel:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
+
 /* Actions */
 .actions { display: flex; gap: 8px; margin-top: 14px; align-items: stretch; }
 .action {

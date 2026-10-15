@@ -13,6 +13,7 @@ const MODELS = ['sonnet', 'opus', 'haiku', 'fable'].map(value => ({ value, label
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 let armedKill = null; // ponytail: survives render() replacing #running.innerHTML
 const drafts = {}; // half-typed send-bar text by session name, for the same reason
+const picks = {}; // explicit model/effort choices on resumable cards by sid, kept across the poll's re-render
 let resLimit = 20; // resumable entries asked for; "Show more" raises it, and it matches the server's first page
 const sending = new Set(); // sessions with a send in flight: a re-render hands back a fresh, enabled button
 const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
@@ -281,6 +282,33 @@ function runningCard(r) {
     </div>`;
 }
 
+let lastRes = [];
+const optionHtml = (value, label, selected) =>
+  `<option value="${esc(value)}"${value === selected ? ' selected' : ''}>${esc(label)}</option>`;
+// A session resumes only with its own provider's models: a Claude transcript and
+// a Codex thread cannot stand in for each other.
+function pickState(s) {
+  const models = s.modelId?.startsWith('codex')
+    ? modelChoices.filter(m => m.value.startsWith('codex:'))
+    : MODELS;
+  const p = picks[s.sid] || {};
+  const model = p.model ?? (models.some(m => m.value === s.modelId) ? s.modelId : '');
+  const effort = p.effort ?? s.effort ?? '';
+  const efforts = models.find(m => m.value === model)?.efforts || EFFORTS;
+  return { models, model, effort, efforts };
+}
+function pickHtml(s) {
+  const { models, model, effort, efforts } = pickState(s);
+  return `<div class="pick">
+      <select class="pick-sel" data-pick="model" data-sid="${esc(s.sid)}" aria-label="Model">
+        ${optionHtml('', 'Default model', model)}${models.map(m => optionHtml(m.value, m.label, model)).join('')}
+      </select>
+      <select class="pick-sel" data-pick="effort" data-sid="${esc(s.sid)}" aria-label="Effort">
+        ${optionHtml('', 'Default effort', effort)}${efforts.map(e => optionHtml(e, effortLabel(e), effort)).join('')}
+      </select>
+    </div>`;
+}
+
 function resumableCard(s) {
   return `
     <div class="session resumable">
@@ -294,11 +322,18 @@ function resumableCard(s) {
       <div class="desc">${esc(s.title)}</div>
       ${s.model ? `<div class="session-meta"><span class="chip">${esc(s.model)}</span>${s.effort ? `<span class="chip">${esc(effortLabel(s.effort))}</span>` : ''}</div>` : ''}
       <div class="prompts">↳ ${esc(s.prompts.join(' · '))}</div>
+      ${pickHtml(s)}
       <div class="actions">
         <button class="action" type="button" data-resume="${esc(s.sid)}">${ICONS.refresh}<span>Resume</span></button>
         <button class="action ghost" type="button" data-purge="${esc(s.sid)}" aria-label="Purge from list">${ICONS.trash}</button>
       </div>
     </div>`;
+}
+
+function renderResumable() {
+  // A full page means there may be more; a short one is the whole list (or the server's ceiling).
+  const more = lastRes.length >= resLimit ? '<button class="action more" type="button" data-more>Show more…</button>' : '';
+  $('#resumable').innerHTML = (lastRes.map(resumableCard).join('') || '<div class="empty">No resumable sessions</div>') + more;
 }
 
 function render(d) {
@@ -329,9 +364,9 @@ function render(d) {
   // refreshes on the next poll after blur (the text itself survives in `drafts`).
   if (!document.activeElement?.classList.contains('send-input'))
     $('#running').innerHTML = d.running.map(runningCard).join('') || '<div class="empty">No running sessions</div>';
-  // A full page means there may be more; a short one is the whole list (or the server's ceiling).
-  const more = d.resumable.length >= resLimit ? '<button class="action more" type="button" data-more>Show more…</button>' : '';
-  $('#resumable').innerHTML = (d.resumable.map(resumableCard).join('') || '<div class="empty">No resumable sessions</div>') + more;
+  lastRes = d.resumable;
+  // Same rule for the pickers: replacing an open <select> would snap it shut.
+  if (!document.activeElement?.classList.contains('pick-sel')) renderResumable();
 
   const dirs = [...new Set(d.resumable.map(s => s.dir).filter(Boolean))];
   $('#dirs').innerHTML = dirs.map(x => `<option value="${esc(x)}">`).join('');
@@ -350,11 +385,28 @@ document.body.addEventListener('click', async e => {
       }
     } else if (el.dataset.resume) {
       el.disabled = true;
-      try { await api('/api/resume', { sid: el.dataset.resume }); poll(); } finally { el.disabled = false; }
+      const { model, effort } = pickState(lastRes.find(s => s.sid === el.dataset.resume) || { sid: el.dataset.resume });
+      try { await api('/api/resume', { sid: el.dataset.resume, model, effort }); delete picks[el.dataset.resume]; poll(); }
+      finally { el.disabled = false; }
     } else if (el.dataset.purge) {
       await api('/api/purge', { sid: el.dataset.purge }); poll();
     }
   } catch (err) { toast(err.message); poll(); } // re-arm even when the action failed
+});
+
+// Resume pickers: delegated for the same reason. Changing the model re-renders
+// the card so the effort list follows it, as in the launch bar.
+document.body.addEventListener('change', e => {
+  const sel = e.target.closest('.pick-sel');
+  const s = sel && lastRes.find(r => r.sid === sel.dataset.sid);
+  if (!s) return;
+  const p = picks[s.sid] ||= {};
+  p[sel.dataset.pick] = sel.value;
+  if (sel.dataset.pick === 'model') {
+    const { models, efforts, effort } = pickState(s);
+    if (!efforts.includes(effort)) p.effort = models.find(m => m.value === sel.value)?.defaultEffort || '';
+  }
+  renderResumable();
 });
 
 // Send-to-TUI: delegated, because render() replaces the cards every poll.

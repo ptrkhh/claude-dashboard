@@ -142,6 +142,15 @@ pub struct SidBody {
 }
 
 #[derive(Deserialize)]
+pub struct ResumeBody {
+    #[serde(default)]
+    pub sid: String,
+    // The UI sends "" for "keep what the session used".
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub struct NameBody {
     #[serde(default)]
     pub name: String,
@@ -185,9 +194,10 @@ pub async fn post_launch(
 
 pub async fn post_resume(
     State(ctx): State<Arc<Ctx>>,
-    Json(body): Json<SidBody>,
+    Json(body): Json<ResumeBody>,
 ) -> Result<Response, ApiError> {
-    let name = resume_session(&ctx, &body.sid).await?;
+    let pick = |v: &Option<String>| v.clone().filter(|s| !s.is_empty());
+    let name = resume_session(&ctx, &body.sid, pick(&body.model).as_deref(), pick(&body.effort).as_deref()).await?;
     Ok(Json(serde_json::json!({ "name": name })).into_response())
 }
 
@@ -419,6 +429,21 @@ mod tests {
         .await;
         assert_eq!(status, 400);
         assert!(body.contains("bad sid"));
+    }
+
+    #[tokio::test]
+    async fn resume_rejects_a_model_outside_the_allowlist_and_ignores_an_empty_pick() {
+        let b = serve(cfg_for(tempdir("resume-pick"))).await.unwrap();
+        let url = format!("http://{}/api/resume", b.addr);
+        let sid = "2f8a1c94-3b7e-4d51-9a02-6c5f8e1b7d34";
+        let (status, body) =
+            http_post(&url, &format!("{{\"sid\":\"{sid}\",\"model\":\"gpt-4\"}}")).await;
+        assert_eq!(status, 400);
+        assert!(body.contains("bad model"), "{body}");
+        // "" means "keep": it must reach the sid lookup, not fail as a bad model.
+        let (_, body) =
+            http_post(&url, &format!("{{\"sid\":\"{sid}\",\"model\":\"\",\"effort\":\"\"}}")).await;
+        assert!(body.contains("unknown session"), "{body}");
     }
 
     #[tokio::test]

@@ -7,6 +7,8 @@ pub struct Transcript {
     pub title: Option<String>,
     pub assistant_count: u32,
     pub last_assistant_text: Option<String>,
+    /// Full model id of the last assistant turn that named one.
+    pub model: Option<String>,
 }
 
 /// Parse a session transcript (newline-delimited JSON) into summary fields.
@@ -38,6 +40,9 @@ pub fn parse_transcript(jsonl: &str) -> Transcript {
 
         if e.get("type").and_then(|v| v.as_str()) == Some("assistant") {
             t.assistant_count += 1;
+            if let Some(m) = e.pointer("/message/model").and_then(|v| v.as_str()) {
+                t.model = Some(m.to_string());
+            }
             let text = e
                 .get("message")
                 .and_then(|m| m.get("content"))
@@ -102,6 +107,18 @@ mod tests {
         assert_eq!(t.title.as_deref(), Some("Fix auth bug"));
         assert_eq!(t.assistant_count, 2);
         assert_eq!(t.last_assistant_text.as_deref(), Some("done, tests pass"));
+    }
+
+    #[test]
+    fn model_is_the_last_assistant_turns_so_a_mid_session_switch_wins() {
+        let jsonl = [
+            r#"{"type":"assistant","message":{"model":"claude-sonnet-5-5","content":[]}}"#,
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","content":[]}}"#,
+            r#"{"type":"assistant","message":{"content":[]}}"#,
+        ]
+        .join("\n");
+        assert_eq!(parse_transcript(&jsonl).model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(parse_transcript(r#"{"type":"user"}"#).model, None);
     }
 
     #[test]
