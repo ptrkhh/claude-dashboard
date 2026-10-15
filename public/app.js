@@ -318,7 +318,7 @@ function render(d) {
       label: esc(u.short),
       value: `${u.pct}<span class="unit">% used</span>`,
       pct: u.pct,
-      sub: u.resetsAt ? `Resets ${fmtReset(u.resetsAt)}` : null,
+      sub: [u.resetsAt && `Resets ${fmtReset(u.resetsAt)}`, u.checkedAt && `Checked ${fmtReset(u.checkedAt)}`].filter(Boolean).join(' · ') || null,
       title: u.long,
     })),
   ];

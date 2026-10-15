@@ -45,7 +45,7 @@ pub(super) async fn query(ctx: &Ctx, mode: &str) -> Result<serde_json::Value, St
     }
     let json = ctx
         .runner
-        .run_checked(
+        .run_checked_with_timeout(
             "node",
             &[
                 "--input-type=module",
@@ -55,9 +55,15 @@ pub(super) async fn query(ctx: &Ctx, mode: &str) -> Result<serde_json::Value, St
                 mode,
             ],
             &format!("Codex metadata {mode}"),
+            Duration::from_secs(15),
         )
         .await?;
-    serde_json::from_str(&json).map_err(|_| "Codex metadata returned invalid JSON".into())
+    let value: serde_json::Value = serde_json::from_str(&json)
+        .map_err(|_| "Codex metadata returned invalid JSON".to_string())?;
+    if let Some(error) = value.get("error").and_then(|v| v.as_str()) {
+        return Err(error.to_owned());
+    }
+    Ok(value)
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

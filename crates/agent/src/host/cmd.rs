@@ -52,7 +52,7 @@ impl Runner {
         self.run_checked_with_timeout(program, args, key, DEFAULT_TIMEOUT).await
     }
 
-    async fn run_checked_with_timeout(
+    pub async fn run_checked_with_timeout(
         &self,
         program: &str,
         args: &[&str],

@@ -202,8 +202,11 @@ when the picker has a cached catalog. Other discovery failures clear stale GPT
 options and show the error while keeping Claude launch options available.
 The usage strip includes **Claude Session/Week** and **Codex Session/Week**
 with reset times. Codex quotas come from `account/rateLimits/read`, refreshed
-in the background every five minutes with the same cache/backoff policy as
-Claude. Other returned quota buckets carry their own labels. Missing Codex/Node,
+in the background every minute, with the last checked time shown on each tile.
+Failed Codex refreshes hide old numbers and back off before retrying; Claude
+retains its existing five-minute cache policy. Metadata queries allow 10 seconds
+per RPC and 12 seconds overall, inside a separate 15-second subprocess budget;
+they never block the session poll. Other returned quota buckets carry their own labels. Missing Codex/Node,
 signed-out Codex, and API-key-only providers quietly omit Codex quota tiles;
 Claude usage and session controls remain available. Model availability and
 subscription quota availability are independent.

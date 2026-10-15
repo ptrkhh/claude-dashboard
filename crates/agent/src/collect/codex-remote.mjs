@@ -67,7 +67,7 @@ class Codex {
     const models = [], seen = new Set();
     let cursor;
     do {
-      const page = await this.call('model/list', { limit: 100, includeHidden: false, ...(cursor ? { cursor } : {}) }, 3000);
+      const page = await this.call('model/list', { limit: 100, includeHidden: false, ...(cursor ? { cursor } : {}) }, 10_000);
       models.push(...page.data.filter(m => !m.hidden).map(m => ({
         value: `codex:${m.model}`, model: m.model, label: m.displayName || m.model,
         efforts: m.supportedReasoningEfforts.map(e => e.reasoningEffort),
@@ -80,7 +80,7 @@ class Codex {
     return models;
   }
   async ready() {
-    const auth = await this.call('account/read', { refreshToken: false }, 3000);
+    const auth = await this.call('account/read', { refreshToken: false }, 10_000);
     return !auth.requiresOpenaiAuth || auth.account != null;
   }
   close() {
@@ -385,20 +385,28 @@ const queryMode = ['--models', '--usage'].find(mode => process.argv.includes(mod
 if (queryMode) {
   const codex = new Codex(async () => {});
   stop = () => codex.close();
-  const deadline = setTimeout(() => { codex.close(); process.exitCode = 1; }, 4000);
+  let timedOut = false;
+  // Startup, account lookup, and the quota/catalog RPC share this budget.
+  const deadline = setTimeout(() => { timedOut = true; codex.close(); }, 12_000);
   (async () => {
     try {
-      await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', version: '0.3.0' } });
+      await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', version: '0.3.0' } }, 10_000);
       codex.send({ method: 'initialized' });
       let result;
       if (queryMode === '--usage') {
-        const auth = await codex.call('account/read', { refreshToken: false }, 3000);
+        const auth = await codex.call('account/read', { refreshToken: false }, 10_000);
         // API keys and local/third-party providers have no ChatGPT quota windows.
-        result = auth.account?.type === 'chatgpt' ? await codex.call('account/rateLimits/read', {}, 3000) : null;
+        result = auth.account?.type === 'chatgpt' ? await codex.call('account/rateLimits/read', {}, 10_000) : null;
       } else result = await codex.ready() ? await codex.models() : [];
       console.log(JSON.stringify(result));
     } finally { clearTimeout(deadline); codex.close(); }
-  })().catch(fatal);
+  })().catch(e => {
+    // Report only our own timeout text; provider error bodies may contain credentials.
+    const error = timedOut ? `Codex metadata ${queryMode} timed out after 12000ms`
+      : /^Codex [\w/]+ timed out$/.test(e.message) ? e.message : `Codex metadata ${queryMode} failed`;
+    console.log(JSON.stringify({ error }));
+    process.exitCode = 0; // Structured errors are checked by the agent.
+  });
 } else if (args[0] === '--worker') {
   // Claude may wrap other self-spawns too; only replace its authenticated RC child.
   if (args.includes('--sdk-url') && process.env.CLAUDE_CODE_SESSION_ACCESS_TOKEN) {

@@ -113,22 +113,24 @@ createInterface({input:process.stdin}).on('line',line=>{
 });
 
 
-test('signed-out Codex hides its bundled models, while authenticated and no-auth providers remain available', { timeout: 15_000 }, async t => {
+test('Codex metadata handles authentication and bounded slow queries', { timeout: 30_000 }, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'cdash-codex-auth-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   await writeFile(join(dir, 'codex'), `#!${process.execPath}
 const {createInterface}=require('node:readline');
+const delays=JSON.parse(process.env.CDASH_CHECK_DELAYS||'{}');
+const send=(m,method)=>setTimeout(()=>process.stdout.write(JSON.stringify(m)+'\\n'),delays[method]||0);
 createInterface({input:process.stdin}).on('line',line=>{
  const m=JSON.parse(line);
  if(m.method==='initialize')process.stdout.write(JSON.stringify({id:m.id,result:{}})+'\\n');
- if(m.method==='account/read')process.stdout.write(JSON.stringify({id:m.id,result:JSON.parse(process.env.CDASH_CHECK_ACCOUNT)})+'\\n');
+ if(m.method==='account/read')send({id:m.id,result:JSON.parse(process.env.CDASH_CHECK_ACCOUNT)},m.method);
  if(m.method==='model/list')process.stdout.write(JSON.stringify({id:m.id,result:{data:[{model:'gpt-check',displayName:'GPT Check',supportedReasoningEfforts:[{reasoningEffort:'low'}],defaultReasoningEffort:'low'}],nextCursor:null}})+'\\n');
- if(m.method==='account/rateLimits/read')process.stdout.write(JSON.stringify({id:m.id,result:{rateLimits:{limitId:'codex',primary:{usedPercent:25,windowDurationMins:300,resetsAt:1730947200},secondary:{usedPercent:40,windowDurationMins:10080,resetsAt:1730950800}}}})+'\\n');
+ if(m.method==='account/rateLimits/read')send({id:m.id,result:{rateLimits:{limitId:'codex',primary:{usedPercent:25,windowDurationMins:300,resetsAt:1730947200},secondary:{usedPercent:40,windowDurationMins:10080,resetsAt:1730950800}}}},m.method);
 });
 `, { mode: 0o700 });
-  const discover = (account, mode = '--models') => new Promise((done, reject) => {
+  const discover = (account, mode = '--models', delays = {}) => new Promise((done, reject) => {
     const child = spawn(process.execPath, [resolve('crates/agent/src/collect/codex-remote.mjs'), mode], {
-      env: { ...process.env, PATH: dir, CDASH_CHECK_ACCOUNT: JSON.stringify(account) },
+      env: { ...process.env, PATH: dir, CDASH_CHECK_ACCOUNT: JSON.stringify(account), CDASH_CHECK_DELAYS: JSON.stringify(delays) },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '', stderr = '';
@@ -154,4 +156,16 @@ createInterface({input:process.stdin}).on('line',line=>{
   const usage = await discover({ account: { type: 'chatgpt' }, requiresOpenaiAuth: true }, '--usage');
   assert.equal(usage.rateLimits.primary.usedPercent, 25);
   assert.equal(usage.rateLimits.secondary.usedPercent, 40);
+  const slow = await discover({ account: { type: 'chatgpt' }, requiresOpenaiAuth: true }, '--usage', {
+    'account/read': 2100, 'account/rateLimits/read': 2100,
+  });
+  assert.equal(slow.rateLimits.primary.usedPercent, 25, 'valid sequential RPCs can take more than four seconds');
+  const slowAuth = await discover({ account: { type: 'chatgpt' }, requiresOpenaiAuth: true }, '--usage', {
+    'account/read': 3200,
+  });
+  assert.equal(slowAuth.rateLimits.secondary.usedPercent, 40, 'account reads can take more than three seconds');
+  const timeout = await discover({ account: { type: 'chatgpt' }, requiresOpenaiAuth: true }, '--usage', {
+    'account/read': 11000,
+  });
+  assert.deepEqual(timeout, { error: 'Codex account/read timed out' });
 });
