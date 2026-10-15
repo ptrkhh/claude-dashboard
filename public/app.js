@@ -269,6 +269,10 @@ function render(d) {
     { label: 'CPU', value: `${st.cpuPct}<span class="unit">%</span>`, pct: st.cpuPct },
     { label: 'RAM', value: `${fmtKb(st.ramUsedKb)}<span class="unit"> / ${fmtKb(st.ramTotalKb)}</span>`, pct: st.ramTotalKb ? Math.round(st.ramUsedKb / st.ramTotalKb * 100) : null },
     ...st.disks.map(x => ({ label: esc(x.mount), value: `${fmtKb(x.freeKb)}<span class="unit"> free</span>`, pct: x.totalKb ? Math.round((x.totalKb - x.freeKb) / x.totalKb * 100) : null })),
+    ...(Number.isFinite(st.battery?.pct) && st.battery.pct >= 0 && st.battery.pct <= 100 && typeof st.battery.plugged === 'boolean' ? [{
+      label: 'Battery', value: `${st.battery.pct}<span class="unit">%</span>`,
+      sub: st.battery.plugged ? 'Plugged in' : 'Unplugged',
+    }] : []),
     // Absent for API-key users and until the first background refresh lands.
     ...(st.claudeUsage || []).map(u => ({
       label: esc(u.short),
