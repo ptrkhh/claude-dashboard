@@ -9,7 +9,7 @@
 if (window.__cdashBooted) return;
 window.__cdashBooted = true;
 const $ = s => document.querySelector(s);
-const MODELS = ['sonnet', 'opus', 'haiku', 'fable'];
+const MODELS = ['sonnet', 'opus', 'haiku', 'fable', 'codex'];
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 let armedKill = null; // ponytail: survives render() replacing #running.innerHTML
 const drafts = {}; // half-typed send-bar text by session name, for the same reason
@@ -218,7 +218,7 @@ function runningCard(r) {
   // can't do. tmux-owned panes only; external sessions live elsewhere.
   const send = r.external ? ''
     : `<form class="send" data-send="${esc(r.name)}">
-         <input class="send-input" type="text" placeholder="! gcloud auth login" aria-label="Type into the Claude TUI"
+         <input class="send-input" type="text" placeholder="${r.model === 'codex' ? 'Send Codex a prompt' : '! gcloud auth login'}" aria-label="Send input to session"
                 value="${esc(drafts[r.name])}" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
          <button class="send-btn" type="submit" aria-label="Send to session">${ICONS.send}</button>
        </form>`;
