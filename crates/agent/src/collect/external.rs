@@ -22,6 +22,8 @@ pub struct Session {
     pub uptime_sec: i64,
     pub model: Option<String>,
     pub effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     #[serde(rename = "rcLink")]
     pub rc_link: Option<String>,
     pub git: Option<GitStatus>,
@@ -127,6 +129,7 @@ pub async fn external_sessions(
                 .unwrap_or(0),
             model: None,
             effort: None,
+            provider: None,
             rc_link: sess
                 .bridge_session_id
                 .map(|id| format!("https://claude.ai/code/{id}")),

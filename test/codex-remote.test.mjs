@@ -49,7 +49,8 @@ createInterface({input:process.stdin}).on('line',line=>{
  const m=JSON.parse(line);
  appendFileSync(process.env.CDASH_CHECK_WIRE,JSON.stringify({rpc:m,credentialLeaked:!!process.env.CLAUDE_CODE_SESSION_ACCESS_TOKEN})+'\\n');
  if(m.method==='initialize')send({id:m.id,result:{}});
- if(['thread/start','thread/resume'].includes(m.method))send({id:m.id,result:{thread:{id:'01234567-1234-1234-1234-0123456789ab'}}});
+ if(m.method==='model/list')send({id:m.id,result:{data:[{model:'gpt-check',displayName:'GPT Check',supportedReasoningEfforts:[{reasoningEffort:'low'}],defaultReasoningEffort:'low'}],nextCursor:null}});
+ if(['thread/start','thread/resume'].includes(m.method))send({id:m.id,result:{thread:{id:'01234567-1234-1234-1234-0123456789ab'},model:'gpt-check',reasoningEffort:'low'}});
  if(m.method==='turn/start'){
    const text=m.params.input[0].text;
    send({id:m.id,result:{turn:{id:text}}});

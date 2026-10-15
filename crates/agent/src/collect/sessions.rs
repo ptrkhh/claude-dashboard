@@ -30,6 +30,10 @@ pub struct Resumable {
     pub branch: Option<String>,
     pub title: String,
     pub prompts: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -84,7 +88,8 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             running.push(Session {
                 name: p.name.clone(), dir: s.dir, pid: p.pid,
                 uptime_sec: ((now / 1000.0 - p.created as f64).round() as i64).max(0),
-                model: Some("codex".into()), effort: s.effort,
+                model: s.model_label.or(s.model).or_else(|| Some("Codex".into())), effort: s.effort,
+                provider: Some("codex".into()),
                 rc_link: super::codex::link(ctx, &p.name).await,
                 git: git.as_deref().map(parse_git_status), working: s.working,
                 last_message: s.last_message, sid: s.sid,
@@ -151,6 +156,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             uptime_sec: ((now / 1000.0 - p.created as f64).round() as i64).max(0),
             model: meta.model.clone(),
             effort: meta.effort.clone(),
+            provider: None,
             rc_link,
             git: git_out.as_deref().map(parse_git_status),
             working,
@@ -201,6 +207,8 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             ts: g.ts,
             branch: t.branch.clone(),
             prompts: g.prompts,
+            model: None,
+            effort: None,
         });
     }
 
@@ -440,7 +448,7 @@ mod tests {
         // such key at all, and the gate compares keys.
         let s = Session {
             name: "x".into(), dir: "/x".into(), pid: 1, uptime_sec: 0,
-            model: None, effort: None, rc_link: None, git: None, working: false,
+            model: None, effort: None, provider: None, rc_link: None, git: None, working: false,
             last_message: None, sid: None, cpu: None, rss_kb: 0,
             cpu_sample_age_ms: 0, external: false,
         };

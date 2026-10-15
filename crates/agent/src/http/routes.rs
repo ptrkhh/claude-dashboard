@@ -89,6 +89,10 @@ pub async fn get_logs(State(ctx): State<Arc<Ctx>>) -> Response {
     Json(serde_json::json!({ "lines": ctx.host.log.lines() })).into_response()
 }
 
+pub async fn get_models(State(ctx): State<Arc<Ctx>>) -> Result<Response, ApiError> {
+    Ok(Json(crate::collect::codex::models(&ctx).await?).into_response())
+}
+
 pub async fn get_places(State(ctx): State<Arc<Ctx>>) -> Response {
     Json(read_places(&ctx.places_file).await).into_response()
 }

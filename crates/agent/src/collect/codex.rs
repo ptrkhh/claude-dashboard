@@ -7,6 +7,46 @@ use super::validate::{assert_effort, assert_valid_sid, Refused};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelChoice {
+    pub value: String,
+    pub model: String,
+    pub label: String,
+    pub efforts: Vec<String>,
+    pub default_effort: String,
+}
+
+pub async fn models(ctx: &Ctx) -> Result<Vec<ModelChoice>, Refused> {
+    // ponytail: one catalog per agent for 60s; key by project if catalogs become project-specific.
+    let mut cache = ctx.codex_models.lock().await;
+    if let Some((when, choices)) = cache.as_ref() {
+        if when.elapsed() < Duration::from_secs(60) {
+            return Ok(choices.clone());
+        }
+    }
+    let json = ctx
+        .runner
+        .run_checked(
+            "node",
+            &[
+                "--input-type=module",
+                "-e",
+                include_str!("codex-remote.mjs"),
+                "--",
+                "--models",
+            ],
+            "Codex model discovery",
+        )
+        .await
+        .map_err(Refused::Failed)?;
+    let choices: Vec<ModelChoice> = serde_json::from_str(&json)
+        .map_err(|e| Refused::Failed(format!("Codex model catalog: {e}")))?;
+    *cache = Some((Instant::now(), choices.clone()));
+    Ok(choices)
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CodexSession {
@@ -21,6 +61,8 @@ pub struct CodexSession {
     #[serde(default)]
     pub ts: f64,
     pub effort: Option<String>,
+    pub model: Option<String>,
+    pub model_label: Option<String>,
 }
 
 fn root(ctx: &Ctx) -> PathBuf {
@@ -41,15 +83,36 @@ pub async fn link(ctx: &Ctx, name: &str) -> Option<String> {
 pub async fn launch(
     ctx: &Arc<Ctx>,
     dir: &str,
+    model: Option<&str>,
     effort: &str,
     previous: Option<CodexSession>,
 ) -> Result<String, Refused> {
-    assert_effort(effort)?;
-    if effort == "max" {
-        return Err(Refused::BadRequest(
-            "Codex effort: choose low, medium, high or xhigh".into(),
-        ));
-    }
+    let choice = if previous.is_none() {
+        if let Some(model) = model {
+            let choice = models(ctx)
+                .await?
+                .into_iter()
+                .find(|m| m.model == model)
+                .ok_or_else(|| Refused::BadRequest(format!("unknown Codex model: {model}")))?;
+            if !choice.efforts.iter().any(|e| e == effort) {
+                return Err(Refused::BadRequest(format!(
+                    "unsupported effort for {}: {effort}",
+                    choice.label
+                )));
+            }
+            Some(choice)
+        } else {
+            assert_effort(effort)?;
+            if effort == "max" {
+                return Err(Refused::BadRequest(
+                    "Choose a GPT model to select its supported efforts".into(),
+                ));
+            }
+            None
+        }
+    } else {
+        None
+    };
     if !tokio::fs::metadata(dir)
         .await
         .map(|m| m.is_dir())
@@ -105,6 +168,10 @@ pub async fn launch(
     let initial = CodexSession {
         dir: dir.into(),
         effort: Some(effort.into()),
+        model: model.map(str::to_owned),
+        model_label: choice
+            .map(|m| m.label)
+            .or_else(|| previous.as_ref().and_then(|s| s.model_label.clone())),
         working: false,
         ..previous.unwrap_or_default()
     };
@@ -151,6 +218,7 @@ pub async fn resume(ctx: &Arc<Ctx>, sid: &str) -> Result<Option<String>, Refused
     let name = launch(
         ctx,
         &s.dir.clone(),
+        s.model.clone().as_deref(),
         s.effort.clone().as_deref().unwrap_or("medium"),
         Some(s),
     )
@@ -183,14 +251,9 @@ pub async fn history(ctx: &Ctx) -> Vec<Resumable> {
             dir: Some(s.dir),
             ts: s.ts,
             branch: None,
-            title: format!(
-                "Codex: {}",
-                if s.title.is_empty() {
-                    "(untitled)"
-                } else {
-                    &s.title
-                }
-            ),
+            title: s.title,
+            model: s.model_label.or(s.model).or_else(|| Some("Codex".into())),
+            effort: s.effort,
             prompts: Vec::new(),
         });
     }

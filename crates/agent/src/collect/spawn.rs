@@ -192,11 +192,14 @@ pub async fn launch_session(
     model: &str,
     effort: &str,
 ) -> Result<String, Refused> {
+    if model == "codex" {
+        return super::codex::launch(ctx, dir, None, effort, None).await;
+    }
+    if let Some(model) = model.strip_prefix("codex:") {
+        return super::codex::launch(ctx, dir, Some(model), effort, None).await;
+    }
     assert_model(model)?;
     assert_effort(effort)?;
-    if model == "codex" {
-        return super::codex::launch(ctx, dir, effort, None).await;
-    }
     // A6: the directory must exist and be a directory before it reaches `-c`.
     let is_dir = tokio::fs::metadata(dir).await.map(|m| m.is_dir()).unwrap_or(false);
     if !is_dir {

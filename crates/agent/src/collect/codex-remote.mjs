@@ -27,7 +27,7 @@ class Codex {
   constructor(onEvent) {
     // Session ingress credentials must never enter Codex's tool environment.
     const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('CLAUDE_') && !k.startsWith('CDASH_CODEX_')));
-    this.child = spawn('codex', ['app-server', '--listen', 'stdio://'], { env, stdio: ['pipe', 'pipe', 'inherit'] });
+    this.child = spawn('codex', ['app-server', '--listen', 'stdio://'], { env, detached: true, stdio: ['pipe', 'pipe', 'inherit'] });
     let notifications = Promise.resolve();
     createInterface({ input: this.child.stdout }).on('line', line => {
       let m;
@@ -55,15 +55,42 @@ class Codex {
     });
   }
   send(m) { this.child.stdin.write(`${JSON.stringify(m)}\n`); }
-  call(method, params) {
+  call(method, params, timeout = 120_000) {
     const id = ++this.id;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(Object.assign(Error(`Codex ${method} timed out`), { rpc: true })); }, 120_000);
+      const timer = setTimeout(() => { this.pending.delete(id); reject(Object.assign(Error(`Codex ${method} timed out`), { rpc: true })); }, timeout);
       this.pending.set(id, { resolve, reject, timer, method });
       this.send({ id, method, params });
     });
   }
-  close() { this.closing = true; this.child.kill('SIGTERM'); }
+  async models() {
+    const models = [], seen = new Set();
+    let cursor;
+    do {
+      const page = await this.call('model/list', { limit: 100, includeHidden: false, ...(cursor ? { cursor } : {}) }, 3000);
+      models.push(...page.data.filter(m => !m.hidden).map(m => ({
+        value: `codex:${m.model}`, model: m.model, label: m.displayName || m.model,
+        efforts: m.supportedReasoningEfforts.map(e => e.reasoningEffort),
+        defaultEffort: m.defaultReasoningEffort,
+      })));
+      cursor = page.nextCursor;
+      if (cursor && seen.has(cursor)) throw Error('Repeated Codex model cursor');
+      seen.add(cursor);
+    } while (cursor);
+    return models;
+  }
+  close() {
+    if (this.closing) return;
+    this.closing = true;
+    if (!this.child.pid) return;
+    // Kill the process group: npm's Codex launcher can own a native child.
+    const kill = signal => {
+      try { process.kill(-this.child.pid, signal); }
+      catch (e) { if (e.code !== 'ESRCH') console.error(`Codex cleanup: ${e.message}`); }
+    };
+    kill('SIGTERM');
+    setTimeout(() => kill('SIGKILL'), 250);
+  }
 }
 
 class Remote {
@@ -100,7 +127,7 @@ class Remote {
       }
     }
   }
-  state(worker_status, details = null) { return this.retry('/worker', 'PUT', { worker_epoch: this.epoch, worker_status, requires_action_details: details, external_metadata: { model: 'codex', pending_action: details, pending_actions: details ? [details] : [] } }); }
+  state(worker_status, details = null) { return this.retry('/worker', 'PUT', { worker_epoch: this.epoch, worker_status, requires_action_details: details, external_metadata: { model: this.model || 'codex', pending_action: details, pending_actions: details ? [details] : [] } }); }
   event(payload) {
     payload = { session_id: this.sid, uuid: randomUUID(), ...payload };
     this.sent.add(payload.uuid);
@@ -163,6 +190,7 @@ async function worker() {
   let closed = false, heartbeat, local;
   const approvals = new Map();
   const items = new Map();
+  let models = [];
   let outgoing = Promise.resolve(), saved = Promise.resolve(), queue = Promise.resolve();
   const emit = payload => { outgoing = outgoing.then(() => remote.event(payload)); outgoing.catch(fatal); return outgoing; };
   const save = () => {
@@ -192,13 +220,20 @@ async function worker() {
       return;
     }
     if (m.method === 'item/started') items.set(p.item.id, p.item);
+    if (m.method === 'thread/settings/updated') {
+      state.model = p.threadSettings.model;
+      state.effort = p.threadSettings.effort;
+      state.model_label = models.find(m => m.model === state.model)?.label || state.model;
+      remote.model = state.model;
+      await save();
+    }
     if (m.method === 'turn/started') { state.working = true; await save(); await remote.state('running'); }
     if (m.method === 'item/completed') {
       const item = p.item;
       items.delete(item.id);
       if (item.type === 'agentMessage') {
         state.last_message = item.text;
-        await emit({ type: 'assistant', message: { id: item.id, role: 'assistant', model: 'codex', content: [{ type: 'text', text: item.text }], stop_reason: 'end_turn' } });
+        await emit({ type: 'assistant', message: { id: item.id, role: 'assistant', model: state.model, content: [{ type: 'text', text: item.text }], stop_reason: 'end_turn' } });
         console.log(item.text);
         await save();
       }
@@ -231,7 +266,7 @@ async function worker() {
       if (r.subtype === 'interrupt') {
         if (codex.turnId) await codex.call('turn/interrupt', { threadId: state.sid, turnId: codex.turnId });
         await respond(payload.request_id, {});
-      } else if (r.subtype === 'initialize') await respond(payload.request_id, { commands: [], models: [{ value: 'codex', displayName: 'Codex', description: 'Configured Codex model' }] });
+      } else if (r.subtype === 'initialize') await respond(payload.request_id, { commands: [], models: [{ value: state.model, displayName: state.model_label || state.model, description: 'Current session model' }] });
       else if (r.subtype === 'set_env') await respond(payload.request_id, {}, 'Environment changes are unsupported');
       else await respond(payload.request_id, {}, `Unsupported Codex bridge control: ${r.subtype}`);
     } else if (payload.type === 'user') {
@@ -258,12 +293,24 @@ async function worker() {
   };
   await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', title: 'Claude Dashboard Codex Bridge', version: '0.3.0' } });
   codex.send({ method: 'initialized' });
-  const result = await codex.call(state.sid ? 'thread/resume' : 'thread/start', { ...(state.sid ? { threadId: state.sid, excludeTurns: true } : {}), cwd: state.dir });
-  state.sid = result.thread.id; state.working = false; await save();
+  const savedModel = state.model, savedLabel = state.model_label;
+  const result = await codex.call(state.sid ? 'thread/resume' : 'thread/start', {
+    ...(state.sid ? { threadId: state.sid, excludeTurns: true } : {}), cwd: state.dir,
+    ...(state.model ? { model: state.model } : {}),
+    config: { model_reasoning_effort: state.effort },
+  });
+  state.sid = result.thread.id; state.working = false;
+  state.model = result.model;
+  state.effort = result.reasoningEffort;
+  try { models = await codex.models(); }
+  catch { console.error('Model catalog unavailable; using model ID.'); }
+  state.model_label = models.find(m => m.model === state.model)?.label || (state.model === savedModel && savedLabel) || state.model;
+  remote.model = state.model;
+  await save();
   if (state.remote_sid === sid) remote.sequence = state.remote_sequence || 0;
   else { state.remote_sid = sid; state.remote_sequence = 0; await save(); }
   await remote.state('idle');
-  await emit({ type: 'system', subtype: 'init', cwd: state.dir, model: 'codex', tools: [], mcp_servers: [], permissionMode: 'default', slash_commands: [] });
+  await emit({ type: 'system', subtype: 'init', cwd: state.dir, model: state.model, tools: [], mcp_servers: [], permissionMode: 'default', slash_commands: [] });
   const rcId = sid.replace(/^cse_/, 'session_');
   await atomic(`${statePath.replace(/\.json$/, '')}.link`, `https://claude.ai/code/${rcId}`);
   const dir = socketDir(statePath);
@@ -306,7 +353,7 @@ async function launcher() {
   await atomic(statePath, JSON.stringify(state));
   process.env.CDASH_CODEX_STATE = statePath;
   const script = fileURLToPath(import.meta.url);
-  const runner = spawn('claude', ['remote-control', '--spawn=session', '--name', `Codex: ${option('--name')}`, '--verbose'], {
+  const runner = spawn('claude', ['remote-control', '--spawn=session', '--name', `${state.model_label || state.model || 'Codex'}: ${option('--name')}`, '--verbose'], {
     cwd: join(dirname(statePath), 'controls', option('--name')),
     env: { ...process.env, CLAUDE_CODE_PROCESS_WRAPPER: JSON.stringify([process.execPath, script, '--worker']) },
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -329,7 +376,18 @@ async function launcher() {
 }
 
 for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(signal, () => { stop(); setTimeout(() => process.exit(0), 5000).unref(); });
-if (args[0] === '--worker') {
+if (process.argv.includes('--models')) {
+  const codex = new Codex(async () => {});
+  stop = () => codex.close();
+  const deadline = setTimeout(() => { codex.close(); process.exitCode = 1; }, 4000);
+  (async () => {
+    try {
+      await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', version: '0.3.0' } });
+      codex.send({ method: 'initialized' });
+      console.log(JSON.stringify(await codex.models()));
+    } finally { clearTimeout(deadline); codex.close(); }
+  })().catch(fatal);
+} else if (args[0] === '--worker') {
   // Claude may wrap other self-spawns too; only replace its authenticated RC child.
   if (args.includes('--sdk-url') && process.env.CLAUDE_CODE_SESSION_ACCESS_TOKEN) {
     createInterface({ input: process.stdin }).on('line', line => {

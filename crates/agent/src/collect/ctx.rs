@@ -32,6 +32,7 @@ pub struct Ctx {
     pub git: Arc<GitCache>,
     /// Claude subscription limits, refreshed off the poll path.
     pub usage: Arc<UsageCache>,
+    pub codex_models: tokio::sync::Mutex<Option<(std::time::Instant, Vec<super::codex::ModelChoice>)>>,
     /// Set once at boot when `CDASH_AUTH` includes `password`. A `OnceLock`
     /// because `Ctx` is shared behind an `Arc` by the time the policy exists.
     pub password: std::sync::OnceLock<crate::auth::login::PasswordState>,
@@ -54,6 +55,7 @@ impl Ctx {
             transcripts: TranscriptCache::new(),
             git: Arc::new(GitCache::new()),
             usage: Arc::new(UsageCache::new()),
+            codex_models: tokio::sync::Mutex::new(None),
             password: std::sync::OnceLock::new(),
         }
     }

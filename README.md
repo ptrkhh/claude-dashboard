@@ -187,9 +187,18 @@ Requires `tmux`, `claude` and `git` on `PATH`; the agent reports any that are mi
 
 ### Managed Codex sessions
 
-Choose **Codex** in the launcher, choose an effort below `max`, then launch.
+Choose a **GPT** model in the launcher, choose a supported effort, then launch.
+The agent discovers model names and efforts through Codex's `model/list` RPC,
+refreshing the catalog every minute. Labels use the returned display name
+(for example, **GPT-6.1-Sol**) without a Codex prefix. New catalog entries need
+no dashboard update; discovery still depends on the installed Codex CLI and
+its account/provider catalog. If discovery fails, Claude launch options remain
+available and the dashboard shows the error.
 The dashboard owns the tmux pane and supports send, kill, resume, and **Open in
-Claude**. Codex uses the model and permissions in its existing configuration.
+Claude**. Codex uses the selected model and effort with its existing permissions.
+Running and resumable sessions retain the effective model, display name, and
+effort; resuming preserves those choices. Older sessions learn their model
+when resumed with the updated bridge.
 The pane accepts text prompts; it is a bridge console rather than the native
 Codex TUI. `/quit` stops it. Only sessions created by this dashboard are added
 to its Codex resume list.
