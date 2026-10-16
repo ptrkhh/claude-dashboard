@@ -103,6 +103,8 @@ artifact. Its loopback listener starts the first time the setup screen opens —
 not at launch — and then stays up until the app exits. It is not the sensitive
 part.
 
+**Coming from termux-claude-autoremote?** The Termux:Widget shortcut is replaced by the app icon, or by Add to home screen in a browser. Its share-sheet folder picker has no equivalent yet. Install `tmux` and `git` with `pkg install tmux git`, and Claude Code separately. The agent reports any of the three that are missing at startup.
+
 ## Run
 
 ```
@@ -182,6 +184,79 @@ instead, which serves the same purpose on a runner.
 The `aarch64` binary is confirmed working on-device under Termux (Android, 2026-08-29): UI, host stats and live session data all functional.
 
 Requires `tmux`, `claude` and `git` on `PATH`; the agent reports any that are missing at startup.
+
+### Managed Codex sessions
+
+Managed sessions use names such as `[Codex] claude-dashboard · elephant` or
+`[Claude] claude-dashboard · rabbit` in the dashboard and Claude Remote Control.
+Animals come from a pool of 32 familiar animals and stay the same on resume.
+Duplicate display names are allowed, with no numeric suffixes.
+Codex stores the animal label separately from its model and effort metadata.
+
+Choose a **GPT** model in the launcher, choose a supported effort, then launch.
+The agent discovers model names and efforts through Codex's `model/list` RPC,
+refreshing the catalog every minute. Labels use the returned display name
+(for example, **GPT-6.1-Sol**) without a Codex prefix. New catalog entries need
+no dashboard update; discovery still depends on the installed Codex CLI and
+its account/provider catalog. Codex and Node are optional: if either is absent,
+or Codex requires authentication and is signed out, only Claude launch options
+appear, without recurring discovery errors. Run `codex login` on the agent host
+to enable GPT options; the catalog refreshes within a minute. Providers that do
+not require OpenAI authentication remain usable without a ChatGPT login.
+Launch and resume recheck Codex credentials before creating a tmux pane, even
+when the picker has a cached catalog. Other discovery failures clear stale GPT
+options and show the error while keeping Claude launch options available.
+The usage strip includes **Claude Session/Week** and **Codex Session/Week**
+with reset times. Codex quotas come from `account/rateLimits/read`, refreshed
+in the background every five minutes, matching Claude's refresh interval.
+Failed Codex refreshes hide old numbers and back off before retrying; Claude
+retains its existing five-minute cache policy. Metadata queries allow 10 seconds
+per RPC and 12 seconds overall, inside a separate 15-second subprocess budget;
+they never block the session poll. Other returned quota buckets carry their own labels. Missing Codex/Node,
+signed-out Codex, and API-key-only providers quietly omit Codex quota tiles;
+Claude usage and session controls remain available. Model availability and
+subscription quota availability are independent.
+The dashboard owns the tmux pane and supports send, kill, resume, and **Open in
+Claude**. Codex uses the selected model and effort with its existing permissions.
+Running sessions show their effective model, display name, and effort.
+Resumable cards show the model each session last used and have model and
+effort pickers, preselected to it; **Resume** applies what is selected, for
+Claude and Codex sessions alike. A session only resumes with its own
+provider's models, because a Claude transcript and a Codex thread cannot stand
+in for each other. For Codex the model and effort come from Codex's own state
+database (`state_N.sqlite` under `$CODEX_HOME`, read-only through `node:sqlite`),
+so a thread you continued elsewhere shows what it actually ran with; the
+dashboard keeps no copy. If that database cannot be read, Codex sessions are
+left out of the resumable list.
+The pane accepts text prompts; it is a bridge console rather than the native
+Codex TUI. `/quit` stops it. Only sessions created by this dashboard are added
+to its Codex resume list.
+
+Requires Node.js 22+, `codex`, and a `claude` login eligible for Remote Control,
+all on the agent's PATH. This also applies on Termux and inside WSL. Tested
+with Claude Code 2.1.296 and Codex CLI 0.162.1. Rebuild/restart the agent to use
+the new launcher option.
+
+Claude's authenticated Remote Control runner registers the session and launches
+the bridge through its process wrapper. The bridge drives
+[Codex app-server](https://learn.chatgpt.com/docs/app-server), sends replies to
+Claude's session transport, and preserves the Codex thread ID across resumes.
+Each pane has a separate runner directory under `$CLAUDE_DIR/cdash-codex/controls`
+so Claude cannot reuse another conversation's Remote Control link. Claude's
+remote directory label refers to that runner directory; Codex executes in the
+project directory you selected. Session metadata lives in
+`$CLAUDE_DIR/cdash-codex`, alongside an embedded bridge script materialized at
+launch; no npm install is needed.
+
+The Claude worker protocol is undocumented and can change. Text prompts,
+completed replies, interruption, and command/file approval requests are mapped.
+Images, Codex interactive questions, and MCP elicitation are currently unsupported
+and fail closed. Replies appear when each Codex message completes. A worker
+restart skips previously accepted remote events; if it crashed while dispatching
+a prompt, resend that prompt explicitly. Claude ingress credentials stay out of
+Codex's subprocess environment and are never written to the session snapshots.
+
+Recovered protocol findings and live checks: [CLAUDE_FINDINGS.md](CLAUDE_FINDINGS.md).
 
 ## Configuration
 

@@ -5,6 +5,30 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
+
+test('battery tile shows percentage and connection only with both readings', () => {
+  const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const render = src.slice(src.indexOf('function render(d) {'), src.indexOf("document.body.addEventListener('click'", src.indexOf('function render(d) {')));
+  const nodes = {};
+  const context = {
+    $: id => nodes[id] ||= {},
+    document: { activeElement: null },
+    esc: s => s, fmtKb: String, statTile: tile => JSON.stringify(tile),
+    runningCard: () => '', resumableCard: () => '',
+    resLimit: 20,
+  };
+  runInNewContext(`${render}; this.render = render;`, context);
+  const show = battery => {
+    context.render({ running: [], resumable: [], stats: { cpuPct: 1, ramUsedKb: 1, ramTotalKb: 2, disks: [], battery } });
+    return nodes['#stats'].innerHTML;
+  };
+  for (const battery of [undefined, null, {}, { pct: 50 }, { pct: null, plugged: true }, { pct: 101, plugged: true }])
+    assert.ok(!show(battery).includes('Battery'));
+  assert.match(show({ pct: 100, plugged: true }), /Battery.*100.*Plugged in/);
+  assert.match(show({ pct: 0, plugged: false }), /Battery.*0.*Unplugged/);
+  assert.ok(!show(undefined).includes('Battery'), 'tile disappears if a later poll loses readings');
+});
 
 test('app.js is wrapped so a second evaluation cannot throw', () => {
   // The page evaluated app.js twice on Android. Top-level `const`s are

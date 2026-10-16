@@ -9,7 +9,7 @@
 
 use crate::host::log::LogBuffer;
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,6 +24,7 @@ pub const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// billing ledger. The endpoint rate-limits hard — a request a minute drew a 429
 /// every few minutes, with no usable `Retry-After` — so ask rarely.
 pub const USAGE_TTL: Duration = Duration::from_secs(300);
+pub const CODEX_USAGE_TTL: Duration = USAGE_TTL;
 
 /// How long the last good reading is still shown once refreshes start failing.
 /// Past this the tiles go away: an expired token or a logout would otherwise
@@ -69,6 +70,8 @@ pub struct UsageLimit {
     pub pct: u32,
     #[serde(rename = "resetsAt")]
     pub resets_at: Option<String>,
+    #[serde(rename = "checkedAt", skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<String>,
 }
 
 fn cap(s: &str) -> String {
@@ -123,12 +126,60 @@ pub fn parse_usage(data: &serde_json::Value) -> Vec<UsageLimit> {
                 long,
                 pct: util.round().clamp(0.0, 100.0) as u32,
                 resets_at: v.get("resets_at").and_then(|r| r.as_str()).map(String::from),
+                checked_at: None,
             })
         })
         .collect();
 
     out.sort_by(|a, b| rank(&a.key).cmp(&rank(&b.key)).then_with(|| a.key.cmp(&b.key)));
     out
+}
+
+pub fn parse_codex_usage(data: &serde_json::Value) -> Vec<UsageLimit> {
+    let mut buckets: Vec<(&str, &serde_json::Value)> = data.get("rateLimitsByLimitId")
+        .and_then(|v| v.as_object())
+        .map(|b| b.iter().filter(|(_, v)| v.is_object()).map(|(id, v)| (id.as_str(), v)).collect())
+        .unwrap_or_default();
+    if buckets.is_empty() {
+        if let Some(bucket) = data.get("rateLimits").filter(|v| v.is_object()) {
+            buckets.push(("codex", bucket));
+        }
+    }
+    buckets.sort_by(|a, b| (a.0 != "codex", a.0).cmp(&(b.0 != "codex", b.0)));
+    let mut out = Vec::new();
+    for (id, bucket) in buckets {
+        let name = if id == "codex" { "Codex".into() } else {
+            format!("Codex {}", bucket.get("limitName").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or(id))
+        };
+        for slot in ["primary", "secondary"] {
+            let Some(window) = bucket.get(slot) else { continue };
+            let Some(pct) = window.get("usedPercent").and_then(|v| v.as_f64()) else { continue };
+            let minutes = window.get("windowDurationMins").and_then(|v| v.as_i64());
+            let period = match minutes {
+                Some(10080) => "Week".into(),
+                Some(1..=1440) => "Session".into(),
+                Some(n) => format!("{n}m"),
+                None => cap(slot),
+            };
+            let short = format!("{name} {period}");
+            let resets_at = window.get("resetsAt").and_then(|v| v.as_i64())
+                .and_then(|n| time::OffsetDateTime::from_unix_timestamp(n).ok())
+                .and_then(|t| t.format(&time::format_description::well_known::Rfc3339).ok());
+            out.push(UsageLimit {
+                key: format!("codex:{id}:{slot}"),
+                long: match minutes {
+                    Some(n) => format!("{short} usage ({n} minute window)"),
+                    None => format!("{short} usage"),
+                },
+                short, pct: pct.round().clamp(0.0, 100.0) as u32, resets_at, checked_at: None,
+            });
+        }
+    }
+    out
+}
+
+pub async fn fetch_codex_usage(ctx: &super::ctx::Ctx) -> Result<Vec<UsageLimit>, Miss> {
+    super::codex::query(ctx, "--usage").await.map(|v| parse_codex_usage(&v)).map_err(Miss::Request)
 }
 
 /// The subscription token, or `None` for API-key users / logged-out / expired
@@ -197,6 +248,7 @@ struct UsageState {
     data: Option<Vec<UsageLimit>>,
     /// Last successful refresh; `data` is only shown while this is recent.
     ok: Option<Instant>,
+    checked_at: Option<String>,
     /// Last attempt, success or not.
     fetched: Option<Instant>,
     /// Consecutive failed requests, capped at `MAX_BACKOFF`.
@@ -210,9 +262,9 @@ impl UsageState {
     /// Time for another lookup. `busy` is what keeps a slow fetch from being
     /// re-entered once per poll: without it a 5-second lookup and a 4-second
     /// poll stack refreshes.
-    fn due(&self, now: Instant) -> bool {
+    fn due(&self, now: Instant, ttl: Duration) -> bool {
         !self.busy
-            && self.fetched.is_none_or(|t| now.duration_since(t) > USAGE_TTL * 2u32.pow(self.fails))
+            && self.fetched.is_none_or(|t| now.duration_since(t) > ttl * 2u32.pow(self.fails))
     }
 
     fn shown(&self, now: Instant) -> Option<Vec<UsageLimit>> {
@@ -232,6 +284,7 @@ impl UsageState {
         match res {
             Ok(data) => {
                 (self.data, self.ok, self.fails, self.failing) = (Some(data), Some(now), 0, false);
+                self.checked_at = time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).ok();
                 None
             }
             Err(miss) => {
@@ -240,7 +293,7 @@ impl UsageState {
                     Miss::NoToken => 0,
                 };
                 (self.shown(now).is_none() && !std::mem::replace(&mut self.failing, true))
-                    .then(|| format!("claude usage unavailable: {miss}"))
+                    .then(|| format!("usage unavailable: {miss}"))
             }
         }
     }
@@ -261,28 +314,46 @@ impl UsageCache {
     /// Return what is cached, kicking off a refresh when it is due.
     /// Returns immediately either way.
     pub fn get(self: &Arc<Self>, claude_dir: &Path, log: &Arc<LogBuffer>) -> Option<Vec<UsageLimit>> {
-        let now = Instant::now();
-        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if st.due(now) {
-            st.busy = true;
-            self.clone().spawn_refresh(claude_dir.to_path_buf(), Arc::clone(log));
-        }
-        st.shown(now)
+        let claude_dir = claude_dir.to_path_buf();
+        self.get_with("claude", Arc::clone(log), async move { fetch_usage(&claude_dir).await })
     }
 
-    fn spawn_refresh(self: Arc<Self>, claude_dir: PathBuf, log: Arc<LogBuffer>) {
-        tokio::spawn(async move {
-            // FETCH_TIMEOUT bounds the request, not the credentials read before
-            // it; a stalled mount would otherwise leave `busy` set for good.
-            let res = tokio::time::timeout(FETCH_TIMEOUT * 2, fetch_usage(&claude_dir))
-                .await
-                .unwrap_or_else(|_| Err(Miss::Request("timed out".to_string())));
-            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(line) = st.record(res, Instant::now()) {
-                log.push(line);
-            }
-        });
+    pub fn get_codex(self: &Arc<Self>, ctx: &Arc<super::ctx::Ctx>) -> Option<Vec<UsageLimit>> {
+        let log = Arc::clone(&ctx.host.log);
+        let ctx = Arc::clone(ctx);
+        self.get_with("codex", log, async move { fetch_codex_usage(&ctx).await })
     }
+
+    fn get_with(
+        self: &Arc<Self>, provider: &'static str, log: Arc<LogBuffer>,
+        fetch: impl std::future::Future<Output = Result<Vec<UsageLimit>, Miss>> + Send + 'static,
+    ) -> Option<Vec<UsageLimit>> {
+        let now = Instant::now();
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let codex = provider == "codex";
+        let ttl = if codex { CODEX_USAGE_TTL } else { USAGE_TTL };
+        if st.due(now, ttl) {
+            st.busy = true;
+            let cache = Arc::clone(self);
+            tokio::spawn(async move {
+                let timeout = if codex { Duration::from_secs(18) } else { FETCH_TIMEOUT * 2 };
+                let res = tokio::time::timeout(timeout, fetch).await
+                    .unwrap_or_else(|_| Err(Miss::Request("timed out".to_string())));
+                let mut st = cache.state.lock().unwrap_or_else(|e| e.into_inner());
+                // A quota reset can invalidate the previous reading at any time.
+                if codex && res.is_err() { (st.data, st.ok, st.checked_at) = (None, None, None); }
+                if let Some(line) = st.record(res, Instant::now()) { log.push(format!("{provider} {line}")); }
+            });
+        }
+        let mut shown = st.shown(now);
+        if codex {
+            if let Some(tiles) = shown.as_mut() {
+                for tile in tiles { tile.checked_at.clone_from(&st.checked_at); }
+            }
+        }
+        shown
+    }
+
 }
 
 impl Default for UsageCache {
@@ -295,6 +366,7 @@ impl Default for UsageCache {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::path::PathBuf;
 
     fn keys(v: &[UsageLimit]) -> Vec<&str> {
         v.iter().map(|u| u.key.as_str()).collect()
@@ -315,6 +387,7 @@ mod tests {
                     long: "Current session".into(),
                     pct: 66,
                     resets_at: Some("2026-07-27T10:59:00Z".into()),
+                    checked_at: None,
                 },
                 UsageLimit {
                     key: "seven_day".into(),
@@ -322,6 +395,7 @@ mod tests {
                     long: "Current week (all models)".into(),
                     pct: 77,
                     resets_at: Some("2026-07-29T04:59:00Z".into()),
+                    checked_at: None,
                 },
             ]
         );
@@ -466,17 +540,17 @@ mod tests {
         let t0 = Instant::now();
         let s = Duration::from_secs(1);
         let mut st = UsageState::default();
-        assert!(st.due(t0), "the first poll looks it up");
+        assert!(st.due(t0, USAGE_TTL), "the first poll looks it up");
 
         for (n, wait) in [(1u32, 2), (2, 4), (3, 4), (4, 4)] {
             st.record(req_err(), t0);
-            assert!(!st.due(t0 + USAGE_TTL * wait), "after {n} failures wait over {wait}x TTL");
-            assert!(st.due(t0 + USAGE_TTL * wait + s), "after {n} failures due past {wait}x TTL");
+            assert!(!st.due(t0 + USAGE_TTL * wait, USAGE_TTL), "after {n} failures wait over {wait}x TTL");
+            assert!(st.due(t0 + USAGE_TTL * wait + s, USAGE_TTL), "after {n} failures due past {wait}x TTL");
         }
 
         st.record(Ok(reading(1)), t0);
-        assert!(!st.due(t0 + USAGE_TTL));
-        assert!(st.due(t0 + USAGE_TTL + s), "a success is back on the plain TTL");
+        assert!(!st.due(t0 + USAGE_TTL, USAGE_TTL));
+        assert!(st.due(t0 + USAGE_TTL + s, USAGE_TTL), "a success is back on the plain TTL");
     }
 
     #[test]
@@ -488,14 +562,14 @@ mod tests {
         for _ in 0..6 {
             st.record(Err(Miss::NoToken), t0);
         }
-        assert!(st.due(t0 + USAGE_TTL + Duration::from_secs(1)));
+        assert!(st.due(t0 + USAGE_TTL + Duration::from_secs(1), USAGE_TTL));
     }
 
     #[test]
     fn an_in_flight_lookup_is_never_doubled() {
         let t0 = Instant::now();
         let st = UsageState { busy: true, ..Default::default() };
-        assert!(!st.due(t0 + USAGE_TTL * 100));
+        assert!(!st.due(t0 + USAGE_TTL * 100, USAGE_TTL));
     }
 
     #[test]
@@ -503,7 +577,7 @@ mod tests {
         let t0 = Instant::now();
         let mut st = UsageState::default();
         // Nothing was ever shown, so the first failure is news — once.
-        assert_eq!(st.record(req_err(), t0).as_deref(), Some("claude usage unavailable: http 429"));
+        assert_eq!(st.record(req_err(), t0).as_deref(), Some("usage unavailable: http 429"));
         assert_eq!(st.record(req_err(), t0), None, "same outage, no second line");
         assert_eq!(st.record(Ok(reading(1)), t0), None);
 
@@ -544,5 +618,82 @@ mod tests {
             assert_eq!(base_url_from(Some(bad)), real, "{bad:?}");
         }
         assert_eq!(base_url_from(None), real);
+    }
+
+    #[test]
+    fn codex_limits_map_session_week_and_reset_times_without_duplicate_buckets() {
+        let window = |pct, minutes| json!({"usedPercent":pct,"windowDurationMins":minutes,"resetsAt":1730947200});
+        let out = parse_codex_usage(&json!({
+            "rateLimits": {"primary":window(99.0,300)},
+            "rateLimitsByLimitId": {
+                "codex": {"primary":window(25.4,300),"secondary":window(40.0,10080)},
+                "other": {"limitName":"Extra","primary":window(120.0,60),"secondary":null}
+            }
+        }));
+        assert_eq!(out.iter().map(|u| u.short.as_str()).collect::<Vec<_>>(),
+            ["Codex Session", "Codex Week", "Codex Extra Session"]);
+        assert_eq!(out.iter().map(|u| u.pct).collect::<Vec<_>>(), [25,40,100]);
+        assert_eq!(out[0].resets_at.as_deref(), Some("2024-11-07T02:40:00Z"));
+        let fallback = parse_codex_usage(&json!({"rateLimits":{"primary":window(3.0,10080),"secondary":window(5.0,300)}}));
+        assert_eq!(fallback[0].short, "Codex Week", "label by duration, not primary/secondary slot");
+        assert_eq!(fallback[1].short, "Codex Session");
+    }
+
+    #[test]
+    fn codex_limits_ignore_missing_malformed_and_unknown_duration_fields() {
+        for data in [serde_json::Value::Null, json!([]), json!({}), json!({"rateLimits":{"primary":{"usedPercent":"30"}}})] {
+            assert!(parse_codex_usage(&data).is_empty());
+        }
+        let out = parse_codex_usage(&json!({"rateLimits":{
+            "primary":{"usedPercent":-1,"windowDurationMins":null,"resetsAt":null},
+            "secondary":{"usedPercent":7,"windowDurationMins":20000,"resetsAt":"bad"}
+        }}));
+        assert_eq!(out[0].short, "Codex Primary");
+        assert_eq!(out[0].pct, 0);
+        assert_eq!(out[0].resets_at, None);
+        assert_eq!(out[1].short, "Codex 20000m");
+    }
+
+    #[test]
+    fn an_unavailable_optional_source_clears_cached_tiles_without_an_outage() {
+        let now = Instant::now();
+        let mut st = UsageState::default();
+        st.record(Ok(reading(40)), now);
+        assert_eq!(st.record(Ok(Vec::new()), now + USAGE_TTL), None);
+        assert_eq!(st.shown(now + USAGE_TTL), Some(Vec::new()));
+        assert_eq!(st.fails, 0);
+    }
+
+    #[tokio::test]
+    async fn codex_refresh_failure_discards_old_quotas_and_a_reset_recovers_with_a_timestamp() {
+        async fn finished(cache: &UsageCache) {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let busy = cache.state.lock().unwrap().busy;
+                    if !busy { break; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.unwrap();
+        }
+        let cache = Arc::new(UsageCache::new());
+        let log = Arc::new(LogBuffer::new());
+        let now = Instant::now();
+        {
+            let mut st = cache.state.lock().unwrap();
+            st.record(Ok(reading(87)), now);
+            assert!(st.due(now + CODEX_USAGE_TTL + Duration::from_secs(1), CODEX_USAGE_TTL));
+            assert!(!st.due(now + CODEX_USAGE_TTL, CODEX_USAGE_TTL));
+            assert_eq!(CODEX_USAGE_TTL, USAGE_TTL);
+            st.fetched = None;
+        }
+        cache.get_with("codex", log.clone(), async { Err(Miss::Request("timeout".into())) });
+        finished(&cache).await;
+        assert_eq!(cache.state.lock().unwrap().shown(Instant::now()), None, "old quotas must disappear after a failed refresh");
+        cache.state.lock().unwrap().fetched = None;
+        cache.get_with("codex", log.clone(), async { Ok(reading(0)) });
+        finished(&cache).await;
+        let data = cache.get_with("codex", log, async { panic!("cached reading must not refetch") }).unwrap();
+        assert_eq!(data[0].pct, 0);
+        assert!(data[0].checked_at.as_ref().is_some_and(|s| s.contains('T')));
     }
 }

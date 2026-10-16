@@ -2,7 +2,7 @@ use super::ctx::{Ctx, Meta};
 use super::fsio::{read_if, write_atomic};
 use super::lookup::rc_link_for;
 use super::validate::{
-    assert_effort, assert_kill_name, assert_model, assert_valid_sid, BadRequest, Refused,
+    assert_effort, assert_kill_name, assert_model, assert_valid_sid, is_codex_model, BadRequest, Refused,
 };
 use crate::parse::history::group_history;
 use std::path::{Path, PathBuf};
@@ -12,11 +12,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// 60 × 500 ms = the 30 s budget from `lib/collect.js:143`.
 pub const RC_POLL_ATTEMPTS: u32 = 60;
 pub const RC_POLL_INTERVAL: Duration = Duration::from_millis(500);
+// ponytail: serialize settings writes; per-file locks if launch throughput matters.
+static TRUST_WRITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Mark a directory trusted in `~/.claude.json` so `claude` does not open on a
 /// trust prompt no one is sitting in front of. Read-modify-write: every other
 /// key in the file is preserved, and the write is atomic.
 pub async fn trust_dir(claude_json: &Path, dir: &str) -> std::io::Result<()> {
+    let _write = TRUST_WRITE.lock().await;
     let mut cfg: serde_json::Value = read_if(claude_json)
         .await
         .and_then(|t| serde_json::from_str(&t).ok())
@@ -129,6 +132,13 @@ async fn spawn_claude(
         ctx.host.log.push(format!("trust write failed for {dir}: {e}"));
     }
     let name = tmux_name(dir);
+    let sid = claude_args
+        .windows(2)
+        .find(|pair| pair[0] == "--resume")
+        .map(|pair| pair[1].to_string())
+        .map(Ok)
+        .unwrap_or_else(super::names::new_sid)?;
+    let display_name = super::names::session_name("Claude", dir, &sid);
 
     // Per dashboard child only; the user's settings file stays untouched.
     // The explicit Remote Control request must win over the user-level
@@ -146,7 +156,12 @@ async fn spawn_claude(
         r#"{"tui":"fullscreen","env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":""}}"#,
     ];
     args.extend_from_slice(claude_args);
-    args.extend_from_slice(&["--dangerously-skip-permissions", "--remote-control", &name]);
+    if !claude_args.contains(&"--resume") {
+        args.extend_from_slice(&["--session-id", &sid]);
+    }
+    args.extend_from_slice(&[
+        "--dangerously-skip-permissions", "--remote-control", &display_name,
+    ]);
     // Checked: without this a failed `tmux new-session` still answered 200
     // with a session name, and left a meta entry for a session that does not
     // exist. The pid lookup below stays best-effort — losing it costs the
@@ -191,6 +206,12 @@ pub async fn launch_session(
     model: &str,
     effort: &str,
 ) -> Result<String, Refused> {
+    if model == "codex" {
+        return super::codex::launch(ctx, dir, None, effort, None).await;
+    }
+    if let Some(model) = model.strip_prefix("codex:") {
+        return super::codex::launch(ctx, dir, Some(model), effort, None).await;
+    }
     assert_model(model)?;
     assert_effort(effort)?;
     // A6: the directory must exist and be a directory before it reaches `-c`.
@@ -207,8 +228,28 @@ pub async fn launch_session(
     .await
 }
 
-pub async fn resume_session(ctx: &Arc<Ctx>, sid: &str) -> Result<String, Refused> {
+/// `model`/`effort` override what the session last used; `None` keeps it. A
+/// model from the other provider is refused: a Claude transcript and a Codex
+/// thread cannot resume each other.
+pub async fn resume_session(
+    ctx: &Arc<Ctx>,
+    sid: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<String, Refused> {
     assert_valid_sid(sid)?;
+    if let Some(name) = super::codex::resume(ctx, sid, model, effort).await? {
+        return Ok(name);
+    }
+    if let Some(m) = model {
+        if is_codex_model(m) {
+            return Err(Refused::BadRequest(format!("not a Claude session: cannot resume with {m}")));
+        }
+        assert_model(m)?;
+    }
+    if let Some(e) = effort {
+        assert_effort(e)?;
+    }
     let hist = read_if(&ctx.claude_dir.join("history.jsonl")).await.unwrap_or_default();
     let cwd = group_history(&hist)
         .into_iter()
@@ -221,7 +262,15 @@ pub async fn resume_session(ctx: &Arc<Ctx>, sid: &str) -> Result<String, Refused
     // straight back out of the resumable list it came from.
     ctx.purged.lock().unwrap_or_else(|e| e.into_inner()).remove(sid);
 
-    spawn_claude(ctx, &cwd, &["--resume", sid], Meta::default()).await
+    let mut args = vec!["--resume", sid];
+    if let Some(m) = model {
+        args.extend(["--model", m]);
+    }
+    if let Some(e) = effort {
+        args.extend(["--effort", e]);
+    }
+    let meta = Meta { model: model.map(Into::into), effort: effort.map(Into::into), rc_link: None };
+    spawn_claude(ctx, &cwd, &args, meta).await
 }
 
 /// Kill a session this dashboard owns. The name is guarded first — it becomes
@@ -453,16 +502,16 @@ mod tests {
     async fn resume_rejects_a_bad_sid_before_touching_the_shell() {
         let d = tempdir("resume-guard");
         let ctx = ctx_for(d).await;
-        assert!(resume_session(&ctx, "not-a-uuid; rm -rf /").await.is_err());
-        assert!(resume_session(&ctx, "").await.is_err());
+        assert!(resume_session(&ctx, "not-a-uuid; rm -rf /", None, None).await.is_err());
+        assert!(resume_session(&ctx, "", None, None).await.is_err());
     }
 
     #[tokio::test]
     async fn resume_rejects_a_sid_that_history_does_not_know() {
         let d = tempdir("resume-unknown");
-        let ctx = ctx_for(d.clone()).await;
+        let ctx = ctx_with_tmux(d.clone(), 0).await; // PATH without codex: never reads this machine's ~/.codex
         tokio::fs::write(d.join("history.jsonl"), "").await.unwrap();
-        let e = resume_session(&ctx, "2f8a1c94-3b7e-4d51-9a02-6c5f8e1b7d34").await.unwrap_err();
+        let e = resume_session(&ctx, "2f8a1c94-3b7e-4d51-9a02-6c5f8e1b7d34", None, None).await.unwrap_err();
         // An unknown sid is the caller's input, not our subprocess: 400, not 500.
         assert!(matches!(&e, Refused::BadRequest(m) if m.contains("unknown session")), "got {e:?}");
     }
@@ -487,11 +536,64 @@ mod tests {
         purge_session(&ctx, sid).unwrap();
         assert!(ctx.purged.lock().unwrap().contains(sid));
 
-        resume_session(&ctx, sid).await.unwrap();
+        resume_session(&ctx, sid, None, None).await.unwrap();
+        let args = std::fs::read_to_string(d.join("tmux-args")).unwrap();
+        assert!(args.lines().next().unwrap().ends_with(
+            &format!("--remote-control {}", super::super::names::session_name("Claude", "/tmp", sid))
+        ));
+        assert!(!args.contains("--session-id"), "resume keeps the existing session ID");
         assert!(
             !ctx.purged.lock().unwrap().contains(sid),
             "a resumed session must stop being hidden"
         );
+    }
+
+    const SID: &str = "2f8a1c94-3b7e-4d51-9a02-6c5f8e1b7d34";
+
+    async fn ctx_with_history(tag: &str) -> (PathBuf, Arc<Ctx>) {
+        let d = tempdir(tag);
+        let ctx = ctx_with_tmux(d.clone(), 0).await;
+        tokio::fs::write(
+            d.join("history.jsonl"),
+            format!("{{\"sessionId\":\"{SID}\",\"project\":\"/tmp\",\"timestamp\":1,\"display\":\"x\"}}\n"),
+        )
+        .await
+        .unwrap();
+        (d, ctx)
+    }
+
+    #[tokio::test]
+    async fn resume_passes_the_chosen_model_and_effort_to_claude() {
+        let (d, ctx) = ctx_with_history("resume-pick").await;
+        let name = resume_session(&ctx, SID, Some("opus"), Some("high")).await.unwrap();
+        let args = std::fs::read_to_string(d.join("tmux-args")).unwrap();
+        assert!(args.contains(&format!("--resume {SID} --model opus --effort high")), "{args}");
+        let m = ctx.meta_get(&name).unwrap();
+        assert_eq!((m.model.as_deref(), m.effort.as_deref()), (Some("opus"), Some("high")));
+    }
+
+    #[tokio::test]
+    async fn resume_without_a_choice_adds_no_model_flags() {
+        let (d, ctx) = ctx_with_history("resume-plain").await;
+        resume_session(&ctx, SID, None, None).await.unwrap();
+        let args = std::fs::read_to_string(d.join("tmux-args")).unwrap();
+        assert!(args.contains(&format!("--resume {SID} --dangerously-skip-permissions")), "{args}");
+        assert!(!args.contains("--model") && !args.contains("--effort"), "{args}");
+    }
+
+    #[tokio::test]
+    async fn resume_rejects_a_bad_or_foreign_model_or_effort_before_spawning() {
+        let (d, ctx) = ctx_with_history("resume-bad-pick").await;
+        for (model, effort) in [
+            (Some("gpt-4"), None),
+            (Some("opus"), Some("ludicrous")),
+            (Some("codex:gpt-5"), None),
+            (Some("codex"), None),
+        ] {
+            let e = resume_session(&ctx, SID, model, effort).await.unwrap_err();
+            assert!(matches!(e, Refused::BadRequest(_)), "{model:?} {effort:?}: {e:?}");
+        }
+        assert!(!d.join("tmux-args").exists(), "a rejected pick must not reach tmux");
     }
 
     #[tokio::test]
@@ -550,13 +652,16 @@ mod tests {
         launch_session(&ctx, d.to_str().unwrap(), "sonnet", "medium").await.unwrap();
 
         let args = std::fs::read_to_string(d.join("tmux-args")).unwrap();
-        let first = args.lines().next().unwrap();
+        let launch = args.lines().next().unwrap();
+        let sid = launch.split("--session-id ").nth(1).unwrap().split_whitespace().next().unwrap();
+        assert_valid_sid(sid).unwrap();
+        assert!(launch.ends_with(&format!("--remote-control {}",
+            super::super::names::session_name("Claude", d.to_str().unwrap(), sid))));
         assert!(
-            first.contains(
+            launch.contains(
                 r#"--settings {"tui":"fullscreen","env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":""}}"#
             ),
-            "dashboard launches keep Remote Control enabled and start in the \
-             fullscreen renderer, so PgUp/PgDn scroll from the phone: {args}"
+            "dashboard launches keep Remote Control enabled and start in the fullscreen renderer: {args}"
         );
     }
 

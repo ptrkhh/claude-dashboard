@@ -16,12 +16,16 @@ use std::sync::Arc;
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Session {
     pub name: String,
+    #[serde(rename = "displayName", skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     pub dir: String,
     pub pid: i32,
     #[serde(rename = "uptimeSec")]
     pub uptime_sec: i64,
     pub model: Option<String>,
     pub effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     #[serde(rename = "rcLink")]
     pub rc_link: Option<String>,
     pub git: Option<GitStatus>,
@@ -115,6 +119,7 @@ pub async fn external_sessions(
             Arc::clone(&ctx.git).status_for(Arc::clone(&ctx.runner), &cwd, now_ms as u64);
 
         out.push(Session {
+            display_name: None,
             name: sess
                 .name
                 .filter(|n| !n.is_empty())
@@ -127,6 +132,7 @@ pub async fn external_sessions(
                 .unwrap_or(0),
             model: None,
             effort: None,
+            provider: None,
             rc_link: sess
                 .bridge_session_id
                 .map(|id| format!("https://claude.ai/code/{id}")),

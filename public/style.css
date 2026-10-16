@@ -350,6 +350,16 @@ button, input, select { font: inherit; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
 }
 
+/* Resume pickers reuse the launcher's .cb-select dropdown, sized down for a card. */
+.pick { display: flex; gap: 8px; margin-top: 12px; }
+.pick .cb-select { flex: 1 1 0; min-width: 0; }
+.pick .cb-trigger { padding: 9px 11px; font-size: 13px; }
+.pick .cb-lead { flex: none; }
+.pick .cb-current { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* A hovered card is transformed (its own stacking context); lift the one with an
+   open menu so the menu is not painted under the card below it. */
+.session:has(.cb-menu:not([hidden])) { z-index: 20; }
+
 /* Actions */
 .actions { display: flex; gap: 8px; margin-top: 14px; align-items: stretch; }
 .action {

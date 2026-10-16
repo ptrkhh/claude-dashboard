@@ -9,11 +9,14 @@
 if (window.__cdashBooted) return;
 window.__cdashBooted = true;
 const $ = s => document.querySelector(s);
-const MODELS = ['sonnet', 'opus', 'haiku', 'fable'];
+const MODELS = ['sonnet', 'opus', 'haiku', 'fable'].map(value => ({ value, label: `Claude ${value.charAt(0).toUpperCase() + value.slice(1)}` }));
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 let armedKill = null; // ponytail: survives render() replacing #running.innerHTML
+const picks = {}; // explicit model/effort choices on resumable cards by sid, kept across the poll's re-render
 let resLimit = 20; // resumable entries asked for; "Show more" raises it, and it matches the server's first page
 const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+const esc = s => (s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const effortLabel = value => value === 'xhigh' ? 'xHigh' : cap(value);
 
 /* ---------- Inline icons (stroke = currentColor, sized via CSS) ---------- */
 const svg = body => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
@@ -85,19 +88,23 @@ applyMode(themeMode());
 /* ---------- Launcher controls ----------
    Custom dropdown: a native <select> can't be themed and double-glowed inside
    its wrapper. Fully keyboard-accessible; closes on outside click / Escape. */
-function buildDropdown(el, label, items, initial) {
+const optionsHtml = (entries, value) => entries.map(i =>
+  `<li role="option" data-value="${esc(i.value)}" class="${i.value === value ? 'on' : ''}" aria-selected="${i.value === value}">${esc(i.label)}</li>`).join('');
+function buildDropdown(el, label, items, initial, onChange = () => {}) {
   let value = initial;
+  const choices = items => items.map(i => typeof i === 'string' ? { value: i, label: cap(i) } : i);
+  let entries = choices(items);
+  const text = () => entries.find(i => i.value === value)?.label || value;
   el.innerHTML = `
     <div class="cb-trigger" role="button" tabindex="0" aria-haspopup="listbox" aria-expanded="false" aria-label="${label}">
-      <span class="cb-lead">${label}</span><span class="cb-current">${cap(value)}</span><span class="cb-caret">▾</span>
+      <span class="cb-lead">${label}</span><span class="cb-current">${esc(text())}</span><span class="cb-caret">▾</span>
     </div>
     <ul class="cb-menu" role="listbox" hidden>
-      ${items.map(i => `<li role="option" data-value="${i}" class="${i === value ? 'on' : ''}" aria-selected="${i === value}">${cap(i)}</li>`).join('')}
     </ul>`;
   const trigger = el.querySelector('.cb-trigger');
   const menu = el.querySelector('.cb-menu');
   const current = el.querySelector('.cb-current');
-  const opts = [...menu.querySelectorAll('li')];
+  let opts = [];
   let active = -1;
   const isOpen = () => !menu.hidden;
   const setActive = i => { active = i; opts.forEach((o, idx) => o.classList.toggle('active', idx === i)); if (opts[i]) opts[i].scrollIntoView({ block: 'nearest' }); };
@@ -108,9 +115,10 @@ function buildDropdown(el, label, items, initial) {
   };
   const close = () => { menu.hidden = true; trigger.setAttribute('aria-expanded', 'false'); setActive(-1); };
   const pick = li => {
-    value = li.dataset.value; current.textContent = cap(value);
+    value = li.dataset.value; current.textContent = text();
     opts.forEach(o => { const on = o === li; o.classList.toggle('on', on); o.setAttribute('aria-selected', on); });
     close(); trigger.focus();
+    onChange(value);
   };
   trigger.addEventListener('click', e => { e.stopPropagation(); isOpen() ? close() : open(); });
   menu.addEventListener('click', e => { const li = e.target.closest('[data-value]'); if (li) pick(li); });
@@ -121,10 +129,46 @@ function buildDropdown(el, label, items, initial) {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!isOpen()) open(); else if (opts[active]) pick(opts[active]); }
   });
   document.addEventListener('click', e => { if (isOpen() && !el.contains(e.target)) close(); });
-  return { get value() { return value; } };
+  const setItems = (items, fallback) => {
+    entries = choices(items);
+    if (!entries.some(i => i.value === value)) value = fallback || entries[0]?.value || '';
+    current.textContent = text();
+    menu.innerHTML = optionsHtml(entries, value);
+    opts = [...menu.querySelectorAll('li')];
+    close();
+  };
+  setItems(items, initial);
+  return { get value() { return value; }, setItems };
 }
-const modelDD = buildDropdown($('#model'), 'Model', MODELS, 'sonnet');
-const effortDD = buildDropdown($('#effort'), 'Effort', EFFORTS, 'medium');
+let modelChoices = MODELS;
+const modelDD = buildDropdown($('#model'), 'Model', MODELS, 'sonnet', updateEfforts);
+const effortDD = buildDropdown($('#effort'), 'Effort', EFFORTS.map(value => ({ value, label: effortLabel(value) })), 'medium');
+function updateEfforts() {
+  const model = modelChoices.find(m => m.value === modelDD.value);
+  effortDD.setItems((model?.efforts || EFFORTS).map(value => ({ value, label: effortLabel(value) })), model?.defaultEffort || 'medium');
+}
+let modelsAt = 0, modelsLoading = false;
+async function refreshModels(g) {
+  if (modelsLoading || Date.now() - modelsAt < 60_000) return;
+  modelsLoading = true;
+  try {
+    const models = await api('/api/models');
+    if (g !== gen) return;
+    modelChoices = [...MODELS, ...models];
+    modelDD.setItems(modelChoices, 'sonnet');
+    updateEfforts();
+  } catch (err) {
+    if (g === gen) {
+      modelChoices = MODELS;
+      modelDD.setItems(modelChoices, 'sonnet');
+      updateEfforts();
+      toast(`Model discovery failed: ${err.message}`);
+    }
+  } finally {
+    if (g === gen) modelsAt = Date.now();
+    modelsLoading = false;
+  }
+}
 
 function toast(msg) {
   const t = $('#toast');
@@ -175,7 +219,6 @@ async function api(path, body) {
   return data;
 }
 
-const esc = s => (s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const fmtUp = s => s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m` : s >= 60 ? `${Math.floor(s / 60)}m` : `${s}s`;
 const fmtKb = k => k >= 1048576 ? `${(k / 1048576).toFixed(1)}G` : `${Math.round(k / 1024)}M`;
 const fmtReset = iso => { const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); };
@@ -201,7 +244,7 @@ function statTile({ label, value, pct, sub, title }) {
 
 function runningCard(r) {
   const status = r.working ? 'working' : 'idle';
-  const chips = [r.model, r.effort].filter(Boolean);
+  const chips = [r.model, r.effort && effortLabel(r.effort)].filter(Boolean);
   const chipHtml = chips.length
     ? chips.map(x => `<span class="chip">${esc(x)}</span>`).join('')
     : `<span class="chip">${r.external ? 'external' : 'resumed'}</span>`;
@@ -220,7 +263,7 @@ function runningCard(r) {
     <div class="session ${status} ${r.external ? 'external' : ''}">
       <div class="session-head">
         <div class="session-headline">
-          <span class="session-title">${esc(r.dir.split('/').pop())}</span>
+          <span class="session-title">${esc(r.displayName || r.dir.split('/').pop())}</span>
           ${gitBadge(r.git)}
         </div>
         <span class="status ${r.working ? 'on' : 'off'}"><span class="dot"></span>${r.working ? 'Working' : 'Waiting'}</span>
@@ -234,23 +277,65 @@ function runningCard(r) {
     </div>`;
 }
 
+let lastRes = [];
+// A session resumes only with its own provider's models: a Claude transcript and
+// a Codex thread cannot stand in for each other. Everything shown is concrete
+// (the model and effort the session last ran with); there is no "default" entry.
+function pickState(s) {
+  const codex = s.modelId?.startsWith('codex');
+  const base = codex ? modelChoices.filter(m => m.value.startsWith('codex:')) : MODELS;
+  // The session's own model stays selectable even if the catalog no longer lists it.
+  const models = !s.modelId || base.some(m => m.value === s.modelId)
+    ? base : [{ value: s.modelId, label: s.model || s.modelId }, ...base];
+  const p = picks[s.sid] || {};
+  const model = p.model ?? s.modelId ?? models[0]?.value ?? '';
+  const current = models.find(m => m.value === model);
+  const efforts = current?.efforts || EFFORTS;
+  const wanted = p.effort ?? s.effort;
+  const effort = efforts.includes(wanted) ? wanted
+    : current?.defaultEffort || (efforts.includes('medium') ? 'medium' : efforts[0]);
+  return { models, model, efforts, effort };
+}
+const pickDropdown = (s, kind, label, items, value) => `
+  <div class="cb-select pick-dd" data-sid="${esc(s.sid)}" data-pick="${kind}">
+    <div class="cb-trigger" role="button" tabindex="0" aria-haspopup="listbox" aria-expanded="false" aria-label="${label}">
+      <span class="cb-lead">${label}</span><span class="cb-current">${esc(items.find(i => i.value === value)?.label ?? value)}</span><span class="cb-caret">▾</span>
+    </div>
+    <ul class="cb-menu" role="listbox" hidden>${optionsHtml(items, value)}</ul>
+  </div>`;
+function pickHtml(s) {
+  const { models, model, efforts, effort } = pickState(s);
+  return `<div class="pick">
+      ${pickDropdown(s, 'model', 'Model', models, model)}
+      ${pickDropdown(s, 'effort', 'Effort', efforts.map(value => ({ value, label: effortLabel(value) })), effort)}
+    </div>`;
+}
+
 function resumableCard(s) {
   return `
     <div class="session resumable">
       <div class="session-head">
         <div class="session-headline">
-          <span class="session-title">${esc(s.dir?.split('/').pop() || '?')}</span>
+          <span class="session-title">${esc(s.displayName || s.dir?.split('/').pop() || '?')}</span>
           ${gitBadge({ branch: s.branch })}
         </div>
         <span class="time">${fmtTs(s.ts)}</span>
       </div>
       <div class="desc">${esc(s.title)}</div>
+      ${s.model ? `<div class="session-meta"><span class="chip">${esc(s.model)}</span>${s.effort ? `<span class="chip">${esc(effortLabel(s.effort))}</span>` : ''}</div>` : ''}
       <div class="prompts">↳ ${esc(s.prompts.join(' · '))}</div>
+      ${pickHtml(s)}
       <div class="actions">
         <button class="action" type="button" data-resume="${esc(s.sid)}">${ICONS.refresh}<span>Resume</span></button>
         <button class="action ghost" type="button" data-purge="${esc(s.sid)}" aria-label="Purge from list">${ICONS.trash}</button>
       </div>
     </div>`;
+}
+
+function renderResumable() {
+  // A full page means there may be more; a short one is the whole list (or the server's ceiling).
+  const more = lastRes.length >= resLimit ? '<button class="action more" type="button" data-more>Show more…</button>' : '';
+  $('#resumable').innerHTML = (lastRes.map(resumableCard).join('') || '<div class="empty">No resumable sessions</div>') + more;
 }
 
 function render(d) {
@@ -262,8 +347,15 @@ function render(d) {
     { label: 'CPU', value: `${st.cpuPct}<span class="unit">%</span>`, pct: st.cpuPct },
     { label: 'RAM', value: `${fmtKb(st.ramUsedKb)}<span class="unit"> / ${fmtKb(st.ramTotalKb)}</span>`, pct: st.ramTotalKb ? Math.round(st.ramUsedKb / st.ramTotalKb * 100) : null },
     ...st.disks.map(x => ({ label: esc(x.mount), value: `${fmtKb(x.freeKb)}<span class="unit"> free</span>`, pct: x.totalKb ? Math.round((x.totalKb - x.freeKb) / x.totalKb * 100) : null })),
+    ...(Number.isFinite(st.battery?.pct) && st.battery.pct >= 0 && st.battery.pct <= 100 && typeof st.battery.plugged === 'boolean' ? [{
+      label: 'Battery', value: `${st.battery.pct}<span class="unit">%</span>`,
+      sub: st.battery.plugged ? 'Plugged in' : 'Unplugged',
+    }] : []),
     // Absent for API-key users and until the first background refresh lands.
-    ...(st.claudeUsage || []).map(u => ({
+    ...[
+      ...(st.claudeUsage || []).map(u => ({ ...u, short: `Claude ${u.short}`, long: `Claude: ${u.long}` })),
+      ...(st.codexUsage || []),
+    ].map(u => ({
       label: esc(u.short),
       value: `${u.pct}<span class="unit">% used</span>`,
       pct: u.pct,
@@ -274,9 +366,9 @@ function render(d) {
   $('#stats').innerHTML = tiles.map(statTile).join('');
 
   $('#running').innerHTML = d.running.map(runningCard).join('') || '<div class="empty">No running sessions</div>';
-  // A full page means there may be more; a short one is the whole list (or the server's ceiling).
-  const more = d.resumable.length >= resLimit ? '<button class="action more" type="button" data-more>Show more…</button>' : '';
-  $('#resumable').innerHTML = (d.resumable.map(resumableCard).join('') || '<div class="empty">No resumable sessions</div>') + more;
+  lastRes = d.resumable;
+  // Same rule for the pickers: re-rendering would snap an open menu shut.
+  if (!document.activeElement?.closest('.pick-dd') && !$('#resumable .cb-menu:not([hidden])')) renderResumable();
 
   const dirs = [...new Set(d.resumable.map(s => s.dir).filter(Boolean))];
   $('#dirs').innerHTML = dirs.map(x => `<option value="${esc(x)}">`).join('');
@@ -297,11 +389,62 @@ document.body.addEventListener('click', async e => {
       }
     } else if (el.dataset.resume) {
       el.disabled = true;
-      try { await api('/api/resume', { sid: el.dataset.resume }); poll(); } finally { el.disabled = false; }
+      const { model, effort } = pickState(lastRes.find(s => s.sid === el.dataset.resume) || { sid: el.dataset.resume });
+      try { await api('/api/resume', { sid: el.dataset.resume, model, effort }); delete picks[el.dataset.resume]; poll(); }
+      finally { el.disabled = false; }
     } else if (el.dataset.purge) {
       await api('/api/purge', { sid: el.dataset.purge }); poll();
     }
   } catch (err) { toast(err.message); poll(); } // re-arm even when the action failed
+});
+
+// Resume-card dropdowns: the launcher's look and keys, but delegated, because
+// render() replaces the cards every poll and per-card listeners would pile up.
+const ddMenu = dd => dd.querySelector('.cb-menu');
+const ddTrigger = dd => dd.querySelector('.cb-trigger');
+function ddClose(dd) {
+  ddMenu(dd).hidden = true; ddTrigger(dd).setAttribute('aria-expanded', 'false');
+  ddMenu(dd).querySelectorAll('.active').forEach(li => li.classList.remove('active'));
+}
+function ddActive(dd, li) {
+  ddMenu(dd).querySelectorAll('.active').forEach(o => o.classList.remove('active'));
+  if (li) { li.classList.add('active'); li.scrollIntoView({ block: 'nearest' }); }
+}
+function ddOpen(dd) {
+  document.querySelectorAll('.cb-menu:not([hidden])').forEach(m => { if (m.parentElement !== dd) { m.hidden = true; m.previousElementSibling.setAttribute('aria-expanded', 'false'); } });
+  ddMenu(dd).hidden = false; ddTrigger(dd).setAttribute('aria-expanded', 'true');
+  ddActive(dd, ddMenu(dd).querySelector('li.on'));
+}
+function ddPick(dd, li, refocus) {
+  const { sid, pick } = dd.dataset;
+  (picks[sid] ||= {})[pick] = li.dataset.value;
+  renderResumable();
+  // Keyboard users keep their place; a mouse click lets the list refresh again.
+  if (refocus) document.querySelector(`.pick-dd[data-sid="${CSS.escape(sid)}"][data-pick="${pick}"] .cb-trigger`)?.focus();
+}
+document.addEventListener('click', e => {
+  const dd = e.target.closest('.pick-dd');
+  document.querySelectorAll('.pick-dd .cb-menu:not([hidden])').forEach(m => { if (m.parentElement !== dd) ddClose(m.parentElement); });
+  if (!dd) return;
+  const li = e.target.closest('li[data-value]');
+  if (li) ddPick(dd, li, false);
+  else if (e.target.closest('.cb-trigger')) ddMenu(dd).hidden ? ddOpen(dd) : ddClose(dd);
+});
+document.addEventListener('keydown', e => {
+  const dd = e.target.closest?.('.pick-dd');
+  if (!dd) return;
+  const open = !ddMenu(dd).hidden;
+  const lis = [...ddMenu(dd).querySelectorAll('li')];
+  const at = lis.findIndex(li => li.classList.contains('active'));
+  if (e.key === 'Escape') { if (open) { ddClose(dd); ddTrigger(dd).focus(); } }
+  else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (!open) ddOpen(dd);
+    else ddActive(dd, lis[Math.min(lis.length - 1, Math.max(0, at + (e.key === 'ArrowDown' ? 1 : -1)))]);
+  } else if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    if (!open) ddOpen(dd); else if (lis[at]) ddPick(dd, lis[at], true);
+  }
 });
 
 /* ---------- Terminal: the session's real TUI over a WebSocket ----------
@@ -602,6 +745,7 @@ async function tick() {
     $('#health').className = 'dot ok';
     $('#health-label').textContent = 'Connected';
     markConnected();
+    refreshModels(g);
     checkAgent();
     outcome = 'ok';
   } catch (err) {
