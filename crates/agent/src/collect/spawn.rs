@@ -2,7 +2,7 @@ use super::ctx::{Ctx, Meta};
 use super::fsio::{read_if, write_atomic};
 use super::lookup::rc_link_for;
 use super::validate::{
-    assert_effort, assert_kill_name, assert_model, assert_valid_sid, BadRequest, Refused,
+    assert_effort, assert_kill_name, assert_model, assert_valid_sid, is_codex_model, BadRequest, Refused,
 };
 use crate::parse::history::group_history;
 use std::path::{Path, PathBuf};
@@ -214,10 +214,27 @@ pub async fn launch_session(
     .await
 }
 
-pub async fn resume_session(ctx: &Arc<Ctx>, sid: &str) -> Result<String, Refused> {
+/// `model`/`effort` override what the session last used; `None` keeps it. A
+/// model from the other provider is refused: a Claude transcript and a Codex
+/// thread cannot resume each other.
+pub async fn resume_session(
+    ctx: &Arc<Ctx>,
+    sid: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<String, Refused> {
     assert_valid_sid(sid)?;
-    if let Some(name) = super::codex::resume(ctx, sid).await? {
+    if let Some(name) = super::codex::resume(ctx, sid, model, effort).await? {
         return Ok(name);
+    }
+    if let Some(m) = model {
+        if is_codex_model(m) {
+            return Err(Refused::BadRequest(format!("not a Claude session: cannot resume with {m}")));
+        }
+        assert_model(m)?;
+    }
+    if let Some(e) = effort {
+        assert_effort(e)?;
     }
     let hist = read_if(&ctx.claude_dir.join("history.jsonl")).await.unwrap_or_default();
     let cwd = group_history(&hist)
@@ -231,7 +248,15 @@ pub async fn resume_session(ctx: &Arc<Ctx>, sid: &str) -> Result<String, Refused
     // straight back out of the resumable list it came from.
     ctx.purged.lock().unwrap_or_else(|e| e.into_inner()).remove(sid);
 
-    spawn_claude(ctx, &cwd, &["--resume", sid], Meta::default()).await
+    let mut args = vec!["--resume", sid];
+    if let Some(m) = model {
+        args.extend(["--model", m]);
+    }
+    if let Some(e) = effort {
+        args.extend(["--effort", e]);
+    }
+    let meta = Meta { model: model.map(Into::into), effort: effort.map(Into::into), rc_link: None };
+    spawn_claude(ctx, &cwd, &args, meta).await
 }
 
 /// Kill a session this dashboard owns. The name is guarded first — it becomes
@@ -463,16 +488,16 @@ mod tests {
     async fn resume_rejects_a_bad_sid_before_touching_the_shell() {
         let d = tempdir("resume-guard");
         let ctx = ctx_for(d).await;
-        assert!(resume_session(&ctx, "not-a-uuid; rm -rf /").await.is_err());
-        assert!(resume_session(&ctx, "").await.is_err());
+        assert!(resume_session(&ctx, "not-a-uuid; rm -rf /", None, None).await.is_err());
+        assert!(resume_session(&ctx, "", None, None).await.is_err());
     }
 
     #[tokio::test]
     async fn resume_rejects_a_sid_that_history_does_not_know() {
         let d = tempdir("resume-unknown");
-        let ctx = ctx_for(d.clone()).await;
+        let ctx = ctx_with_tmux(d.clone(), 0).await; // PATH without codex: never reads this machine's ~/.codex
         tokio::fs::write(d.join("history.jsonl"), "").await.unwrap();
-        let e = resume_session(&ctx, "2f8a1c94-3b7e-4d51-9a02-6c5f8e1b7d34").await.unwrap_err();
+        let e = resume_session(&ctx, "2f8a1c94-3b7e-4d51-9a02-6c5f8e1b7d34", None, None).await.unwrap_err();
         // An unknown sid is the caller's input, not our subprocess: 400, not 500.
         assert!(matches!(&e, Refused::BadRequest(m) if m.contains("unknown session")), "got {e:?}");
     }
@@ -497,11 +522,59 @@ mod tests {
         purge_session(&ctx, sid).unwrap();
         assert!(ctx.purged.lock().unwrap().contains(sid));
 
-        resume_session(&ctx, sid).await.unwrap();
+        resume_session(&ctx, sid, None, None).await.unwrap();
         assert!(
             !ctx.purged.lock().unwrap().contains(sid),
             "a resumed session must stop being hidden"
         );
+    }
+
+    const SID: &str = "2f8a1c94-3b7e-4d51-9a02-6c5f8e1b7d34";
+
+    async fn ctx_with_history(tag: &str) -> (PathBuf, Arc<Ctx>) {
+        let d = tempdir(tag);
+        let ctx = ctx_with_tmux(d.clone(), 0).await;
+        tokio::fs::write(
+            d.join("history.jsonl"),
+            format!("{{\"sessionId\":\"{SID}\",\"project\":\"/tmp\",\"timestamp\":1,\"display\":\"x\"}}\n"),
+        )
+        .await
+        .unwrap();
+        (d, ctx)
+    }
+
+    #[tokio::test]
+    async fn resume_passes_the_chosen_model_and_effort_to_claude() {
+        let (d, ctx) = ctx_with_history("resume-pick").await;
+        let name = resume_session(&ctx, SID, Some("opus"), Some("high")).await.unwrap();
+        let args = std::fs::read_to_string(d.join("tmux-args")).unwrap();
+        assert!(args.contains(&format!("--resume {SID} --model opus --effort high")), "{args}");
+        let m = ctx.meta_get(&name).unwrap();
+        assert_eq!((m.model.as_deref(), m.effort.as_deref()), (Some("opus"), Some("high")));
+    }
+
+    #[tokio::test]
+    async fn resume_without_a_choice_adds_no_model_flags() {
+        let (d, ctx) = ctx_with_history("resume-plain").await;
+        resume_session(&ctx, SID, None, None).await.unwrap();
+        let args = std::fs::read_to_string(d.join("tmux-args")).unwrap();
+        assert!(args.contains(&format!("--resume {SID} --dangerously-skip-permissions")), "{args}");
+        assert!(!args.contains("--model") && !args.contains("--effort"), "{args}");
+    }
+
+    #[tokio::test]
+    async fn resume_rejects_a_bad_or_foreign_model_or_effort_before_spawning() {
+        let (d, ctx) = ctx_with_history("resume-bad-pick").await;
+        for (model, effort) in [
+            (Some("gpt-4"), None),
+            (Some("opus"), Some("ludicrous")),
+            (Some("codex:gpt-5"), None),
+            (Some("codex"), None),
+        ] {
+            let e = resume_session(&ctx, SID, model, effort).await.unwrap_err();
+            assert!(matches!(e, Refused::BadRequest(_)), "{model:?} {effort:?}: {e:?}");
+        }
+        assert!(!d.join("tmux-args").exists(), "a rejected pick must not reach tmux");
     }
 
     #[tokio::test]

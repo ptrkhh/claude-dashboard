@@ -212,9 +212,16 @@ Claude usage and session controls remain available. Model availability and
 subscription quota availability are independent.
 The dashboard owns the tmux pane and supports send, kill, resume, and **Open in
 Claude**. Codex uses the selected model and effort with its existing permissions.
-Running and resumable sessions retain the effective model, display name, and
-effort; resuming preserves those choices. Older sessions learn their model
-when resumed with the updated bridge.
+Running sessions show their effective model, display name, and effort.
+Resumable cards show the model each session last used and have model and
+effort pickers, preselected to it; **Resume** applies what is selected, for
+Claude and Codex sessions alike. A session only resumes with its own
+provider's models, because a Claude transcript and a Codex thread cannot stand
+in for each other. For Codex the model and effort come from Codex's own state
+database (`state_N.sqlite` under `$CODEX_HOME`, read-only through `node:sqlite`),
+so a thread you continued elsewhere shows what it actually ran with; the
+dashboard keeps no copy. If that database cannot be read, Codex sessions are
+left out of the resumable list.
 The pane accepts text prompts; it is a bridge console rather than the native
 Codex TUI. `/quit` stops it. Only sessions created by this dashboard are added
 to its Codex resume list.

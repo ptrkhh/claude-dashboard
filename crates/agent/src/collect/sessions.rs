@@ -2,6 +2,7 @@ use super::ctx::{Ctx, Meta};
 use super::external::{external_sessions, Session};
 use super::fsio::{read_if, read_tail};
 use super::lookup::{session_file_for, transcript_for};
+use super::validate::model_alias;
 use crate::host::disk::{disk_usage, DiskUsage};
 
 use crate::parse::git::parse_git_status;
@@ -34,6 +35,9 @@ pub struct Resumable {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// What the model picker selects for this session; `model` is the display chip.
+    #[serde(rename = "modelId", skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -198,6 +202,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
         if t.assistant_count < 3 {
             continue;
         }
+        let model = t.model.as_deref().and_then(model_alias).map(str::to_owned);
         resumable.push(Resumable {
             title: t
                 .title
@@ -209,8 +214,9 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             ts: g.ts,
             branch: t.branch.clone(),
             prompts: g.prompts,
-            model: None,
-            effort: None,
+            model: model.clone(),
+            model_id: model,
+            effort: t.effort.clone(),
         });
     }
 
@@ -271,7 +277,10 @@ mod tests {
             path,
             sampler: std::sync::Mutex::new(crate::host::sample::Sampler::new()),
         };
-        Arc::new(Ctx::new(host, claude_dir, None))
+        let ctx = Arc::new(Ctx::new(host, claude_dir, None));
+        // Hermetic: say "Codex has no threads" instead of reading this machine's ~/.codex.
+        *ctx.codex_threads.try_lock().unwrap() = Some((std::time::Instant::now(), vec![]));
+        ctx
     }
 
     /// Write a history entry plus a transcript with `turns` assistant messages.
@@ -296,6 +305,26 @@ mod tests {
         let r = collect_sessions(&ctx_for(d), RESUMABLE_MAX).await;
         let sids: Vec<&str> = r.resumable.iter().map(|x| x.sid.as_str()).collect();
         assert_eq!(sids, vec!["aaa"]);
+    }
+
+    #[tokio::test]
+    async fn a_claude_resumable_reports_the_model_its_last_turn_used() {
+        let d = tempdir("model");
+        let a = seed(&d, "aaa", "/p/m", 300, 3);
+        let f = d.join("projects").join(crate::parse::paths::project_dir_name("/p/m")).join("aaa.jsonl");
+        let body = std::fs::read_to_string(&f).unwrap().replace(
+            "\"message\":{",
+            "\"message\":{\"model\":\"claude-opus-5-5\",").replace("{\"type\":\"assistant\",", "{\"type\":\"assistant\",\"effort\":\"xhigh\",",
+        );
+        std::fs::write(&f, body).unwrap();
+        std::fs::write(d.join("history.jsonl"), a).unwrap();
+
+        let r = collect_sessions(&ctx_for(d), RESUMABLE_MAX).await;
+        assert_eq!(r.resumable[0].model.as_deref(), Some("opus"));
+        assert_eq!(r.resumable[0].effort.as_deref(), Some("xhigh"));
+        assert_eq!(r.resumable[0].model_id.as_deref(), Some("opus"));
+        let j = serde_json::to_string(&r.resumable[0]).unwrap();
+        assert!(j.contains("\"modelId\":\"opus\""), "{j}");
     }
 
     #[tokio::test]
