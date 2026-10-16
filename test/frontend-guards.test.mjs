@@ -94,3 +94,46 @@ test('localStorage is reached only through the guarded store wrapper', () => {
       `${method} swallows the throw`);
   }
 });
+
+test('resumable summary uses escaped, keyboard-expandable peek and retains prompt fallback', () => {
+  const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const card = src.slice(src.indexOf('function resumableCard('), src.indexOf('function renderResumable('));
+  const context = {
+    esc: s => String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;'),
+    fmtTs: () => '', gitBadge: () => '', pickHtml: () => '', effortLabel: String,
+    ICONS: { refresh: '', trash: '' },
+  };
+  runInNewContext(`${card}; this.card = resumableCard;`, context);
+  const session = { sid: 'one', title: 'Title', prompts: ['Earlier prompt'] };
+  const fallback = context.card(session);
+  assert.match(fallback, /Earlier prompt/);
+  assert.doesNotMatch(fallback, /<details/);
+  const summary = context.card({ ...session, summary: '<script>alert("x")</script>' });
+  assert.match(summary, /<details class="peek summary" data-summary="one"><summary class="peek-text">/);
+  assert.match(summary, /&lt;script&gt;/);
+  assert.doesNotMatch(summary, /<script>|Earlier prompt/);
+  assert.match(summary, /data-resume="one"/);
+});
+
+test('polling preserves expanded summaries and keyboard focus by session ID', () => {
+  const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const render = src.slice(src.indexOf('function renderResumable('), src.indexOf('function render(d) {'));
+  const before = [{ dataset: { summary: 'one' } }];
+  let focused = false, replaced = false;
+  const after = ['one', 'two'].map(sid => ({
+    dataset: { summary: sid }, open: false,
+    querySelector: () => ({ focus: options => { focused = options.preventScroll; } }),
+  }));
+  const container = {
+    querySelectorAll: () => replaced ? after : before,
+    set innerHTML(_) { replaced = true; },
+  };
+  const context = {
+    $: () => container, lastRes: [{ sid: 'one' }, { sid: 'two' }], resLimit: 20,
+    resumableCard: () => '', document: { activeElement: { closest: () => before[0] } },
+  };
+  runInNewContext(`${render}; renderResumable();`, context);
+  assert.equal(after[0].open, true);
+  assert.equal(after[1].open, false);
+  assert.equal(focused, true);
+});

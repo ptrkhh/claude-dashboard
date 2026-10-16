@@ -260,8 +260,9 @@ test('Codex --threads lists only unarchived dashboard threads from the newest st
   const make = (file, rows) => {
     const db = new DatabaseSync(join(home, file));
     db.exec(`create table threads (id text primary key, cwd text, title text, name text,
-      updated_at_ms integer, model text, reasoning_effort text, originator text, archived integer)`);
-    const add = db.prepare('insert into threads values (?,?,?,?,?,?,?,?,?)');
+      updated_at_ms integer, model text, reasoning_effort text, originator text, archived integer,
+      rollout_path text default '/work/history.jsonl')`);
+    const add = db.prepare('insert into threads (id,cwd,title,name,updated_at_ms,model,reasoning_effort,originator,archived) values (?,?,?,?,?,?,?,?,?)');
     for (const r of rows) add.run(...r);
     db.close();
   };
@@ -287,8 +288,8 @@ test('Codex --threads lists only unarchived dashboard threads from the newest st
     child.on('exit', () => { try { done(JSON.parse(out)); } catch (e) { reject(e); } });
   });
   assert.deepEqual(await run(home), [
-    { sid: 'a', dir: '/work/a', title: 'first prompt', ts: 300, model: 'gpt-b', effort: 'high' },
-    { sid: 'b', dir: '/work/b', title: 'Renamed', ts: 200, model: null, effort: null },
+    { sid: 'a', dir: '/work/a', title: 'first prompt', ts: 300, model: 'gpt-b', effort: 'high', rollout_path: '/work/history.jsonl' },
+    { sid: 'b', dir: '/work/b', title: 'Renamed', ts: 200, model: null, effort: null, rollout_path: '/work/history.jsonl' },
   ]);
   assert.deepEqual(await run(join(home, 'no-codex-here')), [], 'no Codex state is an empty list, not an error');
 });
