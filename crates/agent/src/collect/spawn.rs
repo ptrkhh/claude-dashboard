@@ -132,6 +132,13 @@ async fn spawn_claude(
         ctx.host.log.push(format!("trust write failed for {dir}: {e}"));
     }
     let name = tmux_name(dir);
+    let sid = claude_args
+        .windows(2)
+        .find(|pair| pair[0] == "--resume")
+        .map(|pair| pair[1].to_string())
+        .map(Ok)
+        .unwrap_or_else(super::names::new_sid)?;
+    let display_name = super::names::session_name("Claude", dir, &sid);
 
     // The explicit Remote Control request must win over this user-level opt-out,
     // but only for the dashboard child; the user's settings file stays untouched.
@@ -147,7 +154,12 @@ async fn spawn_claude(
         r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":""}}"#,
     ];
     args.extend_from_slice(claude_args);
-    args.extend_from_slice(&["--dangerously-skip-permissions", "--remote-control", &name]);
+    if !claude_args.contains(&"--resume") {
+        args.extend_from_slice(&["--session-id", &sid]);
+    }
+    args.extend_from_slice(&[
+        "--dangerously-skip-permissions", "--remote-control", &display_name,
+    ]);
     // Checked: without this a failed `tmux new-session` still answered 200
     // with a session name, and left a meta entry for a session that does not
     // exist. The pid lookup below stays best-effort — losing it costs the
@@ -498,6 +510,11 @@ mod tests {
         assert!(ctx.purged.lock().unwrap().contains(sid));
 
         resume_session(&ctx, sid).await.unwrap();
+        let args = std::fs::read_to_string(d.join("tmux-args")).unwrap();
+        assert!(args.lines().next().unwrap().ends_with(
+            &format!("--remote-control {}", super::super::names::session_name("Claude", "/tmp", sid))
+        ));
+        assert!(!args.contains("--session-id"), "resume keeps the existing session ID");
         assert!(
             !ctx.purged.lock().unwrap().contains(sid),
             "a resumed session must stop being hidden"
@@ -560,6 +577,11 @@ mod tests {
         launch_session(&ctx, d.to_str().unwrap(), "sonnet", "medium").await.unwrap();
 
         let args = std::fs::read_to_string(d.join("tmux-args")).unwrap();
+        let launch = args.lines().next().unwrap();
+        let sid = launch.split("--session-id ").nth(1).unwrap().split_whitespace().next().unwrap();
+        assert_valid_sid(sid).unwrap();
+        assert!(launch.ends_with(&format!("--remote-control {}",
+            super::super::names::session_name("Claude", d.to_str().unwrap(), sid))));
         assert!(
             args.lines().next().unwrap().contains(
                 r#"--settings {"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":""}}"#

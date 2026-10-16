@@ -8,12 +8,36 @@ import { pathToFileURL } from 'node:url';
 import { createConnection } from 'node:net';
 import { createHash } from 'node:crypto';
 
+test('Codex launcher uses the saved animal name even when display names repeat', { timeout: 10_000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'cdash-codex-name-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(join(dir, 'claude'), `#!${process.execPath}
+require('node:fs').writeFileSync(process.env.CDASH_CHECK_ARGS, JSON.stringify(process.argv.slice(2)));
+`, { mode: 0o700 });
+  const state = join(dir, 'state.json'), argsPath = join(dir, 'args.json');
+  const display_name = '[Codex] claude-dashboard · elephant';
+  for (const name of ['cdash-first', 'cdash-second']) {
+    await mkdir(join(dir, 'controls', name), { recursive: true });
+    await writeFile(state, JSON.stringify({ dir, display_name, model_label: 'GPT Check' }));
+    await new Promise((done, reject) => {
+      const child = spawn(process.execPath, [resolve('crates/agent/src/collect/codex-remote.mjs'), '--state', state, '--name', name], {
+        env: { ...process.env, PATH: dir, CDASH_CHECK_ARGS: argsPath },
+        stdio: 'ignore',
+      });
+      child.on('error', reject);
+      child.on('exit', code => code ? reject(Error(`Launcher exited ${code}`)) : done());
+    });
+    const args = JSON.parse(await readFile(argsPath, 'utf8'));
+    assert.equal(args[args.indexOf('--name') + 1], display_name);
+  }
+});
+
 // Exercises the real worker across process, RPC, SSE, and filesystem boundaries.
 test('Codex bridge dispatches string SSE sequences, persists resume, rotates credentials, and denies unsupported requests', { timeout: 25_000 }, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'cdash-codex-check-'));
   await mkdir(join(dir, 'history'));
   const state = join(dir, 'session.json'), wire = join(dir, 'wire.jsonl');
-  await writeFile(state, JSON.stringify({ dir, sid: null, effort: 'low' }));
+  await writeFile(state, JSON.stringify({ dir, sid: null, effort: 'low', display_name: '[Codex] project · elephant' }));
   await writeFile(wire, '');
   const preload = join(dir, 'transport.mjs');
   await writeFile(preload, `
@@ -108,6 +132,7 @@ createInterface({input:process.stdin}).on('line',line=>{
   await waitFor(() => output.includes(' ready'));
   const after = (await messages()).slice(before);
   assert.ok(after.some(m => m.rpc?.method === 'thread/resume'));
+  assert.equal(JSON.parse(await readFile(state, 'utf8')).display_name, '[Codex] project · elephant');
   assert.ok(after.some(m => m.url?.includes('from_sequence_num=12')));
   assert.equal(after.some(m => ['turn/start', 'turn/steer'].includes(m.rpc?.method)), false, 'replayed prompts must not execute again');
 });

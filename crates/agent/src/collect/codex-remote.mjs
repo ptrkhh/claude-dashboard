@@ -358,7 +358,7 @@ async function launcher() {
   await atomic(statePath, JSON.stringify(state));
   process.env.CDASH_CODEX_STATE = statePath;
   const script = fileURLToPath(import.meta.url);
-  const runner = spawn('claude', ['remote-control', '--spawn=session', '--name', `${state.model_label || state.model || 'Codex'}: ${option('--name')}`, '--verbose'], {
+  const runner = spawn('claude', ['remote-control', '--spawn=session', '--name', state.display_name || `[Codex] ${state.dir.split('/').filter(Boolean).pop() || state.dir}`, '--verbose'], {
     cwd: join(dirname(statePath), 'controls', option('--name')),
     env: { ...process.env, CLAUDE_CODE_PROCESS_WRAPPER: JSON.stringify([process.execPath, script, '--worker']) },
     stdio: ['pipe', 'pipe', 'pipe'],

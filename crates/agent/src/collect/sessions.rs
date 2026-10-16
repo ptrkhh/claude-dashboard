@@ -24,6 +24,8 @@ pub const RESUMABLE_CEILING: usize = 100;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Resumable {
+    #[serde(rename = "displayName", skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     pub sid: String,
     pub dir: Option<String>,
     pub ts: f64,
@@ -88,6 +90,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             let cpu = ctx.host.sampler.lock().unwrap_or_else(|e| e.into_inner()).tree_usage(p.pid);
             let git = Arc::clone(&ctx.git).status_for(Arc::clone(&ctx.runner), &p.path, now as u64);
             running.push(Session {
+                display_name: s.display_name.or_else(|| s.sid.as_deref().map(|sid| super::names::session_name("Codex", &s.dir, sid))),
                 name: p.name.clone(), dir: s.dir, pid: p.pid,
                 uptime_sec: ((now / 1000.0 - p.created as f64).round() as i64).max(0),
                 model: s.model_label.or(s.model).or_else(|| Some("Codex".into())), effort: s.effort,
@@ -152,6 +155,9 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             Arc::clone(&ctx.git).status_for(Arc::clone(&ctx.runner), &p.path, now as u64);
 
         running.push(Session {
+            display_name: sess.as_ref().and_then(|s| s.session_id.as_deref())
+                .or(sid.as_deref())
+                .map(|sid| super::names::session_name("Claude", &p.path, sid)),
             name: p.name.clone(),
             dir: p.path.clone(),
             pid: p.pid,
@@ -199,6 +205,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             continue;
         }
         resumable.push(Resumable {
+            display_name: Some(super::names::session_name("Claude", g.cwd.as_deref().unwrap_or("?"), &g.sid)),
             title: t
                 .title
                 .clone()
@@ -416,6 +423,7 @@ mod tests {
         assert_eq!(r.running[0].name, "cdash-test-1200-abc");
         assert_eq!(r.running[0].dir, "/proj");
         assert_eq!(r.running[0].pid, 4242);
+        assert_eq!(r.running[0].display_name.as_deref(), Some("[Claude] proj · goat"));
         assert_eq!(
             r.running[0].rc_link.as_deref(),
             Some("https://claude.ai/code/session_pane")
@@ -450,6 +458,7 @@ mod tests {
         // Node set `external` only on external sessions; a pane entry has no
         // such key at all, and the gate compares keys.
         let s = Session {
+            display_name: None,
             name: "x".into(), dir: "/x".into(), pid: 1, uptime_sec: 0,
             model: None, effort: None, provider: None, rc_link: None, git: None, working: false,
             last_message: None, sid: None, cpu: None, rss_kb: 0,

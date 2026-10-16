@@ -68,6 +68,8 @@ pub(super) async fn query(ctx: &Ctx, mode: &str) -> Result<serde_json::Value, St
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CodexSession {
+    #[serde(default)]
+    pub display_name: Option<String>,
     pub dir: String,
     pub pid: Option<i32>,
     pub sid: Option<String>,
@@ -196,7 +198,17 @@ pub async fn launch(
         .await
         .map_err(|e| Refused::Failed(e.to_string()))?;
     let state = base.join(format!("{name}.json"));
+    let display_name = match previous.as_ref().and_then(|s| s.display_name.clone()) {
+        Some(name) => name,
+        None => {
+            let sid = previous.as_ref().and_then(|s| s.sid.clone())
+                .map(Ok)
+                .unwrap_or_else(super::names::new_sid)?;
+            super::names::session_name("Codex", dir, &sid)
+        }
+    };
     let initial = CodexSession {
+        display_name: Some(display_name),
         dir: dir.into(),
         effort: Some(effort.into()),
         model: model.map(str::to_owned),
@@ -278,6 +290,8 @@ pub async fn history(ctx: &Ctx) -> Vec<Resumable> {
         }
         let Some(sid) = s.sid else { continue };
         result.push(Resumable {
+            display_name: Some(s.display_name.unwrap_or_else(||
+                super::names::session_name("Codex", &s.dir, &sid))),
             sid,
             dir: Some(s.dir),
             ts: s.ts,
@@ -381,6 +395,7 @@ mod tests {
             let history_dir = dir.join(".claude/cdash-codex/history");
             std::fs::create_dir_all(&history_dir).unwrap();
             let state = CodexSession {
+                display_name: Some("[Codex] saved-project · elephant".into()),
                 sid: Some(sid.into()),
                 dir: dir.to_string_lossy().into_owned(),
                 title: "Saved session".into(),
@@ -394,6 +409,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(history(&ctx).await.len(), 1);
+            assert_eq!(history(&ctx).await[0].display_name.as_deref(), Some("[Codex] saved-project · elephant"));
             let err = resume(&ctx, sid).await.unwrap_err();
             assert!(matches!(err, Refused::BadRequest(ref message) if message.contains(reason)));
             assert!(!dir.join("tmux-args").exists());
