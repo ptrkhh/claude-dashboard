@@ -2,7 +2,7 @@
    exercise it. Loaded as a classic script by index.html; the IIFE form makes
    the same file a valid side-effect ES module under node --test. */
 (function (g) {
-  const LADDER = [4000, 8000, 15000, 30000];
+  const LADDER = [60000, 120000, 240000];
   g.cdashBackoff = {
     initial: () => ({ i: 0, halted: false }),
     next(state, outcome) {
