@@ -228,6 +228,33 @@ database (`state_N.sqlite` under `$CODEX_HOME`, read-only through `node:sqlite`)
 so a thread you continued elsewhere shows what it actually ran with; the
 dashboard keeps no copy. If that database cannot be read, Codex sessions are
 left out of the resumable list.
+
+Resumable cards also show an expandable conversation summary (four sentences
+for generated summaries). Current readable Claude/Codex compaction summaries
+are reused when already suitable; otherwise the agent summarizes conversation
+text with **GPT-6 Luna Low**, falling back to **Claude Haiku 5.5 Low**. Both use
+the same prompt and output schema. Luna checks ChatGPT login, the same quota
+RPCs as the Session/Week meters, and model availability. Haiku requires a
+Claude subscription login. API-key credentials are excluded; summary calls
+consume the selected subscription's allowance.
+
+This requires Node.js 22+ on the agent host, plus either supported CLI login.
+The summary process disables tools, project instructions, skills, hooks and
+MCP servers. Only text from the selected resumable conversations goes to the
+provider; thinking and tool payloads are omitted. Running-session peeks keep
+their existing last reply behavior.
+
+Summaries are cached privately in `~/.claude/cdash-summaries` (under the configured
+Claude directory when overridden). Restarting checks the cache without repeating
+unchanged inference; metadata-only updates also reuse it. Append-only updates
+send the previous summary and new turns, while rewritten histories reset context.
+Only listed cards are queued, newest first, with one generation at a time and
+a five-minute retry delay on failure. Existing previews remain usable while work
+is queued or unavailable. Very large first summaries retain the opening and newest
+text within a 180,000-character budget, so middle-history details can be missed.
+Generated summaries can omit or misstate details; the original session remains
+the source of truth. Delete the cache directory to clear stored summaries.
+
 The pane accepts text prompts; it is a bridge console rather than the native
 Codex TUI. `/quit` stops it. Only sessions created by this dashboard are added
 to its Codex resume list.

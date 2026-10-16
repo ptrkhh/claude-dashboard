@@ -29,6 +29,7 @@ pub struct Ctx {
     pub meta: Mutex<HashMap<String, Meta>>,
     pub purged: Mutex<HashSet<String>>,
     pub transcripts: TranscriptCache,
+    pub summaries: super::summaries::SummaryCache,
     pub git: Arc<GitCache>,
     /// Claude subscription limits, refreshed off the poll path.
     pub usage: Arc<UsageCache>,
@@ -56,6 +57,7 @@ impl Ctx {
             meta: Mutex::new(HashMap::new()),
             purged: Mutex::new(HashSet::new()),
             transcripts: TranscriptCache::new(),
+            summaries: super::summaries::SummaryCache::default(),
             git: Arc::new(GitCache::new()),
             usage: Arc::new(UsageCache::new()),
             codex_usage: Arc::new(UsageCache::new()),

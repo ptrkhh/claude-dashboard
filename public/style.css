@@ -344,6 +344,9 @@ button, input, select { font: inherit; }
 .peek:hover { background: var(--surface-hover); }
 .peek-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .peek.open .peek-text { -webkit-line-clamp: unset; }
+.peek.summary[open] .peek-text { -webkit-line-clamp: unset; }
+.peek.summary summary { cursor: pointer; }
+.peek.summary summary::marker { content: ''; }
 
 .desc { color: var(--text); font-size: 14px; margin: 2px 0 6px; }
 .prompts {

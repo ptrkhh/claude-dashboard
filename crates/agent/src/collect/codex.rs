@@ -100,6 +100,8 @@ pub async fn snapshot(ctx: &Ctx, name: &str, pid: i32) -> Option<CodexSession> {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Thread {
     #[serde(default)]
+    rollout_path: Option<PathBuf>,
+    #[serde(default)]
     display_name: Option<String>,
     sid: String,
     dir: String,
@@ -363,6 +365,8 @@ pub async fn history(ctx: &Ctx) -> Vec<Resumable> {
                 model: label.or(t.model).or_else(|| Some("Codex".into())),
                 effort: t.effort,
                 prompts: Vec::new(),
+                summary: None,
+                source_file: t.rollout_path,
             }
         })
         .collect()

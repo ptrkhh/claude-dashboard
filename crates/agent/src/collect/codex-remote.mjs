@@ -24,10 +24,11 @@ const socketPath = state => join(socketDir(state), 'input.sock');
 class Codex {
   pending = new Map();
   id = 0;
-  constructor(onEvent) {
+  constructor(onEvent, options = {}) {
     // Session ingress credentials must never enter Codex's tool environment.
     const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('CLAUDE_') && !k.startsWith('CDASH_CODEX_')));
-    this.child = spawn('codex', ['app-server', '--listen', 'stdio://'], { env, detached: true, stdio: ['pipe', 'pipe', 'inherit'] });
+    const onError = options.onError || fatal;
+    this.child = spawn('codex', ['app-server', '--listen', 'stdio://'], { env: options.env || env, cwd: options.cwd, detached: true, stdio: ['pipe', 'pipe', options.quiet ? 'ignore' : 'inherit'] });
     let notifications = Promise.resolve();
     createInterface({ input: this.child.stdout }).on('line', line => {
       let m;
@@ -44,14 +45,15 @@ class Codex {
         if (m.method === 'turn/started') this.turnId = m.params.turn.id;
         if (m.method === 'turn/completed' && this.turnId === m.params.turn.id) this.turnId = undefined;
         notifications = notifications.then(() => onEvent(m));
-        notifications.catch(fatal);
+        notifications.catch(onError);
       }
     });
-    this.child.on('error', fatal);
+    this.child.on('error', onError);
+    this.child.stdin.on('error', onError);
     this.child.on('exit', () => {
       for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(Error('Codex app-server exited')); }
       this.pending.clear();
-      if (!this.closing) fatal(Error('Codex app-server exited'));
+      if (!this.closing) onError(Error('Codex app-server exited'));
     });
   }
   send(m) { this.child.stdin.write(`${JSON.stringify(m)}\n`); }
@@ -388,7 +390,10 @@ async function launcher() {
 
 for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(signal, () => { stop(); setTimeout(() => process.exit(0), 5000).unref(); });
 const queryMode = ['--models', '--usage'].find(mode => process.argv.includes(mode));
-if (process.argv.includes('--threads')) {
+if (args[0] === '--summary') {
+  import('./summary.mjs').then(({ summarize }) => summarize(JSON.parse(args[1]), Codex, fn => { stop = fn; }))
+    .then(value => console.log(JSON.stringify(value)), () => { console.log(JSON.stringify({ error: 'Session summary unavailable' })); });
+} else if (process.argv.includes('--threads')) {
   // Resumable dashboard threads, read from Codex's own state database: it is
   // what Codex itself records per thread, so a thread continued elsewhere
   // shows its real model. Read-only; Codex owns the file.
@@ -403,7 +408,7 @@ if (process.argv.includes('--threads')) {
     const db = new DatabaseSync(join(home, files.sort((a, b) => b[1] - a[1])[0][0]), { readOnly: true });
     try {
       return db.prepare(`select id as sid, cwd as dir, coalesce(nullif(name, ''), title) as title,
-          updated_at_ms as ts, model, reasoning_effort as effort
+          updated_at_ms as ts, model, reasoning_effort as effort, rollout_path
         from threads
         where originator = 'claude_dashboard' and archived = 0 and coalesce(nullif(name, ''), title) <> ''
         order by updated_at_ms desc`).all();

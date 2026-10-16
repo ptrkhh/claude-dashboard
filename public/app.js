@@ -330,7 +330,7 @@ function resumableCard(s) {
       </div>
       <div class="desc">${esc(s.title)}</div>
       ${s.model ? `<div class="session-meta"><span class="chip">${esc(s.model)}</span>${s.effort ? `<span class="chip">${esc(effortLabel(s.effort))}</span>` : ''}</div>` : ''}
-      <div class="prompts">↳ ${esc(s.prompts.join(' · '))}</div>
+      ${s.summary ? `<details class="peek summary"><summary class="peek-text">${esc(s.summary)}</summary></details>` : `<div class="prompts">↳ ${esc(s.prompts.join(' · '))}</div>`}
       ${pickHtml(s)}
       <div class="actions">
         <button class="action" type="button" data-resume="${esc(s.sid)}">${ICONS.refresh}<span>Resume</span></button>
