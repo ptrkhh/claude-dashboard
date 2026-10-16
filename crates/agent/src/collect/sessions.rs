@@ -49,6 +49,8 @@ pub struct Stats {
     #[serde(rename = "ramTotalKb")]
     pub ram_total_kb: u64,
     pub disks: Vec<DiskUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub battery: Option<crate::host::battery::Battery>,
     /// Absent for API-key users and until the first refresh lands; the strip
     /// simply shows no Claude tiles rather than empty ones.
     #[serde(rename = "claudeUsage", skip_serializing_if = "Option::is_none")]
@@ -249,6 +251,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             ram_used_kb: machine.ram_used_kb,
             ram_total_kb: machine.ram_total_kb,
             disks,
+            battery: crate::host::battery::battery_status(&ctx.runner).await,
             claude_usage: ctx.usage.get(&ctx.claude_dir, &ctx.host.log),
             codex_usage: ctx.codex_usage.get_codex(ctx),
         },
@@ -382,7 +385,8 @@ mod tests {
     async fn the_response_serializes_with_nodes_field_names() {
         let d = tempdir("shape");
         std::fs::write(d.join("history.jsonl"), "").unwrap();
-        let r = collect_sessions(&ctx_for(d), RESUMABLE_MAX).await;
+        let mut r = collect_sessions(&ctx_for(d), RESUMABLE_MAX).await;
+        r.stats.battery = None;
         let j = serde_json::to_string(&r).unwrap();
         assert!(j.contains("\"running\":"));
         assert!(j.contains("\"resumable\":"));
@@ -390,6 +394,10 @@ mod tests {
         assert!(j.contains("\"ramUsedKb\":"));
         assert!(j.contains("\"ramTotalKb\":"));
         assert!(j.contains("\"disks\":"));
+        assert!(!j.contains("\"battery\":"));
+        r.stats.battery = Some(crate::host::battery::Battery { pct: 75, plugged: false });
+        let value = serde_json::to_value(&r).unwrap();
+        assert_eq!(value["stats"]["battery"], serde_json::json!({ "pct": 75, "plugged": false }));
     }
 
     #[tokio::test]
