@@ -301,7 +301,7 @@ async function worker() {
       await reportError(`Codex request failed: ${e.message}`);
     }
   };
-  await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', title: 'Claude Dashboard Codex Bridge', version: '0.3.0' } });
+  await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', title: 'Claude Dashboard Codex Bridge', version: '0.4.0' } });
   codex.send({ method: 'initialized' });
   if (!await codex.ready()) throw Error('Codex is signed out; run codex login on the agent host.');
   const savedModel = state.model, savedLabel = state.model_label;
@@ -417,7 +417,7 @@ if (process.argv.includes('--threads')) {
   const deadline = setTimeout(() => { timedOut = true; codex.close(); }, 12_000);
   (async () => {
     try {
-      await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', version: '0.3.0' } }, 10_000);
+      await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', version: '0.4.0' } }, 10_000);
       codex.send({ method: 'initialized' });
       let result;
       if (queryMode === '--usage') {
