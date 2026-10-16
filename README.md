@@ -187,6 +187,12 @@ Requires `tmux`, `claude` and `git` on `PATH`; the agent reports any that are mi
 
 ### Managed Codex sessions
 
+Managed sessions use names such as `[Codex] claude-dashboard · elephant` or
+`[Claude] claude-dashboard · rabbit` in the dashboard and Claude Remote Control.
+Animals come from a pool of 32 familiar animals and stay the same on resume.
+Duplicate display names are allowed, with no numeric suffixes.
+Codex stores the animal label separately from its model and effort metadata.
+
 Choose a **GPT** model in the launcher, choose a supported effort, then launch.
 The agent discovers model names and efforts through Codex's `model/list` RPC,
 refreshing the catalog every minute. Labels use the returned display name

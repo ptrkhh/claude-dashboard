@@ -269,7 +269,7 @@ function runningCard(r) {
     <div class="session ${status} ${r.external ? 'external' : ''}">
       <div class="session-head">
         <div class="session-headline">
-          <span class="session-title">${esc(r.dir.split('/').pop())}</span>
+          <span class="session-title">${esc(r.displayName || r.dir.split('/').pop())}</span>
           ${gitBadge(r.git)}
         </div>
         <span class="status ${r.working ? 'on' : 'off'}"><span class="dot"></span>${r.working ? 'Working' : 'Waiting'}</span>
@@ -323,7 +323,7 @@ function resumableCard(s) {
     <div class="session resumable">
       <div class="session-head">
         <div class="session-headline">
-          <span class="session-title">${esc(s.dir?.split('/').pop() || '?')}</span>
+          <span class="session-title">${esc(s.displayName || s.dir?.split('/').pop() || '?')}</span>
           ${gitBadge({ branch: s.branch })}
         </div>
         <span class="time">${fmtTs(s.ts)}</span>

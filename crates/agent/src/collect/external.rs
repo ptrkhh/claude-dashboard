@@ -16,6 +16,8 @@ use std::sync::Arc;
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Session {
     pub name: String,
+    #[serde(rename = "displayName", skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     pub dir: String,
     pub pid: i32,
     #[serde(rename = "uptimeSec")]
@@ -117,6 +119,7 @@ pub async fn external_sessions(
             Arc::clone(&ctx.git).status_for(Arc::clone(&ctx.runner), &cwd, now_ms as u64);
 
         out.push(Session {
+            display_name: None,
             name: sess
                 .name
                 .filter(|n| !n.is_empty())

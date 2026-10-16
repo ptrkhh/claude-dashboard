@@ -68,6 +68,8 @@ pub(super) async fn query(ctx: &Ctx, mode: &str) -> Result<serde_json::Value, St
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CodexSession {
+    #[serde(default)]
+    pub display_name: Option<String>,
     pub dir: String,
     pub pid: Option<i32>,
     pub sid: Option<String>,
@@ -97,6 +99,8 @@ pub async fn snapshot(ctx: &Ctx, name: &str, pid: i32) -> Option<CodexSession> {
 /// One dashboard-started Codex thread, as Codex's own state database records it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Thread {
+    #[serde(default)]
+    display_name: Option<String>,
     sid: String,
     dir: String,
     title: String,
@@ -106,8 +110,14 @@ pub struct Thread {
 }
 
 async fn threads(ctx: &Ctx) -> Result<Vec<Thread>, String> {
-    serde_json::from_value(query(ctx, "--threads").await?)
-        .map_err(|e| format!("Codex threads: {e}"))
+    let mut rows: Vec<Thread> = serde_json::from_value(query(ctx, "--threads").await?)
+        .map_err(|e| format!("Codex threads: {e}"))?;
+    for thread in &mut rows {
+        if assert_valid_sid(&thread.sid).is_ok() {
+            thread.display_name = read_if(&root(ctx).join(format!("{}.name", thread.sid))).await;
+        }
+    }
+    Ok(rows)
 }
 
 pub async fn link(ctx: &Ctx, name: &str) -> Option<String> {
@@ -217,7 +227,17 @@ pub async fn launch(
         .await
         .map_err(|e| Refused::Failed(e.to_string()))?;
     let state = base.join(format!("{name}.json"));
+    let display_name = match previous.as_ref().and_then(|s| s.display_name.clone()) {
+        Some(name) => name,
+        None => {
+            let sid = previous.as_ref().and_then(|s| s.sid.clone())
+                .map(Ok)
+                .unwrap_or_else(super::names::new_sid)?;
+            super::names::session_name("Codex", dir, &sid)
+        }
+    };
     let initial = CodexSession {
+        display_name: Some(display_name),
         dir: dir.into(),
         effort: Some(effort.into()),
         model: model.map(str::to_owned),
@@ -284,6 +304,7 @@ pub async fn resume(
     let effort = effort.map(str::to_owned).or_else(|| t.effort.clone()).unwrap_or_else(|| "medium".into());
     let dir = t.dir.clone();
     let previous = CodexSession {
+        display_name: t.display_name,
         dir: t.dir,
         sid: Some(t.sid),
         title: t.title,
@@ -330,6 +351,8 @@ pub async fn history(ctx: &Ctx) -> Vec<Resumable> {
                 .and_then(|m| catalog.iter().find(|c| &c.model == m))
                 .map(|c| c.label.clone());
             Resumable {
+                display_name: Some(t.display_name.unwrap_or_else(||
+                    super::names::session_name("Codex", &t.dir, &t.sid))),
                 sid: t.sid,
                 dir: Some(t.dir),
                 ts: t.ts,
@@ -416,13 +439,14 @@ mod tests {
 
     #[tokio::test]
     async fn history_lists_codex_threads_with_their_own_model_and_effort() {
-        let (_dir, ctx) = codex_ctx("history");
+        let (dir, ctx) = codex_ctx("history");
         let h = history(&ctx).await;
         assert_eq!(h.len(), 1);
         assert_eq!(h[0].sid, SID);
         assert_eq!(h[0].title, "Saved");
         assert_eq!(h[0].model_id.as_deref(), Some("codex:gpt-a"));
         assert_eq!(h[0].effort.as_deref(), Some("low"));
+        assert_eq!(h[0].display_name, Some(super::super::names::session_name("Codex", dir.to_str().unwrap(), SID)));
         // Catalog not fetched yet: the chip falls back to the raw model id.
         assert_eq!(h[0].model.as_deref(), Some("gpt-a"));
     }
@@ -471,8 +495,13 @@ mod tests {
     #[tokio::test]
     async fn resume_applies_a_chosen_model_and_effort_to_the_codex_session() {
         let (dir, ctx) = codex_ctx("pick");
+        std::fs::create_dir_all(root(&ctx)).unwrap();
+        let display_name = "[Codex] saved-project · elephant";
+        std::fs::write(root(&ctx).join(format!("{SID}.name")), display_name).unwrap();
+        assert_eq!(history(&ctx).await[0].display_name.as_deref(), Some(display_name));
         resume(&ctx, SID, Some("codex:gpt-b"), Some("high")).await.unwrap();
         let s = saved_state(&dir);
+        assert_eq!(s.display_name.as_deref(), Some(display_name));
         assert_eq!((s.model.as_deref(), s.effort.as_deref()), (Some("gpt-b"), Some("high")));
         assert_eq!(s.model_label.as_deref(), Some("GPT B"));
         assert_eq!(s.sid.as_deref(), Some(SID), "the thread being resumed must survive");

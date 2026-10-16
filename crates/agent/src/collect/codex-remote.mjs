@@ -195,11 +195,18 @@ async function worker() {
   const approvals = new Map();
   const items = new Map();
   let models = [];
-  let outgoing = Promise.resolve(), saved = Promise.resolve(), queue = Promise.resolve();
+  let outgoing = Promise.resolve(), saved = Promise.resolve(), queue = Promise.resolve(), savedNamePath;
   const emit = payload => { outgoing = outgoing.then(() => remote.event(payload)); outgoing.catch(fatal); return outgoing; };
   const save = () => {
     const json = JSON.stringify(state);
-    saved = saved.then(() => atomic(statePath, json));
+    const namePath = /^[0-9a-f-]{36}$/i.test(state.sid || '') && state.display_name && join(dirname(statePath), `${state.sid}.name`);
+    saved = saved.then(async () => {
+      await atomic(statePath, json);
+      if (namePath && namePath !== savedNamePath) {
+        await atomic(namePath, state.display_name);
+        savedNamePath = namePath;
+      }
+    });
     saved.catch(fatal);
     return saved;
   };
@@ -357,7 +364,7 @@ async function launcher() {
   await atomic(statePath, JSON.stringify(state));
   process.env.CDASH_CODEX_STATE = statePath;
   const script = fileURLToPath(import.meta.url);
-  const runner = spawn('claude', ['remote-control', '--spawn=session', '--name', `${state.model_label || state.model || 'Codex'}: ${option('--name')}`, '--verbose'], {
+  const runner = spawn('claude', ['remote-control', '--spawn=session', '--name', state.display_name || `[Codex] ${state.dir.split('/').filter(Boolean).pop() || state.dir}`, '--verbose'], {
     cwd: join(dirname(statePath), 'controls', option('--name')),
     env: { ...process.env, CLAUDE_CODE_PROCESS_WRAPPER: JSON.stringify([process.execPath, script, '--worker']) },
     stdio: ['pipe', 'pipe', 'pipe'],
