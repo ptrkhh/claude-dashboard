@@ -239,6 +239,8 @@ Claude subscription login. API-key credentials are excluded; summary calls
 consume the selected subscription's allowance.
 
 This requires Node.js 22+ on the agent host, plus either supported CLI login.
+Summary calls were verified with Codex CLI 0.162.1 and Claude Code 2.1.301;
+unsupported CLI versions retain the existing preview when generation fails.
 The summary process disables tools, project instructions, skills, hooks and
 MCP servers. Only text from the selected resumable conversations goes to the
 provider; thinking and tool payloads are omitted. Running-session peeks keep

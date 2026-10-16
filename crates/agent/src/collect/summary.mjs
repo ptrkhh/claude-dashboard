@@ -100,6 +100,10 @@ async function luna(input, cwd, Codex, setStop) {
   await symlink(join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'auth.json'), join(home, 'auth.json'));
   await writeFile(join(home, 'config.toml'), `project_doc_max_bytes=0
 web_search="disabled"
+[tools.experimental_request_user_input]
+enabled=false
+[tools.update_plan]
+enabled=false
 [skills]
 include_instructions=false
 [skills.bundled]
@@ -114,12 +118,20 @@ stable_environment_tools=false
 image_generation=false
 computer_use=false
 browser_use=false
+tool_suggest=false
+sleep_tool=false
+token_budget=false
+current_time_reminder=false
+goals=false
+memories=false
+code_mode=false
 `, { mode: 0o600 });
   let resolveTurn, rejectTurn, output;
   const completed = new Promise((resolve, reject) => { resolveTurn = resolve; rejectTurn = reject; });
   // Attach immediately: a startup failure may precede awaiting turn completion.
   completed.catch(() => {});
-  const codex = new Codex(async m => {
+  let codex;
+  const onEvent = async m => {
     if (m.id != null && m.method) { codex.send({ id: m.id, error: { code: -32601, message: 'Tools disabled for summaries' } }); rejectTurn(Error('Summary requested a tool')); }
     if (m.method === 'item/completed') {
       if (m.params.item.type === 'agentMessage') output = m.params.item.text;
@@ -128,12 +140,17 @@ browser_use=false
     if (m.method === 'turn/completed') {
       if (m.params.turn.status === 'completed') resolveTurn(output); else rejectTurn(Error('Summary turn failed'));
     }
-  }, { env: { ...cleanEnv(), CODEX_HOME: home }, cwd, onError: rejectTurn, quiet: true });
+  };
+  const start = () => new Codex(onEvent, { env: { ...cleanEnv(), CODEX_HOME: home }, cwd, onError: rejectTurn, quiet: true });
+  const initialize = async () => {
+    await codex.call('initialize', { clientInfo: { name: 'cdash_summary', version: '1' }, capabilities: { experimentalApi: true } }, 10_000);
+    codex.send({ method: 'initialized' });
+  };
+  codex = start();
   setStop(() => codex.close());
   const timer = setTimeout(() => { rejectTurn(Error('Summary timed out')); codex.close(); }, 90_000);
   try {
-    await codex.call('initialize', { clientInfo: { name: 'cdash_summary', version: '1' }, capabilities: { experimentalApi: true } }, 10_000);
-    codex.send({ method: 'initialized' });
+    await initialize();
     const auth = await codex.call('account/read', { refreshToken: false }, 10_000);
     if (auth.account?.type !== 'chatgpt') throw Error('Codex subscription unavailable');
     // Same authoritative account/quota RPCs used by the Session / Week meters.
@@ -141,6 +158,17 @@ browser_use=false
     const limits = usage.rateLimitsByLimitId?.codex || usage.rateLimits;
     if (!limits || limits.ordinaryUsageAllowed === false || [limits.primary, limits.secondary].some(w => w?.usedPercent >= 100)) throw Error('Codex quota unavailable');
     if (!(await codex.models()).some(m => m.model === 'gpt-6-luna' && m.efforts.includes('low'))) throw Error('Luna unavailable');
+    // Luna's catalog enables clock, user messaging and Code Mode independently of environment access.
+    const catalog = JSON.parse(await readFile(join(home, 'models_cache.json'), 'utf8'));
+    const model = catalog.models.find(m => m.slug === 'gpt-6-luna');
+    if (!model) throw Error('Luna tool configuration unavailable');
+    const catalogPath = join(home, 'summary-model.json');
+    await writeFile(catalogPath, JSON.stringify({ models: [{ ...model, tool_mode: 'direct', experimental_supported_tools: [], supports_search_tool: false }] }), { mode: 0o600 });
+    const configPath = join(home, 'config.toml');
+    await writeFile(configPath, `model_catalog_json=${JSON.stringify(catalogPath)}\n${await readFile(configPath, 'utf8')}`, { mode: 0o600 });
+    codex.close();
+    codex = start();
+    await initialize();
     const thread = await codex.call('thread/start', { model: 'gpt-6-luna', cwd, ephemeral: true,
       baseInstructions: SYSTEM, developerInstructions: '', approvalPolicy: 'never', sandbox: 'read-only',
       allowProviderModelFallback: false, dynamicTools: [], environments: [], selectedCapabilityRoots: [],

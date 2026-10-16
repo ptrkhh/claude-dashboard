@@ -69,15 +69,18 @@ async function fixture(t) {
   const output = Object.fromEntries(['goal', 'work', 'status', 'next'].map((k, i) => [k, native.match(/[^.!?]+[.!?]/g)[i].trim()]));
   await writeFile(join(dir, 'codex'), `#!${process.execPath}
 const {createInterface} = require('node:readline');
-const {appendFileSync,readFileSync} = require('node:fs');
+const {appendFileSync,readFileSync,writeFileSync,existsSync} = require('node:fs');
 const send = m => process.stdout.write(JSON.stringify(m)+'\\n');
 createInterface({input:process.stdin}).on('line',line=>{
  const m=JSON.parse(line);
- appendFileSync(process.env.CDASH_CHECK_WIRE, JSON.stringify({kind:'codex',rpc:m,home:process.env.CODEX_HOME,secret:process.env.OPENAI_API_KEY,config:readFileSync(process.env.CODEX_HOME+'/config.toml','utf8')})+'\\n');
+ appendFileSync(process.env.CDASH_CHECK_WIRE, JSON.stringify({kind:'codex',rpc:m,home:process.env.CODEX_HOME,secret:process.env.OPENAI_API_KEY,config:readFileSync(process.env.CODEX_HOME+'/config.toml','utf8'),catalog:existsSync(process.env.CODEX_HOME+'/summary-model.json')?JSON.parse(readFileSync(process.env.CODEX_HOME+'/summary-model.json','utf8')):null})+'\\n');
  if(m.method==='initialize')send({id:m.id,result:{}});
  if(m.method==='account/read')send({id:m.id,result:{account:{type:process.env.CDASH_CHECK_AUTH||'chatgpt'}}});
  if(m.method==='account/rateLimits/read')send({id:m.id,result:{rateLimits:{primary:{usedPercent:Number(process.env.CDASH_CHECK_QUOTA||1)},secondary:{usedPercent:2}}}});
- if(m.method==='model/list')send({id:m.id,result:{data:[{model:'gpt-6-luna',supportedReasoningEfforts:[{reasoningEffort:'low'}]}]}});
+ if(m.method==='model/list'){
+  writeFileSync(process.env.CODEX_HOME+'/models_cache.json',JSON.stringify({models:[{slug:'gpt-6-luna',tool_mode:'code_mode_only',experimental_supported_tools:['clock','send_user_message_async'],supports_search_tool:true}]}));
+  send({id:m.id,result:{data:[{model:'gpt-6-luna',supportedReasoningEfforts:[{reasoningEffort:'low'}]}]}});
+ }
  if(m.method==='thread/start')send({id:m.id,result:{thread:{id:'test-thread'}}});
  if(m.method==='turn/start'){
    send({id:m.id,result:{turn:{id:'turn'}}});
@@ -129,6 +132,10 @@ test('Luna uses meter RPCs and isolated Low; restart/metadata changes make no in
   assert.match(events[0].config, /skip_host_skill_discovery=true/);
   assert.match(events[0].config, /include_instructions=false/);
   assert.match(events[0].config, /image_generation=false/);
+  const configured = events.find(e => e.rpc?.method === 'thread/start');
+  assert.match(configured.config, /model_catalog_json=/);
+  assert.equal(configured.catalog.models[0].tool_mode, 'direct');
+  assert.deepEqual(configured.catalog.models[0].experimental_supported_tools, []);
   assert.match(thread.baseInstructions, /only agreed unfinished actions/);
   assert.equal(turn.model, 'gpt-6-luna');assert.equal(turn.effort, 'low');
   assert.ok(events.every(e => !e.secret));
