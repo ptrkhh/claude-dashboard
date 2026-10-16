@@ -495,7 +495,7 @@ mod tests {
     #[tokio::test]
     async fn resume_rejects_a_sid_that_history_does_not_know() {
         let d = tempdir("resume-unknown");
-        let ctx = ctx_for(d.clone()).await;
+        let ctx = ctx_with_tmux(d.clone(), 0).await; // PATH without codex: never reads this machine's ~/.codex
         tokio::fs::write(d.join("history.jsonl"), "").await.unwrap();
         let e = resume_session(&ctx, "2f8a1c94-3b7e-4d51-9a02-6c5f8e1b7d34", None, None).await.unwrap_err();
         // An unknown sid is the caller's input, not our subprocess: 400, not 500.

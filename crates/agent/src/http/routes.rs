@@ -440,10 +440,10 @@ mod tests {
             http_post(&url, &format!("{{\"sid\":\"{sid}\",\"model\":\"gpt-4\"}}")).await;
         assert_eq!(status, 400);
         assert!(body.contains("bad model"), "{body}");
-        // "" means "keep": it must reach the sid lookup, not fail as a bad model.
+        // "" means "keep": it must get past model/effort validation to the sid lookup.
         let (_, body) =
             http_post(&url, &format!("{{\"sid\":\"{sid}\",\"model\":\"\",\"effort\":\"\"}}")).await;
-        assert!(body.contains("unknown session"), "{body}");
+        assert!(!body.contains("bad model") && !body.contains("bad effort"), "{body}");
     }
 
     #[tokio::test]

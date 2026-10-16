@@ -94,6 +94,22 @@ pub async fn snapshot(ctx: &Ctx, name: &str, pid: i32) -> Option<CodexSession> {
     (s.pid == Some(pid)).then_some(s)
 }
 
+/// One dashboard-started Codex thread, as Codex's own state database records it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Thread {
+    sid: String,
+    dir: String,
+    title: String,
+    ts: f64,
+    model: Option<String>,
+    effort: Option<String>,
+}
+
+async fn threads(ctx: &Ctx) -> Result<Vec<Thread>, String> {
+    serde_json::from_value(query(ctx, "--threads").await?)
+        .map_err(|e| format!("Codex threads: {e}"))
+}
+
 pub async fn link(ctx: &Ctx, name: &str) -> Option<String> {
     read_if(&root(ctx).join(format!("{name}.link"))).await
 }
@@ -182,7 +198,7 @@ pub async fn launch(
         }
     }
     let base = root(ctx);
-    tokio::fs::create_dir_all(base.join("history"))
+    tokio::fs::create_dir_all(&base)
         .await
         .map_err(|e| Refused::Failed(e.to_string()))?;
     let name = tmux_name(dir);
@@ -252,58 +268,81 @@ pub async fn resume(
     effort: Option<&str>,
 ) -> Result<Option<String>, Refused> {
     assert_valid_sid(sid)?;
-    let Some(txt) = read_if(&root(ctx).join("history").join(format!("{sid}.json"))).await else {
+    // Fresh, not the poll's cache: this decides which model the thread resumes on.
+    let Some(t) = threads(ctx).await.map_err(Refused::Failed)?.into_iter().find(|t| t.sid == sid)
+    else {
         return Ok(None);
     };
-    let s: CodexSession = serde_json::from_str(&txt).map_err(|e| Refused::Failed(e.to_string()))?;
     if model.is_some_and(|m| !is_codex_model(m)) {
         return Err(Refused::BadRequest(format!(
             "not a Claude session: cannot resume with {}",
             model.unwrap_or_default()
         )));
     }
-    // Bare `codex` names no model, so it keeps the saved one.
-    let model = model.and_then(|m| m.strip_prefix("codex:")).map(str::to_owned).or_else(|| s.model.clone());
-    let effort = effort.map(str::to_owned).or_else(|| s.effort.clone()).unwrap_or_else(|| "medium".into());
-    let dir = s.dir.clone();
-    let name = launch(ctx, &dir, model.as_deref(), &effort, Some(s)).await?;
-    ctx.purged
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(sid);
+    // Bare `codex` names no model, so it keeps the one Codex recorded.
+    let model = model.and_then(|m| m.strip_prefix("codex:")).map(str::to_owned).or_else(|| t.model.clone());
+    let effort = effort.map(str::to_owned).or_else(|| t.effort.clone()).unwrap_or_else(|| "medium".into());
+    let dir = t.dir.clone();
+    let previous = CodexSession {
+        dir: t.dir,
+        sid: Some(t.sid),
+        title: t.title,
+        ts: t.ts,
+        model: t.model,
+        effort: t.effort,
+        ..Default::default()
+    };
+    let name = launch(ctx, &dir, model.as_deref(), &effort, Some(previous)).await?;
+    ctx.purged.lock().unwrap_or_else(|e| e.into_inner()).remove(sid);
     Ok(Some(name))
 }
 
+/// How long the poll reuses one read of Codex's thread list. Each read starts
+/// node, which is real work on a phone host at a 4s poll.
+const THREADS_TTL: Duration = Duration::from_secs(10);
+
 pub async fn history(ctx: &Ctx) -> Vec<Resumable> {
-    let mut result = Vec::new();
-    let Ok(mut entries) = tokio::fs::read_dir(root(ctx).join("history")).await else {
-        return result;
-    };
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let Some(txt) = read_if(&entry.path()).await else {
-            continue;
-        };
-        let Ok(s) = serde_json::from_str::<CodexSession>(&txt) else {
-            continue;
-        };
-        if s.title.is_empty() {
-            continue;
+    let rows = {
+        let mut cache = ctx.codex_threads.lock().await;
+        match cache.as_ref().filter(|(when, _)| when.elapsed() < THREADS_TTL) {
+            Some((_, rows)) => rows.clone(),
+            None => {
+                // An unreadable Codex means no Codex rows, and is cached like a
+                // good answer so a broken install is not retried every poll.
+                let rows = threads(ctx).await.unwrap_or_default();
+                *cache = Some((Instant::now(), rows.clone()));
+                rows
+            }
         }
-        let Some(sid) = s.sid else { continue };
-        result.push(Resumable {
-            sid,
-            dir: Some(s.dir),
-            ts: s.ts,
-            branch: None,
-            title: s.title,
-            // Bare `codex` still marks the provider when no model was saved.
-            model_id: Some(s.model.as_ref().map_or("codex".into(), |m| format!("codex:{m}"))),
-            model: s.model_label.or(s.model).or_else(|| Some("Codex".into())),
-            effort: s.effort,
-            prompts: Vec::new(),
-        });
-    }
-    result
+    };
+    // Labels only from a catalog already fetched: the poll must never wait on one.
+    let catalog = ctx
+        .codex_models
+        .try_lock()
+        .ok()
+        .and_then(|c| c.as_ref().map(|(_, m)| m.clone()))
+        .unwrap_or_default();
+    rows.into_iter()
+        .map(|t| {
+            let label = t
+                .model
+                .as_ref()
+                .and_then(|m| catalog.iter().find(|c| &c.model == m))
+                .map(|c| c.label.clone());
+            Resumable {
+                sid: t.sid,
+                dir: Some(t.dir),
+                ts: t.ts,
+                branch: None,
+                title: t.title,
+                // Bare `codex` still marks the provider when no model was recorded.
+                model_id: Some(t.model.as_ref().map_or("codex".into(), |m| format!("codex:{m}"))),
+                model: label.or(t.model).or_else(|| Some("Codex".into())),
+                effort: t.effort,
+                prompts: Vec::new(),
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -312,134 +351,39 @@ mod tests {
     use crate::host::{cmd::Runner, init::Host, log::LogBuffer, sample::Sampler};
     use std::os::unix::fs::PermissionsExt;
 
-    #[tokio::test]
-    async fn unavailable_codex_does_not_block_claude_or_spawn_phantom_panes() {
-        for installed in [false, true] {
-            let dir = std::env::temp_dir()
-                .join(format!("cdash-no-codex-{installed}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(dir.join("bin")).unwrap();
-            // Isolated PATH: optional Codex is either absent or reports a signed-out catalog.
-            let tmux = dir.join("bin/tmux");
-            std::fs::write(
-                &tmux,
-                format!("#!/bin/sh\necho called >> '{}/tmux-args'\n", dir.display()),
-            )
-            .unwrap();
-            std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
-            for program in ["node", "codex"] {
-                if program == "codex" && !installed {
-                    continue;
-                }
-                let file = dir.join("bin").join(program);
-                std::fs::write(&file, "#!/bin/sh\necho '[]'\n").unwrap();
-                std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
-            let log = Arc::new(LogBuffer::new());
-            let path = dir.join("bin").to_string_lossy().into_owned();
-            let ctx = Arc::new(Ctx::new(
-                Host {
-                    runner: Runner::new(path.clone(), log.clone()),
-                    log: log.clone(),
-                    path,
-                    sampler: std::sync::Mutex::new(Sampler::new()),
-                },
-                dir.join(".claude"),
-                None,
-            ));
-            assert!(models(&ctx).await.unwrap().is_empty());
-            assert!(super::super::usage::fetch_codex_usage(&ctx)
-                .await
-                .unwrap()
-                .is_empty());
-            let start = Instant::now();
-            assert!(ctx.codex_usage.get_codex(&ctx).is_none());
-            assert!(start.elapsed() < Duration::from_secs(1));
-            tokio::time::timeout(Duration::from_secs(3), async {
-                loop {
-                    if let Some(tiles) = ctx.codex_usage.get_codex(&ctx) {
-                        assert!(tiles.is_empty());
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .unwrap();
-            assert!(
-                log.lines().is_empty(),
-                "unavailable optional Codex should not log failures"
-            );
-            // A previously signed-in picker must not bypass the fresh launch check.
-            *ctx.codex_models.lock().await = Some((
-                Instant::now(),
-                vec![ModelChoice {
-                    value: "codex:gpt-check".into(),
-                    model: "gpt-check".into(),
-                    label: "GPT Check".into(),
-                    efforts: vec!["low".into()],
-                    default_effort: "low".into(),
-                }],
-            ));
-            let err = launch(&ctx, dir.to_str().unwrap(), Some("gpt-check"), "low", None)
-                .await
-                .unwrap_err();
-            let reason = if installed {
-                "codex login"
-            } else {
-                "not installed"
-            };
-            assert!(matches!(err, Refused::BadRequest(ref message) if message.contains(reason)));
-            assert!(!dir.join(".claude/cdash-codex").exists());
-            // Old Codex history remains visible; resume refuses before creating a pane.
-            let sid = "01234567-1234-1234-1234-0123456789ab";
-            let history_dir = dir.join(".claude/cdash-codex/history");
-            std::fs::create_dir_all(&history_dir).unwrap();
-            let state = CodexSession {
-                sid: Some(sid.into()),
-                dir: dir.to_string_lossy().into_owned(),
-                title: "Saved session".into(),
-                effort: Some("low".into()),
-                model: Some("gpt-check".into()),
-                ..Default::default()
-            };
-            std::fs::write(
-                history_dir.join(format!("{sid}.json")),
-                serde_json::to_string(&state).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(history(&ctx).await.len(), 1);
-            let err = resume(&ctx, sid, None, None).await.unwrap_err();
-            assert!(matches!(err, Refused::BadRequest(ref message) if message.contains(reason)));
-            assert!(!dir.join("tmux-args").exists());
-            assert!(super::super::spawn::launch_session(
-                &ctx,
-                dir.to_str().unwrap(),
-                "sonnet",
-                "medium"
-            )
-            .await
-            .is_ok());
-            std::fs::remove_dir_all(dir).unwrap();
-        }
+    const SID: &str = "01234567-1234-1234-1234-0123456789ab";
+    const CATALOG: &str = r#"[{"value":"codex:gpt-b","model":"gpt-b","label":"GPT B","efforts":["low","high"],"defaultEffort":"low"}]"#;
+
+    fn row(dir: &std::path::Path) -> String {
+        format!(
+            r#"[{{"sid":"{SID}","dir":"{}","title":"Saved","ts":1792000000000,"model":"gpt-a","effort":"low"}}]"#,
+            dir.display()
+        )
     }
 
-    /// A Codex install that answers `--models` with one two-effort model and
-    /// records every tmux call, so a resume can run end to end offline.
-    fn codex_ctx(tag: &str) -> (PathBuf, Arc<Ctx>) {
+    /// A host whose `node` answers `--version`, `--threads` (from `threads.json`,
+    /// which a test can rewrite) and `--models`; `codex`/`claude` only report a
+    /// version. `tmux` records every call. `with_codex = false` leaves `codex` out.
+    fn host_in(tag: &str, with_codex: bool, catalog: &str) -> (PathBuf, Arc<Ctx>) {
         let dir = std::env::temp_dir().join(format!("cdash-codex-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("bin")).unwrap();
-        let scripts = [
+        std::fs::write(dir.join("threads.json"), row(&dir)).unwrap();
+        let mut scripts = vec![
             ("tmux", format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}/tmux-args'\n", dir.display())),
-            ("node", concat!(
-                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v22.1.0; else ",
-                "echo '[{\"value\":\"codex:gpt-b\",\"model\":\"gpt-b\",\"label\":\"GPT B\",",
-                "\"efforts\":[\"low\",\"high\"],\"defaultEffort\":\"low\"}]'; fi\n",
-            ).to_string()),
-            ("codex", "#!/bin/sh\necho 1.0.0\n".to_string()),
+            (
+                "node",
+                format!(
+                    "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v22.1.0; exit; fi\nfor a; do last=$a; done\n\
+                     if [ \"$last\" = --threads ]; then read -r line < '{}/threads.json'; echo \"$line\"; else echo '{catalog}'; fi\n",
+                    dir.display()
+                ),
+            ),
             ("claude", "#!/bin/sh\necho 1.0.0\n".to_string()),
         ];
+        if with_codex {
+            scripts.push(("codex", "#!/bin/sh\necho 1.0.0\n".to_string()));
+        }
         for (name, body) in scripts {
             let f = dir.join("bin").join(name);
             std::fs::write(&f, body).unwrap();
@@ -457,23 +401,12 @@ mod tests {
             dir.join(".claude"),
             None,
         ));
-        let sid = "01234567-1234-1234-1234-0123456789ab";
-        let history = dir.join(".claude/cdash-codex/history");
-        std::fs::create_dir_all(&history).unwrap();
-        let state = CodexSession {
-            sid: Some(sid.into()),
-            dir: dir.to_string_lossy().into_owned(),
-            title: "Saved".into(),
-            effort: Some("low".into()),
-            model: Some("gpt-a".into()),
-            model_label: Some("GPT A".into()),
-            ..Default::default()
-        };
-        std::fs::write(history.join(format!("{sid}.json")), serde_json::to_string(&state).unwrap()).unwrap();
         (dir, ctx)
     }
 
-    const CODEX_SID: &str = "01234567-1234-1234-1234-0123456789ab";
+    fn codex_ctx(tag: &str) -> (PathBuf, Arc<Ctx>) {
+        host_in(tag, true, CATALOG)
+    }
 
     fn saved_state(dir: &std::path::Path) -> CodexSession {
         let args = std::fs::read_to_string(dir.join("tmux-args")).unwrap();
@@ -482,21 +415,97 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_applies_a_chosen_model_and_effort_to_the_codex_session() {
-        let (dir, ctx) = codex_ctx("pick");
-        resume(&ctx, CODEX_SID, Some("codex:gpt-b"), Some("high")).await.unwrap();
-        let s = saved_state(&dir);
-        assert_eq!((s.model.as_deref(), s.effort.as_deref()), (Some("gpt-b"), Some("high")));
-        assert_eq!(s.model_label.as_deref(), Some("GPT B"));
-        assert_eq!(s.sid.as_deref(), Some(CODEX_SID), "the thread being resumed must survive");
+    async fn history_lists_codex_threads_with_their_own_model_and_effort() {
+        let (_dir, ctx) = codex_ctx("history");
+        let h = history(&ctx).await;
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].sid, SID);
+        assert_eq!(h[0].title, "Saved");
+        assert_eq!(h[0].model_id.as_deref(), Some("codex:gpt-a"));
+        assert_eq!(h[0].effort.as_deref(), Some("low"));
+        // Catalog not fetched yet: the chip falls back to the raw model id.
+        assert_eq!(h[0].model.as_deref(), Some("gpt-a"));
     }
 
     #[tokio::test]
-    async fn resume_with_no_choice_keeps_the_saved_codex_model_even_if_the_catalog_dropped_it() {
+    async fn history_labels_the_model_from_a_warm_catalog_and_marks_a_modelless_thread_as_codex() {
+        let (dir, ctx) = codex_ctx("labels");
+        *ctx.codex_models.lock().await = Some((
+            Instant::now(),
+            vec![ModelChoice {
+                value: "codex:gpt-a".into(),
+                model: "gpt-a".into(),
+                label: "GPT A".into(),
+                efforts: vec!["low".into()],
+                default_effort: "low".into(),
+            }],
+        ));
+        assert_eq!(history(&ctx).await[0].model.as_deref(), Some("GPT A"));
+        std::fs::write(
+            dir.join("threads.json"),
+            format!(r#"[{{"sid":"{SID}","dir":"/tmp","title":"t","ts":1,"model":null,"effort":null}}]"#),
+        )
+        .unwrap();
+        ctx.codex_threads.lock().await.take();
+        let h = history(&ctx).await;
+        assert_eq!((h[0].model.as_deref(), h[0].model_id.as_deref()), (Some("Codex"), Some("codex")));
+    }
+
+    #[tokio::test]
+    async fn history_is_cached_briefly_so_the_poll_does_not_spawn_node_every_time() {
+        let (dir, ctx) = codex_ctx("cache");
+        assert_eq!(history(&ctx).await.len(), 1);
+        std::fs::write(dir.join("threads.json"), "[]").unwrap();
+        assert_eq!(history(&ctx).await.len(), 1, "within the TTL the first answer stands");
+        ctx.codex_threads.lock().await.take();
+        assert!(history(&ctx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_codex_state_hides_codex_threads_without_failing_the_list() {
+        let (dir, ctx) = codex_ctx("unreadable");
+        std::fs::write(dir.join("threads.json"), r#"{"error":"Codex threads unavailable"}"#).unwrap();
+        assert!(history(&ctx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resume_applies_a_chosen_model_and_effort_to_the_codex_session() {
+        let (dir, ctx) = codex_ctx("pick");
+        resume(&ctx, SID, Some("codex:gpt-b"), Some("high")).await.unwrap();
+        let s = saved_state(&dir);
+        assert_eq!((s.model.as_deref(), s.effort.as_deref()), (Some("gpt-b"), Some("high")));
+        assert_eq!(s.model_label.as_deref(), Some("GPT B"));
+        assert_eq!(s.sid.as_deref(), Some(SID), "the thread being resumed must survive");
+    }
+
+    #[tokio::test]
+    async fn resume_with_no_choice_keeps_codexs_model_even_if_the_catalog_dropped_it() {
         let (dir, ctx) = codex_ctx("keep");
-        resume(&ctx, CODEX_SID, None, None).await.unwrap();
+        resume(&ctx, SID, None, None).await.unwrap();
         let s = saved_state(&dir);
         assert_eq!((s.model.as_deref(), s.effort.as_deref()), (Some("gpt-a"), Some("low")));
+        assert!(!dir.join(".claude/cdash-codex/history").exists(), "the bridge keeps no history copy");
+    }
+
+    #[tokio::test]
+    async fn resume_reads_codex_fresh_rather_than_from_the_poll_cache() {
+        let (dir, ctx) = codex_ctx("fresh");
+        assert_eq!(history(&ctx).await.len(), 1);
+        std::fs::write(
+            dir.join("threads.json"),
+            row(&dir).replace("gpt-a", "gpt-moved-on"),
+        )
+        .unwrap();
+        resume(&ctx, SID, None, None).await.unwrap();
+        assert_eq!(saved_state(&dir).model.as_deref(), Some("gpt-moved-on"));
+    }
+
+    #[tokio::test]
+    async fn resume_of_a_sid_codex_does_not_know_falls_through() {
+        let (dir, ctx) = codex_ctx("unknown");
+        let other = "99999999-1234-1234-1234-0123456789ab";
+        assert!(resume(&ctx, other, None, None).await.unwrap().is_none());
+        assert!(!dir.join("tmux-args").exists());
     }
 
     #[tokio::test]
@@ -507,9 +516,66 @@ mod tests {
             (Some("codex:nope"), None),
             (Some("codex:gpt-b"), Some("max")),
         ] {
-            let e = resume(&ctx, CODEX_SID, model, effort).await.unwrap_err();
+            let e = resume(&ctx, SID, model, effort).await.unwrap_err();
             assert!(matches!(e, Refused::BadRequest(_)), "{model:?} {effort:?}: {e:?}");
         }
         assert!(!dir.join("tmux-args").exists());
+    }
+
+    #[tokio::test]
+    async fn unavailable_codex_does_not_block_claude_or_spawn_phantom_panes() {
+        for installed in [false, true] {
+            // Codex signed out: node answers every catalog query with an empty list.
+            let (dir, ctx) = host_in(&format!("signedout-{installed}"), installed, "[]");
+            assert!(models(&ctx).await.unwrap().is_empty());
+            assert!(super::super::usage::fetch_codex_usage(&ctx).await.unwrap().is_empty());
+            let start = Instant::now();
+            assert!(ctx.codex_usage.get_codex(&ctx).is_none());
+            assert!(start.elapsed() < Duration::from_secs(1));
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if let Some(tiles) = ctx.codex_usage.get_codex(&ctx) {
+                        assert!(tiles.is_empty());
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(ctx.host.log.lines().is_empty(), "unavailable optional Codex should not log failures");
+            // A previously signed-in picker must not bypass the fresh launch check.
+            *ctx.codex_models.lock().await = Some((
+                Instant::now(),
+                vec![ModelChoice {
+                    value: "codex:gpt-check".into(),
+                    model: "gpt-check".into(),
+                    label: "GPT Check".into(),
+                    efforts: vec!["low".into()],
+                    default_effort: "low".into(),
+                }],
+            ));
+            let err = launch(&ctx, dir.to_str().unwrap(), Some("gpt-check"), "low", None)
+                .await
+                .unwrap_err();
+            let reason = if installed { "codex login" } else { "not installed" };
+            assert!(matches!(err, Refused::BadRequest(ref m) if m.contains(reason)));
+            assert!(!dir.join(".claude/cdash-codex").exists());
+            if installed {
+                // Codex's thread stays listed; resume refuses before creating a pane.
+                assert_eq!(history(&ctx).await.len(), 1);
+                let err = resume(&ctx, SID, None, None).await.unwrap_err();
+                assert!(matches!(err, Refused::BadRequest(ref m) if m.contains(reason)));
+            } else {
+                // Without the codex binary its threads cannot be resumed, so they are not offered.
+                assert!(history(&ctx).await.is_empty());
+                assert!(resume(&ctx, SID, None, None).await.unwrap().is_none());
+            }
+            assert!(!dir.join("tmux-args").exists());
+            assert!(super::super::spawn::launch_session(&ctx, dir.to_str().unwrap(), "sonnet", "medium")
+                .await
+                .is_ok());
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 }

@@ -277,7 +277,10 @@ mod tests {
             path,
             sampler: std::sync::Mutex::new(crate::host::sample::Sampler::new()),
         };
-        Arc::new(Ctx::new(host, claude_dir, None))
+        let ctx = Arc::new(Ctx::new(host, claude_dir, None));
+        // Hermetic: say "Codex has no threads" instead of reading this machine's ~/.codex.
+        *ctx.codex_threads.try_lock().unwrap() = Some((std::time::Instant::now(), vec![]));
+        ctx
     }
 
     /// Write a history entry plus a transcript with `turns` assistant messages.

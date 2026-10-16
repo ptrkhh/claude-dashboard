@@ -34,6 +34,8 @@ pub struct Ctx {
     pub usage: Arc<UsageCache>,
     pub codex_usage: Arc<UsageCache>,
     pub codex_models: tokio::sync::Mutex<Option<(std::time::Instant, Vec<super::codex::ModelChoice>)>>,
+    /// Codex's thread list as of the last read; see `codex::history`.
+    pub codex_threads: tokio::sync::Mutex<Option<(std::time::Instant, Vec<super::codex::Thread>)>>,
     /// Set once at boot when `CDASH_AUTH` includes `password`. A `OnceLock`
     /// because `Ctx` is shared behind an `Arc` by the time the policy exists.
     pub password: std::sync::OnceLock<crate::auth::login::PasswordState>,
@@ -58,6 +60,7 @@ impl Ctx {
             usage: Arc::new(UsageCache::new()),
             codex_usage: Arc::new(UsageCache::new()),
             codex_models: tokio::sync::Mutex::new(None),
+            codex_threads: tokio::sync::Mutex::new(None),
             password: std::sync::OnceLock::new(),
         }
     }
