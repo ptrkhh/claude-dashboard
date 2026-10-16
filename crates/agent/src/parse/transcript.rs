@@ -7,6 +7,10 @@ pub struct Transcript {
     pub title: Option<String>,
     pub assistant_count: u32,
     pub last_assistant_text: Option<String>,
+    /// Full model id of the last assistant turn that named a real one, and that
+    /// same turn's effort (`None` on models with no effort setting).
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 /// Parse a session transcript (newline-delimited JSON) into summary fields.
@@ -38,6 +42,13 @@ pub fn parse_transcript(jsonl: &str) -> Transcript {
 
         if e.get("type").and_then(|v| v.as_str()) == Some("assistant") {
             t.assistant_count += 1;
+            // `<synthetic>` marks a placeholder turn (an error, a local command), not a model.
+            if let Some(m) = e.pointer("/message/model").and_then(|v| v.as_str()) {
+                if m != "<synthetic>" {
+                    t.model = Some(m.to_string());
+                    t.effort = e.get("effort").and_then(|v| v.as_str()).map(str::to_string);
+                }
+            }
             let text = e
                 .get("message")
                 .and_then(|m| m.get("content"))
@@ -102,6 +113,39 @@ mod tests {
         assert_eq!(t.title.as_deref(), Some("Fix auth bug"));
         assert_eq!(t.assistant_count, 2);
         assert_eq!(t.last_assistant_text.as_deref(), Some("done, tests pass"));
+    }
+
+    #[test]
+    fn model_is_the_last_assistant_turns_so_a_mid_session_switch_wins() {
+        let jsonl = [
+            r#"{"type":"assistant","message":{"model":"claude-sonnet-5-5","content":[]}}"#,
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5","content":[]}}"#,
+            r#"{"type":"assistant","message":{"content":[]}}"#,
+        ]
+        .join("\n");
+        assert_eq!(parse_transcript(&jsonl).model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(parse_transcript(r#"{"type":"user"}"#).model, None);
+    }
+
+    #[test]
+    fn effort_comes_from_the_same_turn_as_the_model_and_synthetic_turns_are_skipped() {
+        let jsonl = [
+            r#"{"type":"assistant","effort":"xhigh","message":{"model":"claude-opus-5-5","content":[]}}"#,
+            // An error/placeholder turn names no real model and must not mask the session's own.
+            r#"{"type":"assistant","message":{"model":"<synthetic>","content":[]}}"#,
+        ]
+        .join("\n");
+        let m = parse_transcript(&jsonl);
+        assert_eq!((m.model.as_deref(), m.effort.as_deref()), (Some("claude-opus-5-5"), Some("xhigh")));
+
+        // A later turn on a model with no effort setting must not inherit an earlier model's.
+        let jsonl = [
+            r#"{"type":"assistant","effort":"xhigh","message":{"model":"claude-opus-5-5","content":[]}}"#,
+            r#"{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","content":[]}}"#,
+        ]
+        .join("\n");
+        let m = parse_transcript(&jsonl);
+        assert_eq!((m.model.as_deref(), m.effort.as_deref()), (Some("claude-haiku-4-5-20251001"), None));
     }
 
     #[test]

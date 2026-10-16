@@ -191,6 +191,7 @@ Managed sessions use names such as `[Codex] claude-dashboard · elephant` or
 `[Claude] claude-dashboard · rabbit` in the dashboard and Claude Remote Control.
 Animals come from a pool of 32 familiar animals and stay the same on resume.
 Duplicate display names are allowed, with no numeric suffixes.
+Codex stores the animal label separately from its model and effort metadata.
 
 Choose a **GPT** model in the launcher, choose a supported effort, then launch.
 The agent discovers model names and efforts through Codex's `model/list` RPC,
@@ -217,9 +218,16 @@ Claude usage and session controls remain available. Model availability and
 subscription quota availability are independent.
 The dashboard owns the tmux pane and supports send, kill, resume, and **Open in
 Claude**. Codex uses the selected model and effort with its existing permissions.
-Running and resumable sessions retain the effective model, display name, and
-effort; resuming preserves those choices. Older sessions learn their model
-when resumed with the updated bridge.
+Running sessions show their effective model, display name, and effort.
+Resumable cards show the model each session last used and have model and
+effort pickers, preselected to it; **Resume** applies what is selected, for
+Claude and Codex sessions alike. A session only resumes with its own
+provider's models, because a Claude transcript and a Codex thread cannot stand
+in for each other. For Codex the model and effort come from Codex's own state
+database (`state_N.sqlite` under `$CODEX_HOME`, read-only through `node:sqlite`),
+so a thread you continued elsewhere shows what it actually ran with; the
+dashboard keeps no copy. If that database cannot be read, Codex sessions are
+left out of the resumable list.
 The pane accepts text prompts; it is a bridge console rather than the native
 Codex TUI. `/quit` stops it. Only sessions created by this dashboard are added
 to its Codex resume list.

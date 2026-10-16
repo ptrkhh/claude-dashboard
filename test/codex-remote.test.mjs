@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createConnection } from 'node:net';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 test('Codex launcher uses the saved animal name even when display names repeat', { timeout: 10_000 }, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'cdash-codex-name-'));
@@ -35,7 +36,6 @@ require('node:fs').writeFileSync(process.env.CDASH_CHECK_ARGS, JSON.stringify(pr
 // Exercises the real worker across process, RPC, SSE, and filesystem boundaries.
 test('Codex bridge dispatches string SSE sequences, persists resume, rotates credentials, and denies unsupported requests', { timeout: 25_000 }, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'cdash-codex-check-'));
-  await mkdir(join(dir, 'history'));
   const state = join(dir, 'session.json'), wire = join(dir, 'wire.jsonl');
   await writeFile(state, JSON.stringify({ dir, sid: null, effort: 'low', display_name: '[Codex] project · elephant' }));
   await writeFile(wire, '');
@@ -119,6 +119,8 @@ createInterface({input:process.stdin}).on('line',line=>{
   assert.ok(first.some(m => m.rpc?.id === 500 && m.rpc.error?.code === -32601));
   assert.ok(first.some(m => m.body?.events?.some(e => e.payload.type === 'assistant')));
   assert.equal(JSON.parse(await readFile(state, 'utf8')).remote_sequence, 11);
+  assert.equal(await readFile(join(dir, '01234567-1234-1234-1234-0123456789ab.name'), 'utf8'), '[Codex] project · elephant');
+  assert.deepEqual((await readdir(dir)).filter(f => f === 'history'), [], 'Codex owns thread history; the bridge keeps no copy');
   child.stdin.write(JSON.stringify({type:'update_environment_variables',variables:{CLAUDE_CODE_SESSION_ACCESS_TOKEN:'rotated'}})+'\n');
   const socket = createConnection(join(tmpdir(), `cdash-codex-${process.getuid()}-${createHash('sha256').update(state).digest('hex').slice(0,16)}`, 'input.sock'));
   await new Promise((r,j) => { socket.once('error',j); socket.once('connect',()=>socket.end('third',r)); });
@@ -193,4 +195,44 @@ createInterface({input:process.stdin}).on('line',line=>{
     'account/read': 11000,
   });
   assert.deepEqual(timeout, { error: 'Codex account/read timed out' });
+});
+
+test('Codex --threads lists only unarchived dashboard threads from the newest state database', { timeout: 15_000 }, async t => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const home = await mkdtemp(join(tmpdir(), 'cdash-codex-threads-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const make = (file, rows) => {
+    const db = new DatabaseSync(join(home, file));
+    db.exec(`create table threads (id text primary key, cwd text, title text, name text,
+      updated_at_ms integer, model text, reasoning_effort text, originator text, archived integer)`);
+    const add = db.prepare('insert into threads values (?,?,?,?,?,?,?,?,?)');
+    for (const r of rows) add.run(...r);
+    db.close();
+  };
+  // An older schema generation must lose to the newer one.
+  make('state_4.sqlite', [['stale', '/old', 'stale', null, 1, 'old', 'low', 'claude_dashboard', 0]]);
+  make('state_5.sqlite', [
+    ['a', '/work/a', 'first prompt', null, 300, 'gpt-b', 'high', 'claude_dashboard', 0],
+    ['b', '/work/b', 'old title', 'Renamed', 200, null, null, 'claude_dashboard', 0],
+    ['c', '/work/c', 'archived', null, 100, 'gpt-b', 'low', 'claude_dashboard', 1],
+    ['d', '/work/d', 'from the codex cli', null, 400, 'gpt-b', 'low', 'codex-tui', 0],
+    ['e', '/work/e', '', null, 500, 'gpt-b', 'low', 'claude_dashboard', 0],
+  ]);
+  const run = codexHome => new Promise((done, reject) => {
+    // Exactly how the agent runs it (`codex::query`): as `-e` source, where the
+    // flag is process.argv[1], not part of a script path's arguments.
+    const source = readFileSync(resolve('crates/agent/src/collect/codex-remote.mjs'), 'utf8');
+    const child = spawn(process.execPath, ['--input-type=module', '-e', source, '--', '--threads'], {
+      env: { ...process.env, CODEX_HOME: codexHome }, stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    let out = '';
+    child.stdout.on('data', b => { out += b; });
+    child.on('error', reject);
+    child.on('exit', () => { try { done(JSON.parse(out)); } catch (e) { reject(e); } });
+  });
+  assert.deepEqual(await run(home), [
+    { sid: 'a', dir: '/work/a', title: 'first prompt', ts: 300, model: 'gpt-b', effort: 'high' },
+    { sid: 'b', dir: '/work/b', title: 'Renamed', ts: 200, model: null, effort: null },
+  ]);
+  assert.deepEqual(await run(join(home, 'no-codex-here')), [], 'no Codex state is an empty list, not an error');
 });

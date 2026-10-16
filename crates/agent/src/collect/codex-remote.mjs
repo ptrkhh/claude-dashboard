@@ -4,10 +4,10 @@ import { spawn } from 'node:child_process';
 import { randomUUID, createHash } from 'node:crypto';
 import { createServer, createConnection } from 'node:net';
 import { createInterface } from 'node:readline';
-import { readFile, writeFile, rename, mkdir, chmod, rm } from 'node:fs/promises';
+import { readFile, writeFile, rename, mkdir, chmod, rm, readdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const args = process.argv.slice(2);
@@ -195,12 +195,18 @@ async function worker() {
   const approvals = new Map();
   const items = new Map();
   let models = [];
-  let outgoing = Promise.resolve(), saved = Promise.resolve(), queue = Promise.resolve();
+  let outgoing = Promise.resolve(), saved = Promise.resolve(), queue = Promise.resolve(), savedNamePath;
   const emit = payload => { outgoing = outgoing.then(() => remote.event(payload)); outgoing.catch(fatal); return outgoing; };
   const save = () => {
     const json = JSON.stringify(state);
-    const history = state.sid && join(dirname(statePath), 'history', `${state.sid}.json`);
-    saved = saved.then(async () => { await atomic(statePath, json); if (history) await atomic(history, json); });
+    const namePath = /^[0-9a-f-]{36}$/i.test(state.sid || '') && state.display_name && join(dirname(statePath), `${state.sid}.name`);
+    saved = saved.then(async () => {
+      await atomic(statePath, json);
+      if (namePath && namePath !== savedNamePath) {
+        await atomic(namePath, state.display_name);
+        savedNamePath = namePath;
+      }
+    });
     saved.catch(fatal);
     return saved;
   };
@@ -382,7 +388,28 @@ async function launcher() {
 
 for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(signal, () => { stop(); setTimeout(() => process.exit(0), 5000).unref(); });
 const queryMode = ['--models', '--usage'].find(mode => process.argv.includes(mode));
-if (queryMode) {
+if (process.argv.includes('--threads')) {
+  // Resumable dashboard threads, read from Codex's own state database: it is
+  // what Codex itself records per thread, so a thread continued elsewhere
+  // shows its real model. Read-only; Codex owns the file.
+  // ponytail: `node:sqlite` keeps the agent free of a sqlite dependency; if
+  // Codex's schema moves, this reports an error and the list simply has no Codex rows.
+  (async () => {
+    const home = process.env.CODEX_HOME || join(homedir(), '.codex');
+    // The number is Codex's schema generation; the newest one is the live one.
+    const files = (await readdir(home).catch(() => [])).map(f => /^state_(\d+)\.sqlite$/.exec(f)).filter(Boolean);
+    if (!files.length) return [];
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(join(home, files.sort((a, b) => b[1] - a[1])[0][0]), { readOnly: true });
+    try {
+      return db.prepare(`select id as sid, cwd as dir, coalesce(nullif(name, ''), title) as title,
+          updated_at_ms as ts, model, reasoning_effort as effort
+        from threads
+        where originator = 'claude_dashboard' and archived = 0 and coalesce(nullif(name, ''), title) <> ''
+        order by updated_at_ms desc`).all();
+    } finally { db.close(); }
+  })().then(rows => console.log(JSON.stringify(rows)), () => console.log(JSON.stringify({ error: 'Codex threads unavailable' })));
+} else if (queryMode) {
   const codex = new Codex(async () => {});
   stop = () => codex.close();
   let timedOut = false;

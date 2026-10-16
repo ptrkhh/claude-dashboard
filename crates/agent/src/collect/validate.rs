@@ -64,6 +64,17 @@ pub fn assert_valid_sid(sid: &str) -> Result<(), BadRequest> {
     }
 }
 
+/// Codex model picks are `codex:<model>`; bare `codex` is the legacy default.
+pub fn is_codex_model(model: &str) -> bool {
+    model == "codex" || model.starts_with("codex:")
+}
+
+/// The picker value for a full model id from a transcript (`claude-opus-5-5`
+/// → `opus`); `None` for anything we cannot pass back to `--model`.
+pub fn model_alias(id: &str) -> Option<&'static str> {
+    MODELS.iter().copied().filter(|m| *m != "codex").find(|m| id.contains(m))
+}
+
 pub fn assert_model(model: &str) -> Result<(), BadRequest> {
     if MODELS.contains(&model) {
         Ok(())
@@ -129,6 +140,16 @@ mod tests {
         // makes it structural rather than a flag nobody set.
         assert!(assert_valid_sid("2f8a1c94-3b7e-4d51-9a02-6c5f8e1b7d34\nrm -rf /").is_err());
         assert!(assert_kill_name("cdash-ok\nrm -rf /").is_err());
+    }
+
+    #[test]
+    fn model_alias_maps_full_ids_to_picker_values_and_ignores_the_rest() {
+        assert_eq!(model_alias("claude-sonnet-5-5"), Some("sonnet"));
+        assert_eq!(model_alias("claude-opus-4-1-20250805"), Some("opus"));
+        assert_eq!(model_alias("claude-haiku-5-5"), Some("haiku"));
+        assert_eq!(model_alias("claude-fable-5-1"), Some("fable"));
+        assert_eq!(model_alias("<synthetic>"), None);
+        assert_eq!(model_alias("gpt-5"), None);
     }
 
     #[test]
