@@ -216,7 +216,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             prompts: g.prompts,
             model: model.clone(),
             model_id: model,
-            effort: None,
+            effort: t.effort.clone(),
         });
     }
 
@@ -314,13 +314,14 @@ mod tests {
         let f = d.join("projects").join(crate::parse::paths::project_dir_name("/p/m")).join("aaa.jsonl");
         let body = std::fs::read_to_string(&f).unwrap().replace(
             "\"message\":{",
-            "\"message\":{\"model\":\"claude-opus-5-5\",",
+            "\"message\":{\"model\":\"claude-opus-5-5\",").replace("{\"type\":\"assistant\",", "{\"type\":\"assistant\",\"effort\":\"xhigh\",",
         );
         std::fs::write(&f, body).unwrap();
         std::fs::write(d.join("history.jsonl"), a).unwrap();
 
         let r = collect_sessions(&ctx_for(d), RESUMABLE_MAX).await;
         assert_eq!(r.resumable[0].model.as_deref(), Some("opus"));
+        assert_eq!(r.resumable[0].effort.as_deref(), Some("xhigh"));
         assert_eq!(r.resumable[0].model_id.as_deref(), Some("opus"));
         let j = serde_json::to_string(&r.resumable[0]).unwrap();
         assert!(j.contains("\"modelId\":\"opus\""), "{j}");
