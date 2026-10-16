@@ -232,7 +232,7 @@ function gitBadge(g) {
   if (g.dirty) s += ` ●${g.dirty}`;
   if (g.ahead) s += ` ↑${g.ahead}`;
   if (g.behind) s += ` ↓${g.behind}`;
-  return `<span class="branch">${s}</span>`;
+  return `<span class="branch" title="${esc(g.branch)}">${s}</span>`;
 }
 
 function statTile({ label, value, pct, sub, title }) {
@@ -270,12 +270,11 @@ function runningCard(r) {
       <div class="session-head">
         <div class="session-headline">
           <span class="session-title">${esc(r.displayName || r.dir.split('/').pop())}</span>
-          ${gitBadge(r.git)}
         </div>
         <span class="status ${r.working ? 'on' : 'off'}"><span class="dot"></span>${r.working ? 'Working' : 'Waiting'}</span>
       </div>
       <div class="session-meta">
-        ${chipHtml}<span>cpu ${r.cpu ?? '—'}%</span><span class="sep">·</span><span>${fmtKb(r.rssKb)}</span>
+        ${chipHtml}${gitBadge(r.git)}
         <span class="time">${fmtUp(r.uptimeSec)}</span>
       </div>
       ${peek}
