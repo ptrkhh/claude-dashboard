@@ -181,6 +181,31 @@ class Remote {
   }
 }
 
+async function replayHistory(codex, threadId, remoteSid, emit) {
+  let cursor;
+  const seen = new Set();
+  do {
+    const page = await codex.call('thread/turns/list', {
+      threadId, limit: 50, sortDirection: 'asc', itemsView: 'full', ...(cursor ? { cursor } : {}),
+    });
+    for (const turn of page.data) for (const item of turn.items) {
+      const role = item.type === 'userMessage' ? 'user' : item.type === 'agentMessage' ? 'assistant' : null;
+      if (!role) continue;
+      const content = role === 'user'
+        ? item.content.filter(b => b.type === 'text').map(b => ({ type: 'text', text: b.text }))
+        : [{ type: 'text', text: item.text }];
+      if (!content.length) continue;
+      // Stable UUIDs let the remote deduplicate a replay interrupted by a crash.
+      const hash = createHash('sha256').update(JSON.stringify([remoteSid, threadId, turn.id, item.id])).digest('hex');
+      const uuid = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-8${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+      await emit({ uuid, type: role, message: { id: item.id, role, content, ...(role === 'assistant' ? { stop_reason: 'end_turn' } : {}) } });
+    }
+    cursor = page.nextCursor;
+    if (cursor && seen.has(cursor)) throw Error('Repeated Codex history cursor');
+    seen.add(cursor);
+  } while (cursor);
+}
+
 let stop = () => {};
 function fatal(e) { console.error(`Codex bridge: ${e.message}`); stop(); setTimeout(() => process.exit(1), 5000).unref(); process.exitCode = 1; }
 
@@ -304,7 +329,7 @@ async function worker() {
   await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', title: 'Claude Dashboard Codex Bridge', version: '0.4.0' } });
   codex.send({ method: 'initialized' });
   if (!await codex.ready()) throw Error('Codex is signed out; run codex login on the agent host.');
-  const savedModel = state.model, savedLabel = state.model_label;
+  const savedModel = state.model, savedLabel = state.model_label, resuming = !!state.sid;
   const result = await codex.call(state.sid ? 'thread/resume' : 'thread/start', {
     ...(state.sid ? { threadId: state.sid, excludeTurns: true } : {}), cwd: state.dir,
     ...(state.model ? { model: state.model } : {}),
@@ -319,9 +344,12 @@ async function worker() {
   remote.model = state.model;
   await save();
   if (state.remote_sid === sid) remote.sequence = state.remote_sequence || 0;
-  else { state.remote_sid = sid; state.remote_sequence = 0; await save(); }
   await remote.state('idle');
+  heartbeat = setInterval(() => remote.retry('/worker/heartbeat', 'POST', { session_id: sid, worker_epoch: remote.epoch }).catch(fatal), 30_000);
   await emit({ type: 'system', subtype: 'init', cwd: state.dir, model: state.model, tools: [], mcp_servers: [], permissionMode: 'default', slash_commands: [] });
+  if (resuming && state.remote_sid !== sid) await replayHistory(codex, state.sid, sid, emit);
+  // Commit the remote identity only after every history upload succeeds.
+  state.remote_sid = sid; state.remote_sequence = remote.sequence; await save();
   const rcId = sid.replace(/^cse_/, 'session_');
   await atomic(`${statePath.replace(/\.json$/, '')}.link`, `https://claude.ai/code/${rcId}`);
   const dir = socketDir(statePath);
@@ -342,7 +370,6 @@ async function worker() {
   });
   await new Promise((r, j) => { local.once('error', j); local.listen(socketPath(statePath), r); });
   await chmod(socketPath(statePath), 0o600);
-  heartbeat = setInterval(() => remote.retry('/worker/heartbeat', 'POST', { session_id: sid, worker_epoch: remote.epoch }).catch(fatal), 30_000);
   console.log(`Codex thread ${state.sid} ready`);
   await remote.listen(e => {
     queue = queue.then(async () => {
