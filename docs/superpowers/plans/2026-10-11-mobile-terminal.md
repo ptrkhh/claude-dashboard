@@ -1,5 +1,38 @@
 # Mobile Terminal Implementation Plan
 
+## Implementation status (2026-10-17)
+
+Tasks 1–7 and the README changes in task 8 are implemented. The step checkboxes
+below describe the original implementation procedure, not remaining work.
+Current `origin/master` (`a1a2f24`) is merged, including branch metadata, the
+60-second polling interval, and the stats-row and battery-meter fixes.
+
+Verification after the merge:
+
+- `cargo test --all --locked`: 324 tests passed, including real tmux terminal
+  input, resize, close codes, disconnect cleanup, and route authentication.
+- `cargo clippy --all-targets --locked -- -D warnings -D clippy::disallowed_types`:
+  passed.
+- `cargo build --release --locked -p cdash-agent`: passed.
+- All 28 Node tests passed with `npm test -- --test-concurrency=1 test/*.test.mjs`.
+  A temporary curl wrapper limited connection setup to two seconds because this
+  computer drops connections to the failed-download fixture's port 1. Initial
+  parallel runs had an installer timing failure and a Codex thread-list timeout;
+  both passed on rerun. No production code or test assertions were changed.
+- Chromium smoke test against the release binary: typed input, key-bar Enter,
+  sticky Ctrl, portrait-to-landscape resize, reopen, close button, and browser
+  Back passed. Closing detached the client and preserved the tmux session.
+- The local `~/cdash-agent` was replaced and restarted with its existing
+  environment. Health, the running binary's SHA-256, embedded assets, and the
+  same browser smoke test passed against port 23274. The previous binary is
+  retained as `~/cdash-agent.before-mobile-terminal-20261017`.
+
+Physical Android Tauri and mobile Chrome checks in task 8 remain unrun: native
+IME composition and keyboard resizing, `/mcp`, Shift+Tab, and fullscreen
+conversation scrolling require device testing. Browser viewport resizing does
+not prove native keyboard behavior. Remote profiles requiring authentication
+headers and DNS-rebinding protection retain the design's documented limits.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the single-line send bar with a Terminal button that opens a dashboard session's real Claude Code TUI on a phone, with a key bar for the keys a phone keyboard lacks.

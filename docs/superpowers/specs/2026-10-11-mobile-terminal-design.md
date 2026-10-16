@@ -1,7 +1,7 @@
 # Mobile terminal for dashboard sessions
 
 Date: 2026-10-11
-Status: approved design, pending implementation plan
+Status: implemented; physical Android and mobile Chrome verification pending
 
 ## Goal
 
