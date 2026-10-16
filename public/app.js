@@ -230,7 +230,7 @@ function gitBadge(g) {
   if (g.dirty) s += ` ●${g.dirty}`;
   if (g.ahead) s += ` ↑${g.ahead}`;
   if (g.behind) s += ` ↓${g.behind}`;
-  return `<span class="branch">${s}</span>`;
+  return `<span class="branch" title="${esc(g.branch)}">${s}</span>`;
 }
 
 function statTile({ label, value, pct, sub, title }) {
@@ -264,12 +264,11 @@ function runningCard(r) {
       <div class="session-head">
         <div class="session-headline">
           <span class="session-title">${esc(r.displayName || r.dir.split('/').pop())}</span>
-          ${gitBadge(r.git)}
         </div>
         <span class="status ${r.working ? 'on' : 'off'}"><span class="dot"></span>${r.working ? 'Working' : 'Waiting'}</span>
       </div>
       <div class="session-meta">
-        ${chipHtml}<span>cpu ${r.cpu ?? '—'}%</span><span class="sep">·</span><span>${fmtKb(r.rssKb)}</span>
+        ${chipHtml}${gitBadge(r.git)}
         <span class="time">${fmtUp(r.uptimeSec)}</span>
       </div>
       ${peek}
@@ -343,27 +342,29 @@ function render(d) {
   $('#nres').textContent = d.resumable.length;
 
   const st = d.stats;
-  const tiles = [
+  const hardwareTiles = [
     { label: 'CPU', value: `${st.cpuPct}<span class="unit">%</span>`, pct: st.cpuPct },
     { label: 'RAM', value: `${fmtKb(st.ramUsedKb)}<span class="unit"> / ${fmtKb(st.ramTotalKb)}</span>`, pct: st.ramTotalKb ? Math.round(st.ramUsedKb / st.ramTotalKb * 100) : null },
     ...st.disks.map(x => ({ label: esc(x.mount), value: `${fmtKb(x.freeKb)}<span class="unit"> free</span>`, pct: x.totalKb ? Math.round((x.totalKb - x.freeKb) / x.totalKb * 100) : null })),
     ...(Number.isFinite(st.battery?.pct) && st.battery.pct >= 0 && st.battery.pct <= 100 && typeof st.battery.plugged === 'boolean' ? [{
       label: 'Battery', value: `${st.battery.pct}<span class="unit">%</span>`,
+      pct: st.battery.pct,
       sub: st.battery.plugged ? 'Plugged in' : 'Unplugged',
     }] : []),
-    // Absent for API-key users and until the first background refresh lands.
-    ...[
-      ...(st.claudeUsage || []).map(u => ({ ...u, short: `Claude ${u.short}`, long: `Claude: ${u.long}` })),
-      ...(st.codexUsage || []),
-    ].map(u => ({
-      label: esc(u.short),
-      value: `${u.pct}<span class="unit">% used</span>`,
-      pct: u.pct,
-      sub: u.resetsAt ? `Resets ${fmtReset(u.resetsAt)}` : null,
-      title: u.long,
-    })),
   ];
-  $('#stats').innerHTML = tiles.map(statTile).join('');
+  // Absent for API-key users and until the first background refresh lands.
+  const usageTiles = [
+    ...(st.claudeUsage || []).map(u => ({ ...u, short: `Claude ${u.short}`, long: `Claude: ${u.long}` })),
+    ...(st.codexUsage || []),
+  ].map(u => ({
+    label: esc(u.short),
+    value: `${u.pct}<span class="unit">% used</span>`,
+    pct: u.pct,
+    sub: u.resetsAt ? `Resets ${fmtReset(u.resetsAt)}` : null,
+    title: u.long,
+  }));
+  $('#stats').innerHTML = [hardwareTiles, usageTiles].filter(row => row.length)
+    .map(row => `<div class="stats-row">${row.map(statTile).join('')}</div>`).join('');
 
   $('#running').innerHTML = d.running.map(runningCard).join('') || '<div class="empty">No running sessions</div>';
   lastRes = d.resumable;

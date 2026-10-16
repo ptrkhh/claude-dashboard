@@ -7,27 +7,59 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 
-test('battery tile shows percentage and connection only with both readings', () => {
+function statsRenderer() {
   const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const statTile = src.slice(src.indexOf('function statTile('), src.indexOf('function runningCard('));
   const render = src.slice(src.indexOf('function render(d) {'), src.indexOf("document.body.addEventListener('click'", src.indexOf('function render(d) {')));
   const nodes = {};
   const context = {
     $: id => nodes[id] ||= {},
     document: { activeElement: null },
-    esc: s => s, fmtKb: String, statTile: tile => JSON.stringify(tile),
+    esc: s => s, fmtKb: String, fmtReset: String,
     runningCard: () => '', resumableCard: () => '',
     resLimit: 20,
   };
-  runInNewContext(`${render}; this.render = render;`, context);
-  const show = battery => {
-    context.render({ running: [], resumable: [], stats: { cpuPct: 1, ramUsedKb: 1, ramTotalKb: 2, disks: [], battery } });
+  runInNewContext(`${statTile}\n${render}; this.render = render;`, context);
+  return stats => {
+    context.render({ running: [], resumable: [], stats: { cpuPct: 1, ramUsedKb: 1, ramTotalKb: 2, disks: [], ...stats } });
     return nodes['#stats'].innerHTML;
   };
-  for (const battery of [undefined, null, {}, { pct: 50 }, { pct: null, plugged: true }, { pct: 101, plugged: true }])
+}
+
+test('battery tile shows percentage, meter and connection only with both readings', () => {
+  const render = statsRenderer();
+  const show = battery => render({ battery });
+  for (const battery of [undefined, null, {}, { pct: 50 }, { pct: null, plugged: true }, { pct: -1, plugged: false }, { pct: 101, plugged: true }])
     assert.ok(!show(battery).includes('Battery'));
   assert.match(show({ pct: 100, plugged: true }), /Battery.*100.*Plugged in/);
   assert.match(show({ pct: 0, plugged: false }), /Battery.*0.*Unplugged/);
+  for (const pct of [0, 50, 100]) {
+    const tile = show({ pct, plugged: false }).split('Battery')[1];
+    assert.match(tile, new RegExp(`class="meter-fill [^"]*" style="width:${pct}%"`));
+  }
   assert.ok(!show(undefined).includes('Battery'), 'tile disappears if a later poll loses readings');
+});
+
+test('hardware and usage tiles stay in separate rows as optional readings disappear', () => {
+  const show = statsRenderer();
+  const stats = {
+    disks: [{ mount: '/', freeKb: 50, totalKb: 100 }, { mount: '/data', freeKb: 25, totalKb: 100 }],
+    battery: { pct: 50, plugged: true },
+    claudeUsage: [{ short: '5h', long: 'Five hours', pct: 25 }],
+    codexUsage: [{ short: 'Codex 5h', long: 'Codex five hours', pct: 75 }],
+  };
+  const rows = html => html.split('<div class="stats-row">').slice(1);
+  const both = rows(show(stats));
+  assert.equal(both.length, 2);
+  assert.match(both[0], /CPU.*RAM.*\/.*\/data.*Battery/);
+  assert.doesNotMatch(both[0], /Claude|Codex/);
+  assert.match(both[1], /Claude 5h.*Codex 5h/);
+  const claudeOnly = rows(show({ ...stats, battery: null, codexUsage: [] }));
+  assert.equal(claudeOnly.length, 2);
+  assert.doesNotMatch(claudeOnly[0], /Battery/);
+  assert.match(claudeOnly[1], /Claude 5h/);
+  assert.doesNotMatch(claudeOnly[1], /Codex/);
+  assert.equal(rows(show({})).length, 1, 'no empty usage row');
 });
 
 test('app.js is wrapped so a second evaluation cannot throw', () => {
