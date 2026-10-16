@@ -98,7 +98,23 @@ async function luna(input, cwd, Codex, setStop) {
   const home = join(cwd, 'codex');
   await mkdir(home, { mode: 0o700 });
   await symlink(join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'auth.json'), join(home, 'auth.json'));
-  await writeFile(join(home, 'config.toml'), 'project_doc_max_bytes=0\nweb_search="disabled"\n[features]\nshell_tool=false\nmulti_agent=false\n', { mode: 0o600 });
+  await writeFile(join(home, 'config.toml'), `project_doc_max_bytes=0
+web_search="disabled"
+[skills]
+include_instructions=false
+[skills.bundled]
+enabled=false
+[features]
+shell_tool=false
+multi_agent=false
+apps=false
+skill_search=false
+skip_host_skill_discovery=true
+stable_environment_tools=false
+image_generation=false
+computer_use=false
+browser_use=false
+`, { mode: 0o600 });
   let resolveTurn, rejectTurn, output;
   const completed = new Promise((resolve, reject) => { resolveTurn = resolve; rejectTurn = reject; });
   // Attach immediately: a startup failure may precede awaiting turn completion.
@@ -127,7 +143,8 @@ async function luna(input, cwd, Codex, setStop) {
     if (!(await codex.models()).some(m => m.model === 'gpt-6-luna' && m.efforts.includes('low'))) throw Error('Luna unavailable');
     const thread = await codex.call('thread/start', { model: 'gpt-6-luna', cwd, ephemeral: true,
       baseInstructions: SYSTEM, developerInstructions: '', approvalPolicy: 'never', sandbox: 'read-only',
-      allowProviderModelFallback: false, dynamicTools: [], config: { model_reasoning_effort: 'low', project_doc_max_bytes: 0, web_search: 'disabled' } });
+      allowProviderModelFallback: false, dynamicTools: [], environments: [], selectedCapabilityRoots: [],
+      config: { model_reasoning_effort: 'low', project_doc_max_bytes: 0, web_search: 'disabled' } });
     await codex.call('turn/start', { threadId: thread.thread.id, model: 'gpt-6-luna', effort: 'low', outputSchema: SCHEMA,
       input: [{ type: 'text', text: input, text_elements: [] }] });
     return validateOutput(JSON.parse(await completed));

@@ -83,8 +83,8 @@ impl SummaryCache {
             if can_generate
                 && has_room
                 && !entry.busy
-                && (entry.observed != observed
-                    || (entry.failed && Instant::now() >= entry.retry_at))
+                && (!entry.failed || Instant::now() >= entry.retry_at)
+                && (entry.observed != observed || entry.failed)
             {
                 entry.busy = true;
                 entry.observed = observed;
@@ -228,6 +228,21 @@ mod tests {
             1
         );
         assert_eq!(sessions[0].summary.as_deref(), Some(preview.as_str()));
+        std::fs::write(
+            sessions[0].source_file.as_ref().unwrap(),
+            "history with a metadata change",
+        )
+        .unwrap();
+        SummaryCache::attach(&ctx, &mut sessions).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            std::fs::read_to_string(dir.join("calls"))
+                .unwrap()
+                .lines()
+                .count(),
+            1,
+            "metadata changes must not bypass provider failure backoff"
+        );
         let restarted = make_ctx();
         SummaryCache::attach(&restarted, &mut sessions).await;
         assert_eq!(sessions[0].summary.as_deref(), Some(preview.as_str()));

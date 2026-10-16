@@ -124,6 +124,11 @@ test('Luna uses meter RPCs and isolated Low; restart/metadata changes make no in
   assert.equal(thread.ephemeral, true);
   assert.equal(thread.allowProviderModelFallback, false);
   assert.deepEqual(thread.dynamicTools, []);
+  assert.deepEqual(thread.environments, []);
+  assert.deepEqual(thread.selectedCapabilityRoots, []);
+  assert.match(events[0].config, /skip_host_skill_discovery=true/);
+  assert.match(events[0].config, /include_instructions=false/);
+  assert.match(events[0].config, /image_generation=false/);
   assert.match(thread.baseInstructions, /only agreed unfinished actions/);
   assert.equal(turn.model, 'gpt-6-luna');assert.equal(turn.effort, 'low');
   assert.ok(events.every(e => !e.secret));
@@ -154,7 +159,7 @@ test('quota/auth/tool failures fall back to Haiku Low with identical prompt and 
     assert.equal(value('--tools'), '');assert.ok(h.args.includes('--safe-mode'));
     assert.ok(h.args.includes('--no-session-persistence'));assert.ok(!h.secret);
   }
-  assert.ok(events.some(e => e.rpc?.id === 99 && e.rpc.error), 'tool requests explicitly rejected');
+  assert.equal(events.filter(e => e.rpc?.method === 'turn/start').length, 1, 'only the tool-request case starts a Luna turn and still falls back');
 });
 
 test('native summaries bypass CLIs and new turns update incrementally; failed refresh keeps disk cache', { timeout: 15_000 }, async t => {
