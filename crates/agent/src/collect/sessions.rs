@@ -31,7 +31,6 @@ pub struct Resumable {
     pub dir: Option<String>,
     pub ts: f64,
     pub branch: Option<String>,
-    pub title: String,
     pub prompts: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -219,11 +218,6 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
         let model = t.model.as_deref().and_then(model_alias).map(str::to_owned);
         resumable.push(Resumable {
             display_name: Some(super::names::session_name("Claude", g.cwd.as_deref().unwrap_or("?"), &g.sid)),
-            title: t
-                .title
-                .clone()
-                .or_else(|| g.prompts.first().cloned())
-                .unwrap_or_else(|| "(untitled)".to_string()),
             sid: g.sid,
             dir: g.cwd,
             ts: g.ts,
@@ -244,6 +238,17 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
     resumable.sort_by(|a, b| b.ts.total_cmp(&a.ts));
     resumable.truncate(limit);
     super::summaries::SummaryCache::attach(ctx, &mut resumable).await;
+    for session in &mut resumable {
+        if session.summary.is_none()
+            && session.model_id.as_deref().is_some_and(|m| m.starts_with("codex"))
+        {
+            if let Some(file) = session.source_file.as_ref().filter(|p| p.is_absolute()) {
+                if let Some(transcript) = ctx.transcripts.get(file).await {
+                    session.prompts = transcript.prompts;
+                }
+            }
+        }
+    }
 
     let machine = {
         let mut s = ctx.host.sampler.lock().unwrap_or_else(|e| e.into_inner());
@@ -393,12 +398,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_title_falls_back_to_the_first_prompt_then_to_untitled() {
-        let d = tempdir("title");
+    async fn codex_without_summary_uses_rollout_prompts_and_tolerates_missing_files() {
+        let d = tempdir("codex-prompts");
+        let file = d.join("rollout.jsonl");
+        std::fs::write(&file, r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Fix the dashboard"}]}}"#).unwrap();
+        let ctx = ctx_for(d.clone());
+        *ctx.codex_threads.lock().await = Some((std::time::Instant::now(),
+            serde_json::from_value(serde_json::json!([
+                {"sid":"codex-readable", "dir":"/work", "title":"unused", "ts":300,
+                 "model":null, "effort":null, "rollout_path":file},
+                {"sid":"codex-missing", "dir":"/work", "title":"unused", "ts":200,
+                 "model":null, "effort":null, "rollout_path":d.join("missing.jsonl")}
+            ])).unwrap()));
+        let r = collect_sessions(&ctx, RESUMABLE_MAX).await;
+        assert_eq!(r.resumable.len(), 2);
+        assert_eq!(r.resumable[0].prompts, vec!["Fix the dashboard"]);
+        assert!(r.resumable[1].prompts.is_empty());
+        assert!(r.resumable[0].summary.is_none());
+    }
+
+    #[tokio::test]
+    async fn claude_without_summary_keeps_its_recent_prompt_fallback() {
+        let d = tempdir("prompt-fallback");
         let a = seed(&d, "ddd", "/p", 300, 3);
         std::fs::write(d.join("history.jsonl"), a).unwrap();
         let r = collect_sessions(&ctx_for(d), RESUMABLE_MAX).await;
-        assert_eq!(r.resumable[0].title, "do the thing");
+        assert_eq!(r.resumable[0].prompts, vec!["do the thing"]);
+        assert!(serde_json::to_value(&r.resumable[0]).unwrap().get("title").is_none());
     }
 
     #[tokio::test]

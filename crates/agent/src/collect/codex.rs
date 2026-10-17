@@ -79,8 +79,6 @@ pub struct CodexSession {
     pub working: bool,
     pub last_message: Option<String>,
     #[serde(default)]
-    pub title: String,
-    #[serde(default)]
     pub ts: f64,
     pub effort: Option<String>,
     pub model: Option<String>,
@@ -129,7 +127,6 @@ pub struct Thread {
     display_name: Option<String>,
     sid: String,
     dir: String,
-    title: String,
     ts: f64,
     model: Option<String>,
     effort: Option<String>,
@@ -345,7 +342,6 @@ pub async fn resume(
         display_name: t.display_name,
         dir: t.dir,
         sid: Some(t.sid),
-        title: t.title,
         ts: t.ts,
         model: t.model,
         effort: t.effort,
@@ -395,7 +391,6 @@ pub async fn history(ctx: &Ctx) -> Vec<Resumable> {
                 dir: Some(t.dir),
                 ts: t.ts,
                 branch: None,
-                title: t.title,
                 // Bare `codex` still marks the provider when no model was recorded.
                 model_id: Some(t.model.as_ref().map_or("codex".into(), |m| format!("codex:{m}"))),
                 model: label.or(t.model).or_else(|| Some("Codex".into())),
@@ -502,7 +497,6 @@ mod tests {
         let h = history(&ctx).await;
         assert_eq!(h.len(), 1);
         assert_eq!(h[0].sid, SID);
-        assert_eq!(h[0].title, "Saved");
         assert_eq!(h[0].model_id.as_deref(), Some("codex:gpt-a"));
         assert_eq!(h[0].effort.as_deref(), Some("low"));
         assert_eq!(h[0].display_name, Some(super::super::names::session_name("Codex", dir.to_str().unwrap(), SID)));

@@ -348,7 +348,6 @@ button, input, select { font: inherit; }
 .peek.summary summary { cursor: pointer; }
 .peek.summary summary::marker { content: ''; }
 
-.desc { color: var(--text); font-size: 14px; margin: 2px 0 6px; }
 .prompts {
   color: var(--text-faint); font-size: 12.5px; font-family: var(--font-mono);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;

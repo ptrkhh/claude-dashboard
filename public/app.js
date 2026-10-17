@@ -322,9 +322,8 @@ function resumableCard(s) {
         </div>
         <span class="time">${fmtTs(s.ts)}</span>
       </div>
-      <div class="desc">${esc(s.title)}</div>
       ${s.model ? `<div class="session-meta"><span class="chip">${esc(s.model)}</span>${s.effort ? `<span class="chip">${esc(effortLabel(s.effort))}</span>` : ''}</div>` : ''}
-      ${s.summary ? `<details class="peek summary" data-summary="${esc(s.sid)}"><summary class="peek-text">${esc(s.summary)}</summary></details>` : `<div class="prompts">↳ ${esc(s.prompts.join(' · '))}</div>`}
+      ${s.summary ? `<details class="peek summary" data-summary="${esc(s.sid)}"><summary class="peek-text">${esc(s.summary)}</summary></details>` : `<div class="prompts">↳ ${esc(s.prompts.length ? s.prompts.join(' · ') : 'No conversation preview available')}</div>`}
       ${pickHtml(s)}
       <div class="actions">
         <button class="action" type="button" data-resume="${esc(s.sid)}">${ICONS.refresh}<span>Resume</span></button>
