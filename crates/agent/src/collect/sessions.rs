@@ -40,6 +40,10 @@ pub struct Resumable {
     /// What the model picker selects for this session; `model` is the display chip.
     #[serde(rename = "modelId", skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(skip)]
+    pub source_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -226,6 +230,8 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             model: model.clone(),
             model_id: model,
             effort: t.effort.clone(),
+            summary: None,
+            source_file: Some(file),
         });
     }
 
@@ -235,6 +241,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
     }));
     resumable.sort_by(|a, b| b.ts.total_cmp(&a.ts));
     resumable.truncate(limit);
+    super::summaries::SummaryCache::attach(ctx, &mut resumable).await;
 
     let machine = {
         let mut s = ctx.host.sampler.lock().unwrap_or_else(|e| e.into_inner());
@@ -280,7 +287,11 @@ mod tests {
 
     fn ctx_for(claude_dir: PathBuf) -> Arc<Ctx> {
         let log = Arc::new(LogBuffer::new());
-        let path = std::env::var("PATH").unwrap_or_default();
+        // Summary jobs must never reach real provider subscriptions from unit tests.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(claude_dir.join("node"), "#!/bin/sh\necho '{\"error\":\"test\"}'\n").unwrap();
+        std::fs::set_permissions(claude_dir.join("node"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = format!("{}:{}", claude_dir.display(), std::env::var("PATH").unwrap_or_default());
         let host = crate::host::init::Host {
             runner: crate::host::cmd::Runner::new(path.clone(), Arc::clone(&log)),
             log,

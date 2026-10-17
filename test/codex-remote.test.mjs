@@ -44,18 +44,21 @@ test('Codex bridge dispatches string SSE sequences, persists resume, rotates cre
 import {appendFileSync} from 'node:fs';
 const log = m => appendFileSync(process.env.CDASH_CHECK_WIRE, JSON.stringify(m)+'\\n');
 let inbound;
+const echoes = [];
 globalThis.fetch = async (url, options) => {
   log({url,method:options.method,token:options.headers.Authorization,body:options.body && JSON.parse(options.body)});
   if (!url.includes('/stream')) {
+    if(process.env.CDASH_CHECK_FAIL_HISTORY && JSON.parse(options.body || '{}').events?.some(e=>e.payload.message?.id==='old-reply-1')) return new Response('',{status:400});
     const payload=options.body && JSON.parse(options.body).events?.find(e=>e.payload.type==='user')?.payload;
     if(payload && inbound) inbound.enqueue(new TextEncoder().encode('event: client_event\\ndata: '+JSON.stringify({sequence_num:'12',event_id:'local-echo',payload})+'\\n\\n'));
+    else if(payload) echoes.push(payload);
     return new Response('{}');
   }
-  const events = [
+  const events = url.includes('/cse_check/') ? [
     {sequence_num:'1',event_id:'init',payload:{type:'control_request',request_id:'init-req',request:{subtype:'initialize'}}},
     {sequence_num:'2',event_id:'first',payload:{type:'user',message:{content:'first'}}},
     {sequence_num:'11',event_id:'second',payload:{type:'user',message:{content:'second'}}},
-  ];
+  ] : echoes.map((payload, i) => ({sequence_num:String(i+1),event_id:'history-'+i,source:'worker',payload}));
   return new Response(new ReadableStream({start(c){
     inbound=c;
     const text = events.map(e=>'event: client_event\\r\\ndata: '+JSON.stringify(e)+'\\r\\n\\r\\n').join('');
@@ -76,6 +79,18 @@ createInterface({input:process.stdin}).on('line',line=>{
  if(m.method==='account/read')send({id:m.id,result:{account:{type:'apiKey'},requiresOpenaiAuth:true}});
  if(m.method==='model/list')send({id:m.id,result:{data:[{model:'gpt-check',displayName:'GPT Check',supportedReasoningEfforts:[{reasoningEffort:'low'}],defaultReasoningEffort:'low'}],nextCursor:null}});
  if(['thread/start','thread/resume'].includes(m.method))send({id:m.id,result:{thread:{id:'01234567-1234-1234-1234-0123456789ab'},model:'gpt-check',reasoningEffort:'low'}});
+ if(m.method==='thread/turns/list')send({id:m.id,result:m.params.cursor ? {
+   data:[{id:'old-turn-2',status:'completed',items:[
+     {type:'reasoning',id:'private-reasoning',summary:['private reasoning'],content:[]},
+     {type:'commandExecution',id:'private-tool',command:'echo secret',aggregatedOutput:'private tool output'},
+     {type:'agentMessage',id:'old-reply-2',text:'Earlier final answer',phase:'final_answer'},
+   ]}],nextCursor:null,
+ } : {
+   data:[{id:'old-turn-1',status:'completed',items:[
+     {type:'userMessage',id:'old-user',content:[{type:'text',text:'Earlier question',text_elements:[]},{type:'text',text:'More context',text_elements:[]}]},
+     {type:'agentMessage',id:'old-reply-1',text:'Earlier progress',phase:'commentary'},
+   ]}],nextCursor:'next-turn',
+ }});
  if(m.method==='turn/start'){
    const text=m.params.input[0].text;
    send({id:m.id,result:{turn:{id:text}}});
@@ -97,9 +112,9 @@ createInterface({input:process.stdin}).on('line',line=>{
     }
   };
   let child, output = '';
-  const start = () => {
-    child = spawn(process.execPath, [resolve('crates/agent/src/collect/codex-remote.mjs'), '--worker', 'claude', '--sdk-url', 'https://api.anthropic.com/v1/code/sessions/cse_check', '--session-id', 'cse_check'], {
-      env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, NODE_OPTIONS: `--import=${pathToFileURL(preload)}`, CDASH_CHECK_WIRE: wire, CDASH_CODEX_STATE: state, CLAUDE_CODE_SESSION_ACCESS_TOKEN: 'test_ingress', CLAUDE_CODE_WORKER_EPOCH: '1' },
+  const start = (sid = 'cse_check', failHistory = false) => {
+    child = spawn(process.execPath, [resolve('crates/agent/src/collect/codex-remote.mjs'), '--worker', 'claude', '--sdk-url', 'https://api.anthropic.com/v1/code/sessions/'+sid, '--session-id', sid], {
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, NODE_OPTIONS: `--import=${pathToFileURL(preload)}`, CDASH_CHECK_WIRE: wire, CDASH_CHECK_FAIL_HISTORY: failHistory ? '1' : '', CDASH_CODEX_STATE: state, CLAUDE_CODE_SESSION_ACCESS_TOKEN: 'test_ingress', CLAUDE_CODE_WORKER_EPOCH: '1' },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     child.stdout.on('data', b => { output += b; });
@@ -137,6 +152,47 @@ createInterface({input:process.stdin}).on('line',line=>{
   assert.equal(JSON.parse(await readFile(state, 'utf8')).display_name, '[Codex] project · elephant');
   assert.ok(after.some(m => m.url?.includes('from_sequence_num=12')));
   assert.equal(after.some(m => ['turn/start', 'turn/steer'].includes(m.rpc?.method)), false, 'replayed prompts must not execute again');
+  assert.equal(after.some(m => m.rpc?.method === 'thread/turns/list'), false, 'the same remote session already has its history');
+  await stop();
+
+  const failedStart = (await messages()).length;
+  output = ''; start('cse_history', true);
+  await waitFor(() => child.exitCode !== null);
+  assert.equal(child.exitCode, 1);
+  assert.equal(JSON.parse(await readFile(state, 'utf8')).remote_sid, 'cse_check', 'failed replay must not mark history uploaded');
+  const failedHistory = (await messages()).slice(failedStart).flatMap(m => m.body?.events || []).map(e => e.payload);
+
+  const historyStart = (await messages()).length;
+  output = ''; start('cse_history');
+  await waitFor(() => output.includes(' ready'));
+  const replay = (await messages()).slice(historyStart);
+  const history = replay.flatMap(m => m.body?.events || []).map(e => e.payload).filter(p => ['user','assistant'].includes(p.type));
+  assert.deepEqual(history.map(p => [p.type,p.message.content]), [
+    ['user', [{type:'text',text:'Earlier question'},{type:'text',text:'More context'}]],
+    ['assistant', [{type:'text',text:'Earlier progress'}]],
+    ['assistant', [{type:'text',text:'Earlier final answer'}]],
+  ], 'all pages of conversation text must reach the new remote in order');
+  for (const prior of failedHistory.filter(p => ['user','assistant'].includes(p.type))) {
+    assert.equal(history.find(p => p.message.id === prior.message.id)?.uuid, prior.uuid, 'a retry must reuse UUIDs for remote deduplication');
+  }
+  assert.deepEqual(replay.filter(m => m.rpc?.method === 'thread/turns/list').map(m => m.rpc.params), [
+    {threadId:'01234567-1234-1234-1234-0123456789ab',limit:50,sortDirection:'asc',itemsView:'full'},
+    {threadId:'01234567-1234-1234-1234-0123456789ab',limit:50,sortDirection:'asc',itemsView:'full',cursor:'next-turn'},
+  ]);
+  await waitFor(async () => JSON.parse(await readFile(state, 'utf8')).remote_sequence === 1);
+  assert.equal((await messages()).slice(historyStart).some(m => ['turn/start','turn/steer'].includes(m.rpc?.method)), false, 'uploaded user history must never become a new prompt');
+  await stop();
+  const historyRestart = (await messages()).length;
+  output = ''; start('cse_history');
+  await waitFor(() => output.includes(' ready'));
+  assert.equal((await messages()).slice(historyRestart).some(m => m.rpc?.method === 'thread/turns/list'), false, 'worker restart must not duplicate history');
+  await stop();
+  const nextRemoteStart = (await messages()).length;
+  output = ''; start('cse_next');
+  await waitFor(() => output.includes(' ready'));
+  const nextHistory = (await messages()).slice(nextRemoteStart).flatMap(m => m.body?.events || []).map(e => e.payload).filter(p => ['user','assistant'].includes(p.type));
+  assert.equal(nextHistory.length, history.length, 'each new remote session needs the complete history');
+  for (const p of nextHistory) assert.notEqual(p.uuid, history.find(h => h.message.id === p.message.id)?.uuid, 'separate remote sessions need distinct event UUIDs');
 });
 
 
@@ -204,8 +260,9 @@ test('Codex --threads lists only unarchived dashboard threads from the newest st
   const make = (file, rows) => {
     const db = new DatabaseSync(join(home, file));
     db.exec(`create table threads (id text primary key, cwd text, title text, name text,
-      updated_at_ms integer, model text, reasoning_effort text, originator text, archived integer)`);
-    const add = db.prepare('insert into threads values (?,?,?,?,?,?,?,?,?)');
+      updated_at_ms integer, model text, reasoning_effort text, originator text, archived integer,
+      rollout_path text default '/work/history.jsonl')`);
+    const add = db.prepare('insert into threads (id,cwd,title,name,updated_at_ms,model,reasoning_effort,originator,archived) values (?,?,?,?,?,?,?,?,?)');
     for (const r of rows) add.run(...r);
     db.close();
   };
@@ -231,8 +288,8 @@ test('Codex --threads lists only unarchived dashboard threads from the newest st
     child.on('exit', () => { try { done(JSON.parse(out)); } catch (e) { reject(e); } });
   });
   assert.deepEqual(await run(home), [
-    { sid: 'a', dir: '/work/a', title: 'first prompt', ts: 300, model: 'gpt-b', effort: 'high' },
-    { sid: 'b', dir: '/work/b', title: 'Renamed', ts: 200, model: null, effort: null },
+    { sid: 'a', dir: '/work/a', title: 'first prompt', ts: 300, model: 'gpt-b', effort: 'high', rollout_path: '/work/history.jsonl' },
+    { sid: 'b', dir: '/work/b', title: 'Renamed', ts: 200, model: null, effort: null, rollout_path: '/work/history.jsonl' },
   ]);
   assert.deepEqual(await run(join(home, 'no-codex-here')), [], 'no Codex state is an empty list, not an error');
 });

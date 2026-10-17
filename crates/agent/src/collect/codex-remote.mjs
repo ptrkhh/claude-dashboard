@@ -24,10 +24,11 @@ const socketPath = state => join(socketDir(state), 'input.sock');
 class Codex {
   pending = new Map();
   id = 0;
-  constructor(onEvent) {
+  constructor(onEvent, options = {}) {
     // Session ingress credentials must never enter Codex's tool environment.
     const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('CLAUDE_') && !k.startsWith('CDASH_CODEX_')));
-    this.child = spawn('codex', ['app-server', '--listen', 'stdio://'], { env, detached: true, stdio: ['pipe', 'pipe', 'inherit'] });
+    const onError = options.onError || fatal;
+    this.child = spawn('codex', ['app-server', '--listen', 'stdio://'], { env: options.env || env, cwd: options.cwd, detached: true, stdio: ['pipe', 'pipe', options.quiet ? 'ignore' : 'inherit'] });
     let notifications = Promise.resolve();
     createInterface({ input: this.child.stdout }).on('line', line => {
       let m;
@@ -44,14 +45,15 @@ class Codex {
         if (m.method === 'turn/started') this.turnId = m.params.turn.id;
         if (m.method === 'turn/completed' && this.turnId === m.params.turn.id) this.turnId = undefined;
         notifications = notifications.then(() => onEvent(m));
-        notifications.catch(fatal);
+        notifications.catch(onError);
       }
     });
-    this.child.on('error', fatal);
+    this.child.on('error', onError);
+    this.child.stdin.on('error', onError);
     this.child.on('exit', () => {
       for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(Error('Codex app-server exited')); }
       this.pending.clear();
-      if (!this.closing) fatal(Error('Codex app-server exited'));
+      if (!this.closing) onError(Error('Codex app-server exited'));
     });
   }
   send(m) { this.child.stdin.write(`${JSON.stringify(m)}\n`); }
@@ -181,6 +183,31 @@ class Remote {
   }
 }
 
+async function replayHistory(codex, threadId, remoteSid, emit) {
+  let cursor;
+  const seen = new Set();
+  do {
+    const page = await codex.call('thread/turns/list', {
+      threadId, limit: 50, sortDirection: 'asc', itemsView: 'full', ...(cursor ? { cursor } : {}),
+    });
+    for (const turn of page.data) for (const item of turn.items) {
+      const role = item.type === 'userMessage' ? 'user' : item.type === 'agentMessage' ? 'assistant' : null;
+      if (!role) continue;
+      const content = role === 'user'
+        ? item.content.filter(b => b.type === 'text').map(b => ({ type: 'text', text: b.text }))
+        : [{ type: 'text', text: item.text }];
+      if (!content.length) continue;
+      // Stable UUIDs let the remote deduplicate a replay interrupted by a crash.
+      const hash = createHash('sha256').update(JSON.stringify([remoteSid, threadId, turn.id, item.id])).digest('hex');
+      const uuid = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-8${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+      await emit({ uuid, type: role, message: { id: item.id, role, content, ...(role === 'assistant' ? { stop_reason: 'end_turn' } : {}) } });
+    }
+    cursor = page.nextCursor;
+    if (cursor && seen.has(cursor)) throw Error('Repeated Codex history cursor');
+    seen.add(cursor);
+  } while (cursor);
+}
+
 let stop = () => {};
 function fatal(e) { console.error(`Codex bridge: ${e.message}`); stop(); setTimeout(() => process.exit(1), 5000).unref(); process.exitCode = 1; }
 
@@ -304,7 +331,7 @@ async function worker() {
   await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', title: 'Claude Dashboard Codex Bridge', version: '0.4.0' } });
   codex.send({ method: 'initialized' });
   if (!await codex.ready()) throw Error('Codex is signed out; run codex login on the agent host.');
-  const savedModel = state.model, savedLabel = state.model_label;
+  const savedModel = state.model, savedLabel = state.model_label, resuming = !!state.sid;
   const result = await codex.call(state.sid ? 'thread/resume' : 'thread/start', {
     ...(state.sid ? { threadId: state.sid, excludeTurns: true } : {}), cwd: state.dir,
     ...(state.model ? { model: state.model } : {}),
@@ -319,9 +346,12 @@ async function worker() {
   remote.model = state.model;
   await save();
   if (state.remote_sid === sid) remote.sequence = state.remote_sequence || 0;
-  else { state.remote_sid = sid; state.remote_sequence = 0; await save(); }
   await remote.state('idle');
+  heartbeat = setInterval(() => remote.retry('/worker/heartbeat', 'POST', { session_id: sid, worker_epoch: remote.epoch }).catch(fatal), 30_000);
   await emit({ type: 'system', subtype: 'init', cwd: state.dir, model: state.model, tools: [], mcp_servers: [], permissionMode: 'default', slash_commands: [] });
+  if (resuming && state.remote_sid !== sid) await replayHistory(codex, state.sid, sid, emit);
+  // Commit the remote identity only after every history upload succeeds.
+  state.remote_sid = sid; state.remote_sequence = remote.sequence; await save();
   const rcId = sid.replace(/^cse_/, 'session_');
   await atomic(`${statePath.replace(/\.json$/, '')}.link`, `https://claude.ai/code/${rcId}`);
   const dir = socketDir(statePath);
@@ -342,7 +372,6 @@ async function worker() {
   });
   await new Promise((r, j) => { local.once('error', j); local.listen(socketPath(statePath), r); });
   await chmod(socketPath(statePath), 0o600);
-  heartbeat = setInterval(() => remote.retry('/worker/heartbeat', 'POST', { session_id: sid, worker_epoch: remote.epoch }).catch(fatal), 30_000);
   console.log(`Codex thread ${state.sid} ready`);
   await remote.listen(e => {
     queue = queue.then(async () => {
@@ -388,7 +417,10 @@ async function launcher() {
 
 for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(signal, () => { stop(); setTimeout(() => process.exit(0), 5000).unref(); });
 const queryMode = ['--models', '--usage'].find(mode => process.argv.includes(mode));
-if (process.argv.includes('--threads')) {
+if (args[0] === '--summary') {
+  import('./summary.mjs').then(({ summarize }) => summarize(JSON.parse(args[1]), Codex, fn => { stop = fn; }))
+    .then(value => console.log(JSON.stringify(value)), () => { console.log(JSON.stringify({ error: 'Session summary unavailable' })); });
+} else if (process.argv.includes('--threads')) {
   // Resumable dashboard threads, read from Codex's own state database: it is
   // what Codex itself records per thread, so a thread continued elsewhere
   // shows its real model. Read-only; Codex owns the file.
@@ -403,7 +435,7 @@ if (process.argv.includes('--threads')) {
     const db = new DatabaseSync(join(home, files.sort((a, b) => b[1] - a[1])[0][0]), { readOnly: true });
     try {
       return db.prepare(`select id as sid, cwd as dir, coalesce(nullif(name, ''), title) as title,
-          updated_at_ms as ts, model, reasoning_effort as effort
+          updated_at_ms as ts, model, reasoning_effort as effort, rollout_path
         from threads
         where originator = 'claude_dashboard' and archived = 0 and coalesce(nullif(name, ''), title) <> ''
         order by updated_at_ms desc`).all();

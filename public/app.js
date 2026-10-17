@@ -322,7 +322,7 @@ function resumableCard(s) {
       </div>
       <div class="desc">${esc(s.title)}</div>
       ${s.model ? `<div class="session-meta"><span class="chip">${esc(s.model)}</span>${s.effort ? `<span class="chip">${esc(effortLabel(s.effort))}</span>` : ''}</div>` : ''}
-      <div class="prompts">↳ ${esc(s.prompts.join(' · '))}</div>
+      ${s.summary ? `<details class="peek summary" data-summary="${esc(s.sid)}"><summary class="peek-text">${esc(s.summary)}</summary></details>` : `<div class="prompts">↳ ${esc(s.prompts.join(' · '))}</div>`}
       ${pickHtml(s)}
       <div class="actions">
         <button class="action" type="button" data-resume="${esc(s.sid)}">${ICONS.refresh}<span>Resume</span></button>
@@ -332,9 +332,15 @@ function resumableCard(s) {
 }
 
 function renderResumable() {
+  const expanded = new Set([...$('#resumable').querySelectorAll('details[open]')].map(el => el.dataset.summary));
+  const focused = document.activeElement?.closest('details[data-summary]')?.dataset.summary;
   // A full page means there may be more; a short one is the whole list (or the server's ceiling).
   const more = lastRes.length >= resLimit ? '<button class="action more" type="button" data-more>Show more…</button>' : '';
   $('#resumable').innerHTML = (lastRes.map(resumableCard).join('') || '<div class="empty">No resumable sessions</div>') + more;
+  for (const el of $('#resumable').querySelectorAll('details[data-summary]')) {
+    el.open = expanded.has(el.dataset.summary);
+    if (el.dataset.summary === focused) el.querySelector('summary').focus({ preventScroll: true });
+  }
 }
 
 function render(d) {
