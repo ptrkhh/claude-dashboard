@@ -12,5 +12,6 @@ pub mod external;
 pub mod sessions;
 pub mod usage;
 pub mod codex;
+pub mod codex_proxy;
 pub mod names;
 pub mod summaries;

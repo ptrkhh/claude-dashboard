@@ -17,7 +17,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sysinfo = "=0.38.4"
 rustix = { version = "1", features = ["fs", "termios", "pty", "process"] }
-tokio = { version = "1", features = ["process", "time", "rt", "rt-multi-thread", "macros", "fs", "io-util", "net"] }
+tokio = { version = "1", features = ["process", "time", "rt", "rt-multi-thread", "macros", "fs", "io-util", "io-std", "net"] }
 time = { version = "0.3", features = ["formatting", "local-offset"] }
 axum = { version = "0.8.9", features = ["ws"] }
 subtle = "2.6.1"
@@ -29,6 +29,5 @@ base64 = "0.22"
 jsonwebtoken = "9"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json", "http2"] }
 
-[dev-dependencies]
 tokio-tungstenite = "0.29"
 futures-util = "0.3"

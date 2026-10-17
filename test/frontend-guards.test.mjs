@@ -105,11 +105,17 @@ test('the send bar is gone: the terminal replaced it', () => {
   assert.ok(!/\.send[\s{.:-]/.test(css), 'no .send styles remain');
 });
 
-test('the Terminal button exists only for tmux-owned sessions', () => {
-  // External sessions live in another terminal app's PTY; nothing can attach.
+test('legacy Codex sessions do not offer unsupported terminal controls', () => {
   const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
-  const m = app.match(/const termBtn = r\.external \? '' *\n?\s*: `<button[^`]*data-term=/);
-  assert.ok(m, 'termBtn is empty for external sessions and carries data-term otherwise');
+  const code = app.slice(app.indexOf('function runningCard('), app.indexOf('let lastRes ='));
+  const context = { esc: s => String(s || ''), ICONS: {}, gitBadge: () => '', fmtUp: () => '', armedKill: null };
+  runInNewContext(`${code}; this.card = runningCard;`, context);
+  const session = { name: 'cdash-test', dir: '/tmp/project', provider: 'codex' };
+  assert.doesNotMatch(context.card(session), /data-term=/);
+  assert.match(context.card(session), /Terminal.*new or resumed sessions/);
+  assert.match(context.card({ ...session, nativeTerminal: true }), /data-term=/);
+  assert.match(context.card({ ...session, provider: undefined }), /data-term=/);
+  assert.doesNotMatch(context.card({ ...session, nativeTerminal: true, external: true }), /data-term=/);
 });
 
 test('terminal scripts load before app.js', () => {

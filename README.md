@@ -216,8 +216,16 @@ they never block the session poll. Other returned quota buckets carry their own 
 signed-out Codex, and API-key-only providers quietly omit Codex quota tiles;
 Claude usage and session controls remain available. Model availability and
 subscription quota availability are independent.
-The dashboard owns the tmux pane and supports send, kill, resume, and **Open in
-Claude**. Codex uses the selected model and effort with its existing permissions.
+New and resumed Codex sessions run the native Codex TUI in tmux. **Terminal**
+opens that TUI with working navigation keys and scrolling; **Open in Claude**
+controls the same thread through Remote Control. Both clients share one local
+app-server over a private Unix socket. Codex CLI **0.162.1 or later** is required.
+Codex uses the selected model and effort with its existing permissions.
+Closing the terminal overlay only detaches. Quitting the TUI or killing its
+session stops the owned backend and bridge; a Remote Control process failure
+leaves the native TUI usable. Existing running sessions keep their old bridge
+until deliberately relaunched or resumed, and do not offer native terminal
+controls. No active session is restarted automatically.
 Running sessions show their effective model, display name, and effort.
 Resumable cards show the model each session last used and have model and
 effort pickers, preselected to it; **Resume** applies what is selected, for

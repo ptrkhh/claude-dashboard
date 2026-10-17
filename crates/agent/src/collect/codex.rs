@@ -69,6 +69,8 @@ pub(super) async fn query(ctx: &Ctx, mode: &str) -> Result<serde_json::Value, St
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CodexSession {
     #[serde(default)]
+    pub native_terminal: bool,
+    #[serde(default)]
     pub display_name: Option<String>,
     pub dir: String,
     pub pid: Option<i32>,
@@ -89,11 +91,33 @@ fn root(ctx: &Ctx) -> PathBuf {
     ctx.claude_dir.join("cdash-codex")
 }
 
+/// A saved legacy bridge is not an interactive terminal. Missing state means
+/// this is an ordinary Claude/tmux session; corrupt Codex state fails closed.
+pub async fn terminal_supported(ctx: &Ctx, name: &str) -> bool {
+    let Some(text) = read_if(&root(ctx).join(format!("{name}.json"))).await else { return true };
+    let Ok(state) = serde_json::from_str::<CodexSession>(&text) else { return false };
+    if state.native_terminal { return true; }
+    let Some(pid) = state.pid else { return false };
+    let target = format!("={name}:");
+    ctx.runner.run_checked("tmux", &["display-message", "-p", "-t", &target, "#{pane_pid}"], "tmux terminal pane")
+        .await.ok().and_then(|s| s.trim().parse::<i32>().ok()).is_some_and(|actual| actual != pid)
+}
+
 pub async fn snapshot(ctx: &Ctx, name: &str, pid: i32) -> Option<CodexSession> {
     let s: CodexSession =
         serde_json::from_str(&read_if(&root(ctx).join(format!("{name}.json"))).await?).ok()?;
     // An archived snapshot must not claim a later pane that reused its name.
-    (s.pid == Some(pid)).then_some(s)
+    if s.pid != Some(pid) { return None; }
+    // Native metadata belongs to the supervisor, so an RC outage cannot freeze
+    // it. The worker separately owns its remote delivery checkpoint.
+    if s.native_terminal {
+        if let Some(text) = read_if(&root(ctx).join(format!("{name}.native"))).await {
+            if let Ok(native) = serde_json::from_str::<CodexSession>(&text) {
+                if native.pid == s.pid && native.sid == s.sid { return Some(native); }
+            }
+        }
+    }
+    Some(s)
 }
 
 /// One dashboard-started Codex thread, as Codex's own state database records it.
@@ -146,6 +170,13 @@ pub async fn launch(
         return Err(Refused::BadRequest(
             "Codex unavailable: run codex login or check its provider configuration".into(),
         ));
+    }
+    let version = ctx.runner.run_checked("codex", &["--version"], "Codex version")
+        .await.map_err(Refused::Failed)?;
+    let numbers = version.trim().strip_prefix("codex-cli ").unwrap_or_default()
+        .split('.').map(str::parse::<u32>).collect::<Result<Vec<_>, _>>();
+    if !matches!(numbers.as_deref(), Ok([major, minor, patch]) if (*major, *minor, *patch) >= (0, 162, 1)) {
+        return Err(Refused::BadRequest("Native terminals require Codex CLI 0.162.1 or later; update Codex on the agent host.".into()));
     }
     // A resume that keeps the saved pair is not re-checked: the catalog may
     // have dropped the model since, and that must not strand the session.
@@ -239,6 +270,7 @@ pub async fn launch(
         }
     };
     let initial = CodexSession {
+        native_terminal: true,
         display_name: Some(display_name),
         dir: dir.into(),
         effort: Some(effort.into()),
@@ -258,12 +290,16 @@ pub async fn launch(
     )
     .await
     .map_err(|e| Refused::Failed(format!("Codex runner trust write: {e}")))?;
+    let agent = std::env::current_exe().map_err(|e| Refused::Failed(format!("agent executable: {e}")))?;
+    let agent_env = format!("CDASH_CODEX_AGENT={}", agent.display());
     ctx.runner
         .run_checked(
             "tmux",
             &[
                 "new-session",
                 "-d",
+                "-e",
+                &agent_env,
                 "-s",
                 &name,
                 "-c",
@@ -409,7 +445,7 @@ mod tests {
             ("claude", "#!/bin/sh\necho 1.0.0\n".to_string()),
         ];
         if with_codex {
-            scripts.push(("codex", "#!/bin/sh\necho 1.0.0\n".to_string()));
+            scripts.push(("codex", "#!/bin/sh\necho codex-cli 0.162.1\n".to_string()));
         }
         for (name, body) in scripts {
             let f = dir.join("bin").join(name);
@@ -439,6 +475,25 @@ mod tests {
         let args = std::fs::read_to_string(dir.join("tmux-args")).unwrap();
         let state = args.split("--state ").nth(1).unwrap().split_whitespace().next().unwrap();
         serde_json::from_str(&std::fs::read_to_string(state).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn snapshot_uses_native_metadata_only_for_the_matching_pane_and_thread() {
+        let (dir, ctx) = codex_ctx("native-snapshot");
+        std::fs::create_dir_all(root(&ctx)).unwrap();
+        let mut state = CodexSession { native_terminal: true, pid: Some(42), sid: Some(SID.into()), dir: dir.to_string_lossy().into_owned(), model: Some("old".into()), ..Default::default() };
+        std::fs::write(root(&ctx).join("cdash-test.json"), serde_json::to_vec(&state).unwrap()).unwrap();
+        state.model = Some("new".into()); state.effort = Some("high".into()); state.working = true;
+        let path = root(&ctx).join("cdash-test.native");
+        std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+        let native = snapshot(&ctx, "cdash-test", 42).await.unwrap();
+        assert_eq!(native.model.as_deref(), Some("new"));
+        assert!(native.working);
+        assert!(snapshot(&ctx, "cdash-test", 43).await.is_none());
+        state.sid = Some("other-thread".into());
+        std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+        assert_eq!(snapshot(&ctx, "cdash-test", 42).await.unwrap().model.as_deref(), Some("old"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -509,6 +564,18 @@ mod tests {
         assert_eq!((s.model.as_deref(), s.effort.as_deref()), (Some("gpt-b"), Some("high")));
         assert_eq!(s.model_label.as_deref(), Some("GPT B"));
         assert_eq!(s.sid.as_deref(), Some(SID), "the thread being resumed must survive");
+        assert_eq!(serde_json::to_value(&s).unwrap()["native_terminal"], true);
+        assert!(std::fs::read_to_string(dir.join("tmux-args")).unwrap().contains("CDASH_CODEX_AGENT="));
+    }
+
+    #[tokio::test]
+    async fn an_old_codex_version_is_refused_before_creating_a_session() {
+        let (dir, ctx) = codex_ctx("old-cli");
+        std::fs::write(dir.join("bin/codex"), "#!/bin/sh\necho codex-cli 0.161.0\n").unwrap();
+        let error = launch(&ctx, dir.to_str().unwrap(), Some("gpt-b"), "low", None).await.unwrap_err();
+        assert!(matches!(error, Refused::BadRequest(ref m) if m.contains("0.162.1")));
+        assert!(!dir.join("tmux-args").exists());
+        assert!(!root(&ctx).exists());
     }
 
     #[tokio::test]

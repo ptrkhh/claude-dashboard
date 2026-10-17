@@ -72,13 +72,19 @@ globalThis.fetch = async (url, options) => {
 const {createInterface}=require('node:readline');
 const {appendFileSync}=require('node:fs');
 const send=m=>process.stdout.write(JSON.stringify(m)+'\\n');
+let experimental=false;
 createInterface({input:process.stdin}).on('line',line=>{
  const m=JSON.parse(line);
  appendFileSync(process.env.CDASH_CHECK_WIRE,JSON.stringify({rpc:m,credentialLeaked:!!process.env.CLAUDE_CODE_SESSION_ACCESS_TOKEN})+'\\n');
- if(m.method==='initialize')send({id:m.id,result:{}});
+ if(m.method==='initialize'){experimental=!!m.params.capabilities?.experimentalApi;send({id:m.id,result:{}});}
+ if(m.params?.initialTurnsPage && !experimental){send({id:m.id,error:{code:-32600,message:'initialTurnsPage requires experimentalApi'}});return;}
  if(m.method==='account/read')send({id:m.id,result:{account:{type:'apiKey'},requiresOpenaiAuth:true}});
  if(m.method==='model/list')send({id:m.id,result:{data:[{model:'gpt-check',displayName:'GPT Check',supportedReasoningEfforts:[{reasoningEffort:'low'}],defaultReasoningEffort:'low'}],nextCursor:null}});
- if(['thread/start','thread/resume'].includes(m.method))send({id:m.id,result:{thread:{id:'01234567-1234-1234-1234-0123456789ab'},model:'gpt-check',reasoningEffort:'low'}});
+ if(['thread/start','thread/resume'].includes(m.method))send({id:m.id,result:{
+   thread:{id:'01234567-1234-1234-1234-0123456789ab',status:{type:process.env.CDASH_CHECK_NATIVE ? 'active' : 'idle'}},model:'gpt-check',reasoningEffort:'low',
+   ...(process.env.CDASH_CHECK_NATIVE && m.params.initialTurnsPage ? {initialTurnsPage:{data:[{id:'native-active',status:'inProgress',items:[]}],nextCursor:null}} : {}),
+ }});
+ if(m.method==='thread/turns/list' && process.env.CDASH_CHECK_NATIVE){send({id:m.id,result:{data:[{id:'offline-turn',status:'completed',items:[{type:'userMessage',id:'offline-user',clientId:'native-offline',content:[{type:'text',text:'While bridge offline'}]},{type:'userMessage',id:'own-user',clientId:'own-remote-uuid',content:[{type:'text',text:'Own remote question'}]},{type:'agentMessage',id:'offline-reply',text:'Offline answer'}]}],nextCursor:null}});return;}
  if(m.method==='thread/turns/list')send({id:m.id,result:m.params.cursor ? {
    data:[{id:'old-turn-2',status:'completed',items:[
      {type:'reasoning',id:'private-reasoning',summary:['private reasoning'],content:[]},
@@ -95,11 +101,24 @@ createInterface({input:process.stdin}).on('line',line=>{
    const text=m.params.input[0].text;
    send({id:m.id,result:{turn:{id:text}}});
    send({method:'turn/started',params:{turn:{id:text}}});
+   send({method:'item/completed',params:{turnId:text,item:{type:'userMessage',id:'user-'+text,clientId:m.params.clientUserMessageId,content:[{type:'text',text}]}}});
+   if(text==='third'){
+     send({method:'item/completed',params:{turnId:'native-turn',item:{type:'userMessage',id:'native-user',clientId:'22222222-2222-4222-8222-222222222222',content:[{type:'text',text:'Native prompt'}]}}});
+     send({id:501,method:'item/commandExecution/requestApproval',params:{itemId:'approval-third',command:'true'}});
+     send({method:'serverRequest/resolved',params:{requestId:501}});
+   }
    send({method:'item/completed',params:{item:{type:'agentMessage',id:text,text:'Reply '+text}}});
    send({id:500,method:'mcpServer/elicitation/request',params:{}});
    send({method:'turn/completed',params:{turn:{id:text,status:'completed'}}});
  }
- if(m.method==='turn/steer')send({id:m.id,result:{turnId:'first'}});
+ if(m.method==='turn/steer'){
+   send({id:m.id,result:{turnId:'native-active'}});
+   if(process.env.CDASH_CHECK_NATIVE){
+     send({id:500,method:'mcpServer/elicitation/request',params:{}});
+     send({method:'item/completed',params:{turnId:'native-active',item:{type:'agentMessage',id:'native-reply',text:'Reply third'}}});
+     send({method:'turn/completed',params:{turn:{id:'native-active',status:'completed'}}});
+   }
+ }
 });
 
 `, { mode: 0o700 });
@@ -112,9 +131,9 @@ createInterface({input:process.stdin}).on('line',line=>{
     }
   };
   let child, output = '';
-  const start = (sid = 'cse_check', failHistory = false) => {
+  const start = (sid = 'cse_check', failHistory = false, native = false) => {
     child = spawn(process.execPath, [resolve('crates/agent/src/collect/codex-remote.mjs'), '--worker', 'claude', '--sdk-url', 'https://api.anthropic.com/v1/code/sessions/'+sid, '--session-id', sid], {
-      env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, NODE_OPTIONS: `--import=${pathToFileURL(preload)}`, CDASH_CHECK_WIRE: wire, CDASH_CHECK_FAIL_HISTORY: failHistory ? '1' : '', CDASH_CODEX_STATE: state, CLAUDE_CODE_SESSION_ACCESS_TOKEN: 'test_ingress', CLAUDE_CODE_WORKER_EPOCH: '1' },
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, NODE_OPTIONS: `--import=${pathToFileURL(preload)}`, CDASH_CHECK_WIRE: wire, CDASH_CHECK_NATIVE: native ? '1' : '', CDASH_CHECK_FAIL_HISTORY: failHistory ? '1' : '', CDASH_CODEX_STATE: state, CLAUDE_CODE_SESSION_ACCESS_TOKEN: 'test_ingress', CLAUDE_CODE_WORKER_EPOCH: '1' },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     child.stdout.on('data', b => { output += b; });
@@ -143,10 +162,19 @@ createInterface({input:process.stdin}).on('line',line=>{
   await waitFor(async () => JSON.parse(await readFile(state, 'utf8')).remote_sequence === 12);
   await waitFor(async () => { const s=JSON.parse(await readFile(state, 'utf8')); return s.last_message === 'Reply third' && !s.working; });
   assert.equal((await messages()).filter(m => ['turn/start','turn/steer'].includes(m.rpc?.method)).length, 3, 'an echoed local prompt must execute once');
+  const live = (await messages()).flatMap(m => m.body?.events || []).map(e => e.payload);
+  const users = live.filter(p => p.type === 'user');
+  assert.deepEqual(users.map(p => p.message.content), ['third', [{type:'text',text:'Native prompt'}]],
+    'native prompts are mirrored once; bridge submissions are not duplicated');
+  const approval = live.find(p => p.type === 'control_request' && p.request.tool_use_id === 'approval-third');
+  assert.ok(live.some(p => p.type === 'control_cancel_request' && p.request_id === approval.request_id),
+    'resolving approval in the native TUI cancels the remote prompt');
+  for (const m of (await messages()).filter(m => ['turn/start','turn/steer'].includes(m.rpc?.method)))
+    assert.match(m.rpc.params.clientUserMessageId, /^[0-9a-f-]{36}$/i);
   await stop();
   const before = (await messages()).length;
   output = ''; start();
-  await waitFor(() => output.includes(' ready'));
+  await waitFor(async () => (await messages()).slice(before).some(m => m.url?.includes('from_sequence_num=12')));
   const after = (await messages()).slice(before);
   assert.ok(after.some(m => m.rpc?.method === 'thread/resume'));
   assert.equal(JSON.parse(await readFile(state, 'utf8')).display_name, '[Codex] project · elephant');
@@ -193,6 +221,31 @@ createInterface({input:process.stdin}).on('line',line=>{
   const nextHistory = (await messages()).slice(nextRemoteStart).flatMap(m => m.body?.events || []).map(e => e.payload).filter(p => ['user','assistant'].includes(p.type));
   assert.equal(nextHistory.length, history.length, 'each new remote session needs the complete history');
   for (const p of nextHistory) assert.notEqual(p.uuid, history.find(h => h.message.id === p.message.id)?.uuid, 'separate remote sessions need distinct event UUIDs');
+  await stop();
+  const nativeStart = (await messages()).length;
+  const nativeState = JSON.parse(await readFile(state,'utf8'));
+  await writeFile(state,JSON.stringify({...nativeState,native_terminal:true,remote_user_ids:['own-remote-uuid']}));
+  output = ''; start('cse_next', false, true);
+  await waitFor(()=>output.includes(' ready'));
+  assert.equal(JSON.parse(await readFile(state,'utf8')).working,true,'a reconnect must preserve the active native turn');
+  const nativeSocket = createConnection(join(tmpdir(), `cdash-codex-${process.getuid()}-${createHash('sha256').update(state).digest('hex').slice(0,16)}`, 'input.sock'));
+  await new Promise((r,j)=>{nativeSocket.once('error',j);nativeSocket.once('connect',()=>nativeSocket.end('third',r));});
+  await waitFor(async()=> (await messages()).slice(nativeStart).some(m=>['turn/start','turn/steer'].includes(m.rpc?.method)));
+  await waitFor(async()=> (await messages()).slice(nativeStart).some(m=>m.body?.events?.some(e=>e.payload.type==='result')));
+  const nativeMessages=(await messages()).slice(nativeStart);
+  assert.equal(nativeMessages.find(m=>m.body?.worker_status)?.body.worker_status,'running','RC reconnect must show the live turn');
+  const resume=nativeMessages.find(m=>m.rpc?.method==='thread/resume').rpc.params;
+  assert.equal(resume.model,undefined,'worker reconnect must preserve native model choices');
+  assert.equal(resume.config,undefined,'worker reconnect must preserve native effort choices');
+  const caughtUp=nativeMessages.flatMap(m=>m.body?.events||[]).map(e=>e.payload);
+  assert.ok(caughtUp.some(p=>p.message?.id==='offline-user'),'same-session reconnect must catch up native messages');
+  assert.ok(caughtUp.some(p=>p.message?.id==='offline-reply'));
+  assert.equal(caughtUp.some(p=>p.message?.id==='own-user'),false,'catch-up must not duplicate original RC user bubbles');
+  const nativeSubmissions=nativeMessages.filter(m=>['turn/start','turn/steer'].includes(m.rpc?.method));
+  assert.deepEqual(nativeSubmissions.map(m=>m.rpc.method),['turn/steer'],'an active native turn must not be duplicated');
+  assert.equal(nativeSubmissions[0].rpc.params.expectedTurnId,'native-active');
+  assert.equal(nativeMessages.some(m=>m.rpc?.id===500 && m.rpc.error),false,
+    'requests the native TUI can answer must not be rejected by the bridge');
 });
 
 

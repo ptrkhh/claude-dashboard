@@ -627,6 +627,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_codex_bridges_are_refused_before_attaching() {
+        if !have_tmux() { return; }
+        let s = Session::new("legacy-codex");
+        let dir = tempdir("legacy-codex");
+        std::fs::create_dir_all(dir.join("cdash-codex")).unwrap();
+        let state = dir.join("cdash-codex").join(format!("{}.json", s.0));
+        let record = |native| serde_json::json!({ "dir": dir, "native_terminal": native }).to_string();
+        std::fs::write(&state, record(false)).unwrap();
+        let b = serve(cfg_for(dir.clone())).await.unwrap();
+        let query = format!("name={}&cols=80&rows=24", s.0);
+        assert_eq!(status_of(connect(b.addr, &query, None).await), 409);
+        assert_eq!(s.clients(), "");
+        std::fs::write(&state, record(true)).unwrap();
+        let mut ws = connect(b.addr, &query, None).await.unwrap();
+        ws.close(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_codex_state_does_not_block_another_pane() {
+        if !have_tmux() { return; }
+        let s = Session::new("stale-codex");
+        let dir = tempdir("stale-codex");
+        std::fs::create_dir_all(dir.join("cdash-codex")).unwrap();
+        std::fs::write(dir.join("cdash-codex").join(format!("{}.json", s.0)),
+            serde_json::json!({ "dir": dir, "pid": 1, "native_terminal": false }).to_string()).unwrap();
+        let b = serve(cfg_for(dir)).await.unwrap();
+        let mut ws = connect(b.addr, &format!("name={}&cols=80&rows=24", s.0), None).await
+            .expect("an archived bridge record must not claim a different pane");
+        ws.close(None).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn resize_reaches_the_tmux_client() {
         if !have_tmux() {
             return;

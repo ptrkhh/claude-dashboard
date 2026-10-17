@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID, createHash } from 'node:crypto';
 import { createServer, createConnection } from 'node:net';
 import { createInterface } from 'node:readline';
-import { readFile, writeFile, rename, mkdir, chmod, rm, readdir } from 'node:fs/promises';
+import { readFile, writeFile, rename, mkdir, chmod, rm, readdir, mkdtemp, open, access } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir, homedir } from 'node:os';
@@ -20,30 +20,52 @@ const atomic = async (path, data) => {
 };
 const socketDir = state => join(tmpdir(), `cdash-codex-${process.getuid()}-${createHash('sha256').update(state).digest('hex').slice(0, 16)}`);
 const socketPath = state => join(socketDir(state), 'input.sock');
+const codexEnv = () => Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('CLAUDE_') && !k.startsWith('CDASH_CODEX_')));
+
+function killGroup(child) {
+  if (!child?.pid) return;
+  const kill = signal => {
+    try { process.kill(-child.pid, signal); }
+    catch (e) { if (e.code !== 'ESRCH') console.error(`Codex cleanup: ${e.message}`); }
+  };
+  kill('SIGTERM');
+  setTimeout(() => kill('SIGKILL'), 250);
+}
 
 class Codex {
   pending = new Map();
   id = 0;
+  turnEpoch = 0;
   constructor(onEvent, options = {}) {
     // Session ingress credentials must never enter Codex's tool environment.
-    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('CLAUDE_') && !k.startsWith('CDASH_CODEX_')));
     const onError = options.onError || fatal;
-    this.child = spawn('codex', ['app-server', '--listen', 'stdio://'], { env: options.env || env, cwd: options.cwd, detached: true, stdio: ['pipe', 'pipe', options.quiet ? 'ignore' : 'inherit'] });
+    const backend = process.env.CDASH_CODEX_BACKEND;
+    const executable = backend ? process.env.CDASH_CODEX_AGENT : 'codex';
+    if (!executable) throw Error('Native Codex transport executable is missing');
+    this.child = spawn(executable, backend ? ['codex-proxy', backend] : ['app-server', '--listen', 'stdio://'], {
+      env: options.env || codexEnv(), cwd: options.cwd, detached: true, stdio: ['pipe', 'pipe', options.quiet ? 'ignore' : 'inherit'],
+    });
     let notifications = Promise.resolve();
     createInterface({ input: this.child.stdout }).on('line', line => {
       let m;
       try { m = JSON.parse(line); } catch { return; }
       const p = this.pending.get(m.id);
       if (!m.method && p) {
-        if (p.method === 'turn/start' && m.result?.turn?.status === 'inProgress') this.turnId = m.result.turn.id;
+        if (this.turnEpoch === p.turnEpoch) {
+          if (p.method === 'turn/start' && m.result?.turn?.status === 'inProgress') this.turnId = m.result.turn.id;
+          if (p.method === 'thread/resume' && m.result?.initialTurnsPage) {
+            this.turnId = m.result.thread.status?.type === 'active'
+              ? m.result.initialTurnsPage.data.find(t => t.status === 'inProgress')?.id : undefined;
+          }
+        }
         clearTimeout(p.timer);
         this.pending.delete(m.id);
         if (m.error) p.reject(Object.assign(Error(m.error.message), { rpc: true })); else p.resolve(m.result);
       } else {
         // Track turn state before uploads: a slow HTTP reply must not leave a
         // stale turn ID steering the next prompt into an already completed turn.
-        if (m.method === 'turn/started') this.turnId = m.params.turn.id;
-        if (m.method === 'turn/completed' && this.turnId === m.params.turn.id) this.turnId = undefined;
+        if (m.method === 'turn/started') { this.turnEpoch++; this.turnId = m.params.turn.id; }
+        if (m.method === 'turn/completed') { this.turnEpoch++; if (this.turnId === m.params.turn.id) this.turnId = undefined; }
         notifications = notifications.then(() => onEvent(m));
         notifications.catch(onError);
       }
@@ -61,7 +83,7 @@ class Codex {
     const id = ++this.id;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(id); reject(Object.assign(Error(`Codex ${method} timed out`), { rpc: true })); }, timeout);
-      this.pending.set(id, { resolve, reject, timer, method });
+      this.pending.set(id, { resolve, reject, timer, method, turnEpoch: this.turnEpoch });
       this.send({ id, method, params });
     });
   }
@@ -88,14 +110,7 @@ class Codex {
   close() {
     if (this.closing) return;
     this.closing = true;
-    if (!this.child.pid) return;
-    // Kill the process group: npm's Codex launcher can own a native child.
-    const kill = signal => {
-      try { process.kill(-this.child.pid, signal); }
-      catch (e) { if (e.code !== 'ESRCH') console.error(`Codex cleanup: ${e.message}`); }
-    };
-    kill('SIGTERM');
-    setTimeout(() => kill('SIGKILL'), 250);
+    killGroup(this.child); // npm's launcher can own a native child
   }
 }
 
@@ -183,7 +198,12 @@ class Remote {
   }
 }
 
-async function replayHistory(codex, threadId, remoteSid, emit) {
+function messageUuid(remoteSid, threadId, turnId, itemId) {
+  const hash = createHash('sha256').update(JSON.stringify([remoteSid, threadId, turnId, itemId])).digest('hex');
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-8${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+}
+
+async function replayHistory(codex, threadId, remoteSid, emit, submitted = new Set()) {
   let cursor;
   const seen = new Set();
   do {
@@ -192,14 +212,13 @@ async function replayHistory(codex, threadId, remoteSid, emit) {
     });
     for (const turn of page.data) for (const item of turn.items) {
       const role = item.type === 'userMessage' ? 'user' : item.type === 'agentMessage' ? 'assistant' : null;
-      if (!role) continue;
+      if (!role || (role === 'user' && submitted.has(item.clientId))) continue;
       const content = role === 'user'
         ? item.content.filter(b => b.type === 'text').map(b => ({ type: 'text', text: b.text }))
         : [{ type: 'text', text: item.text }];
       if (!content.length) continue;
       // Stable UUIDs let the remote deduplicate a replay interrupted by a crash.
-      const hash = createHash('sha256').update(JSON.stringify([remoteSid, threadId, turn.id, item.id])).digest('hex');
-      const uuid = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-8${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+      const uuid = messageUuid(remoteSid, threadId, turn.id, item.id);
       await emit({ uuid, type: role, message: { id: item.id, role, content, ...(role === 'assistant' ? { stop_reason: 'end_turn' } : {}) } });
     }
     cursor = page.nextCursor;
@@ -220,10 +239,16 @@ async function worker() {
   if (!remote.token || !Number.isSafeInteger(remote.epoch)) throw Error('Missing Claude worker credential or epoch');
   let closed = false, heartbeat, local;
   const approvals = new Map();
+  const delegated = new Map();
+  const submitted = new Set(state.remote_sid === sid ? state.remote_user_ids || [] : []);
   const items = new Map();
   let models = [];
   let outgoing = Promise.resolve(), saved = Promise.resolve(), queue = Promise.resolve(), savedNamePath;
   const emit = payload => { outgoing = outgoing.then(() => remote.event(payload)); outgoing.catch(fatal); return outgoing; };
+  const approvalState = () => {
+    const details = [...delegated.values(), ...[...approvals.values()].map(a => a.details)].at(-1);
+    return remote.state(details ? 'requires_action' : state.working ? 'running' : 'idle', details);
+  };
   const save = () => {
     const json = JSON.stringify(state);
     const namePath = /^[0-9a-f-]{36}$/i.test(state.sid || '') && state.display_name && join(dirname(statePath), `${state.sid}.name`);
@@ -242,19 +267,32 @@ async function worker() {
     if (m.method && m.id !== undefined) {
       if (['item/commandExecution/requestApproval', 'item/fileChange/requestApproval'].includes(m.method)) {
         const request_id = randomUUID(), item = items.get(p.itemId);
-        approvals.set(request_id, m.id);
-        await remote.state('requires_action', { tool_name: m.method.includes('commandExecution') ? 'Bash' : 'Edit', action_description: p.reason || 'Approve Codex tool execution', raw_command: p.command ?? item?.command, request_id, tool_use_id: p.itemId });
+        const details = { tool_name: m.method.includes('commandExecution') ? 'Bash' : 'Edit', action_description: p.reason || 'Approve Codex tool execution', raw_command: p.command ?? item?.command, request_id, tool_use_id: p.itemId };
+        approvals.set(request_id, { id: m.id, details });
+        await approvalState();
         await emit({ type: 'control_request', request_id, request: {
           subtype: 'can_use_tool', tool_name: m.method.includes('commandExecution') ? 'Bash' : 'Edit',
           input: { command: p.command ?? item?.command, changes: item?.changes, reason: p.reason, network: p.networkApprovalContext },
           tool_use_id: p.itemId,
         } });
+      } else if (state.native_terminal) {
+        delegated.set(m.id, { tool_name: 'Terminal', action_description: 'Answer the pending question in Terminal.' });
+        await approvalState();
+        await emit({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Codex needs input in the native terminal.' }] } });
       } else {
         // Fail closed for unsupported input/permissions/elicitation requests.
         codex.send({ id: m.id, error: { code: -32601, message: `Unsupported bridge request: ${m.method}` } });
         await emit({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: `Codex requested ${m.method}; this bridge cannot present it yet.` }] } });
       }
       return;
+    }
+    if (m.method === 'serverRequest/resolved') {
+      delegated.delete(p.requestId);
+      for (const [request_id, request] of approvals) if (request.id === p.requestId) {
+        approvals.delete(request_id);
+        await emit({ type: 'control_cancel_request', request_id });
+      }
+      await approvalState();
     }
     if (m.method === 'item/started') items.set(p.item.id, p.item);
     if (m.method === 'thread/settings/updated') {
@@ -268,15 +306,23 @@ async function worker() {
     if (m.method === 'item/completed') {
       const item = p.item;
       items.delete(item.id);
+      if (item.type === 'userMessage') {
+        if (!(state.native_terminal ? submitted.has(item.clientId) : submitted.delete(item.clientId))) {
+          const content = item.content.filter(b => b.type === 'text').map(b => ({ type: 'text', text: b.text }));
+          if (content.length) await emit({ uuid: messageUuid(sid, state.sid, p.turnId, item.id), type: 'user', message: { id: item.id, role: 'user', content } });
+        }
+      }
       if (item.type === 'agentMessage') {
         state.last_message = item.text;
-        await emit({ type: 'assistant', message: { id: item.id, role: 'assistant', model: state.model, content: [{ type: 'text', text: item.text }], stop_reason: 'end_turn' } });
-        console.log(item.text);
+        await emit({ uuid: messageUuid(sid, state.sid, p.turnId, item.id), type: 'assistant', message: { id: item.id, role: 'assistant', model: state.model, content: [{ type: 'text', text: item.text }], stop_reason: 'end_turn' } });
+        if (!state.native_terminal) console.log(item.text);
         await save();
       }
     }
     if (m.method === 'turn/completed') {
-      state.working = false; state.ts = Date.now(); approvals.clear();
+      state.working = false; state.ts = Date.now();
+      for (const request_id of approvals.keys()) await emit({ type: 'control_cancel_request', request_id });
+      approvals.clear(); delegated.clear();
       await save();
       const failed = p.turn.status !== 'completed';
       await emit({ type: 'result', subtype: failed ? 'error_during_execution' : 'success', is_error: failed, result: state.last_message || '', errors: failed ? [p.turn.error?.message || `Codex turn ${p.turn.status}`] : [], num_turns: 1, total_cost_usd: 0, duration_ms: 0, duration_api_ms: 0 });
@@ -296,8 +342,8 @@ async function worker() {
   };
   const handle = async payload => {
     if (payload.type === 'control_response') {
-      const r = payload.response, id = approvals.get(r?.request_id);
-      if (id !== undefined) { approvals.delete(r.request_id); codex.send({ id, result: { decision: r.response?.behavior === 'allow' ? 'accept' : 'decline' } }); await remote.state('running'); }
+      const r = payload.response, request = approvals.get(r?.request_id);
+      if (request) { approvals.delete(r.request_id); codex.send({ id: request.id, result: { decision: r.response?.behavior === 'allow' ? 'accept' : 'decline' } }); await approvalState(); }
     } else if (payload.type === 'control_request') {
       const r = payload.request;
       if (r.subtype === 'interrupt') {
@@ -317,8 +363,16 @@ async function worker() {
       if (!input.some(b => b.text.trim())) return;
       state.title ||= input.map(b => b.text).join(' ').slice(0, 200);
       state.ts = Date.now(); await save();
-      if (codex.turnId) await codex.call('turn/steer', { threadId: state.sid, expectedTurnId: codex.turnId, input });
-      else await codex.call('turn/start', { threadId: state.sid, input, effort: state.effort });
+      const clientUserMessageId = payload.uuid || randomUUID();
+      submitted.add(clientUserMessageId);
+      if (state.native_terminal) {
+        // UUIDs only: original RC user bubbles already exist in this remote.
+        // Retain them while full history can be replayed after a reconnect.
+        state.remote_user_ids = [...submitted];
+        await save();
+      } else if (submitted.size > 200) submitted.delete(submitted.values().next().value);
+      if (codex.turnId) await codex.call('turn/steer', { threadId: state.sid, expectedTurnId: codex.turnId, input, clientUserMessageId });
+      else await codex.call('turn/start', { threadId: state.sid, input, effort: state.effort, clientUserMessageId });
     }
   };
   const dispatch = async payload => {
@@ -328,16 +382,16 @@ async function worker() {
       await reportError(`Codex request failed: ${e.message}`);
     }
   };
-  await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', title: 'Claude Dashboard Codex Bridge', version: '0.4.0' } });
+  await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', title: 'Claude Dashboard Codex Bridge', version: '0.4.0' }, ...(state.native_terminal ? { capabilities: { experimentalApi: true } } : {}) });
   codex.send({ method: 'initialized' });
   if (!await codex.ready()) throw Error('Codex is signed out; run codex login on the agent host.');
   const savedModel = state.model, savedLabel = state.model_label, resuming = !!state.sid;
   const result = await codex.call(state.sid ? 'thread/resume' : 'thread/start', {
-    ...(state.sid ? { threadId: state.sid, excludeTurns: true } : {}), cwd: state.dir,
-    ...(state.model ? { model: state.model } : {}),
-    config: { model_reasoning_effort: state.effort },
+    ...(state.sid ? { threadId: state.sid, excludeTurns: true,
+      ...(state.native_terminal ? { initialTurnsPage: { limit: 1, itemsView: 'summary' } } : {}) } : {}), cwd: state.dir,
+    ...(!state.native_terminal ? { ...(state.model ? { model: state.model } : {}), config: { model_reasoning_effort: state.effort } } : {}),
   });
-  state.sid = result.thread.id; state.working = false;
+  state.sid = result.thread.id; state.working = Boolean(codex.turnId);
   state.model = result.model;
   state.effort = result.reasoningEffort;
   try { models = await codex.models(); }
@@ -346,10 +400,11 @@ async function worker() {
   remote.model = state.model;
   await save();
   if (state.remote_sid === sid) remote.sequence = state.remote_sequence || 0;
-  await remote.state('idle');
+  await approvalState();
   heartbeat = setInterval(() => remote.retry('/worker/heartbeat', 'POST', { session_id: sid, worker_epoch: remote.epoch }).catch(fatal), 30_000);
   await emit({ type: 'system', subtype: 'init', cwd: state.dir, model: state.model, tools: [], mcp_servers: [], permissionMode: 'default', slash_commands: [] });
-  if (resuming && state.remote_sid !== sid) await replayHistory(codex, state.sid, sid, emit);
+  if (resuming && (state.native_terminal || state.remote_sid !== sid)) await replayHistory(codex, state.sid, sid, emit, submitted);
+  state.remote_user_ids = [...submitted];
   // Commit the remote identity only after every history upload succeeds.
   state.remote_sid = sid; state.remote_sequence = remote.sequence; await save();
   const rcId = sid.replace(/^cse_/, 'session_');
@@ -386,6 +441,112 @@ async function worker() {
   }, sequence => { state.remote_sequence = sequence; return save(); });
 }
 
+async function nativeLauncher(statePath, state, script) {
+  const dir = await mkdtemp(join(tmpdir(), 'cdash-codex-native-'));
+  const endpoint = join(dir, 'backend.sock');
+  let backend, runner, tui, control, log, cleanup;
+  let closing = false;
+  stop = () => {
+    if (cleanup) return cleanup;
+    closing = true;
+    cleanup = (async () => {
+      // Interrupt tools through their owner before terminating the backend.
+      if (control?.turnId) {
+        const turnId = control.turnId;
+        try {
+          await control.call('turn/interrupt', { threadId: state.sid, turnId }, 2000);
+          for (let i = 0; i < 20 && control.turnId === turnId; i++) await sleep(50);
+        }
+        catch { /* the backend may already have exited */ }
+      }
+      tui?.kill('SIGTERM');
+      killGroup(runner);
+      control?.close();
+      killGroup(backend);
+      process.stdin.pause();
+      try { if (process.stdin.isTTY) process.stdin.setRawMode(false); } catch { /* tmux may have closed the PTY */ }
+      await rm(dir, { recursive: true, force: true });
+      await log?.close();
+    })();
+    cleanup.catch(e => { console.error(`Codex cleanup: ${e.message}`); process.exitCode = 1; });
+    return cleanup;
+  };
+  const controlDir = join(dirname(statePath), 'controls', option('--name'));
+  await mkdir(controlDir, { recursive: true });
+  log = await open(join(controlDir, 'native.log'), 'a', 0o600);
+  // Buffer input without echo while the native TUI is starting.
+  if (process.stdin.isTTY) process.stdin.setRawMode(true);
+  backend = spawn('codex', ['app-server', '--listen', `unix://${endpoint}`], {
+    cwd: state.dir, env: codexEnv(), detached: true, stdio: ['ignore', log.fd, log.fd],
+  });
+  backend.on('error', fatal);
+  backend.on('exit', code => { if (!closing) fatal(Error(`Codex backend exited (${code})`)); });
+  let ready = false;
+  for (let i = 0; i < 100 && !closing; i++) {
+    ready = await access(endpoint).then(() => true, () => false);
+    if (ready) break;
+    await sleep(100);
+  }
+  if (!ready || closing) throw Error('Codex backend did not start');
+  process.env.CDASH_CODEX_BACKEND = endpoint;
+  // The supervisor owns native metadata independently of RC's worker state.
+  // Separate files avoid two processes overwriting each other's updates.
+  let nativeSaved = Promise.resolve();
+  const saveNative = () => {
+    const json = JSON.stringify(state);
+    nativeSaved = nativeSaved.then(() => atomic(statePath.replace(/\.json$/, '.native'), json));
+    return nativeSaved;
+  };
+  control = new Codex(async m => {
+    const p = m.params || {};
+    if (m.method === 'thread/settings/updated') {
+      state.model = p.threadSettings.model;
+      state.effort = p.threadSettings.effort;
+      state.model_label = state.model;
+    } else if (m.method === 'turn/started') state.working = true;
+    else if (m.method === 'turn/completed') { state.working = false; state.ts = Date.now(); }
+    else if (m.method === 'item/completed' && p.item.type === 'agentMessage') state.last_message = p.item.text;
+    else if (m.method === 'item/completed' && p.item.type === 'userMessage') {
+      state.title ||= p.item.content.filter(b => b.type === 'text').map(b => b.text).join(' ').slice(0, 200);
+      state.ts = Date.now();
+    } else return;
+    await saveNative();
+  }); // also tracks the active turn for shutdown; never answers approvals
+  await control.call('initialize', { clientInfo: { name: 'claude_dashboard', version: '0.4.0' }, capabilities: { experimentalApi: true } });
+  control.send({ method: 'initialized' });
+  if (!await control.ready()) throw Error('Codex is signed out; run codex login on the agent host.');
+  const result = await control.call(state.sid ? 'thread/resume' : 'thread/start', {
+    ...(state.sid ? { threadId: state.sid, excludeTurns: true, initialTurnsPage: { limit: 1, itemsView: 'summary' } } : {}), cwd: state.dir,
+    ...(state.model ? { model: state.model } : {}), config: { model_reasoning_effort: state.effort },
+  });
+  state.sid = result.thread.id;
+  state.model = result.model;
+  state.effort = result.reasoningEffort;
+  state.working = Boolean(control.turnId);
+  // Naming persists an empty thread, so both clients can immediately resume it.
+  await control.call('thread/name/set', { threadId: state.sid, name: state.display_name });
+  await atomic(statePath, JSON.stringify(state));
+  await saveNative();
+  tui = spawn('codex', ['resume', '--remote', `unix://${endpoint}`, '-c', 'tui.fullscreen_transcript=true', '-c', 'tui.alternate_screen="always"', state.sid], {
+    cwd: state.dir, env: codexEnv(), stdio: 'inherit',
+  });
+  tui.on('error', fatal);
+  tui.on('exit', code => { if (!closing) { process.exitCode = code ?? 1; stop(); } });
+  runner = spawn('claude', ['remote-control', '--spawn=session', '--name', state.display_name], {
+    cwd: controlDir, detached: true, stdio: ['ignore', log.fd, log.fd],
+    env: { ...process.env, CLAUDE_CODE_PROCESS_WRAPPER: JSON.stringify([process.execPath, script, '--worker']) },
+  });
+  const remoteStopped = () => {
+    if (!closing) {
+      killGroup(runner);
+      log.write('Remote Control stopped; the native terminal remains available.\n').catch(() => {});
+      rm(statePath.replace(/\.json$/, '') + '.link', { force: true }).catch(() => {});
+    }
+  };
+  runner.on('error', remoteStopped);
+  runner.on('exit', remoteStopped);
+}
+
 async function launcher() {
   const statePath = resolve(option('--state'));
   const state = JSON.parse(await readFile(statePath, 'utf8'));
@@ -393,6 +554,7 @@ async function launcher() {
   await atomic(statePath, JSON.stringify(state));
   process.env.CDASH_CODEX_STATE = statePath;
   const script = fileURLToPath(import.meta.url);
+  if (state.native_terminal) return nativeLauncher(statePath, state, script);
   const runner = spawn('claude', ['remote-control', '--spawn=session', '--name', state.display_name || `[Codex] ${state.dir.split('/').filter(Boolean).pop() || state.dir}`, '--verbose'], {
     cwd: join(dirname(statePath), 'controls', option('--name')),
     env: { ...process.env, CLAUDE_CODE_PROCESS_WRAPPER: JSON.stringify([process.execPath, script, '--worker']) },

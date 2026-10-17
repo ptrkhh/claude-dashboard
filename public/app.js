@@ -258,7 +258,9 @@ function runningCard(r) {
   // The session's real TUI. tmux-owned panes only: an external session lives
   // in another terminal app's PTY, which nothing can attach to.
   const termBtn = r.external ? ''
-    : `<button class="action" type="button" data-term="${esc(r.name)}" data-title="${esc(r.dir.split('/').pop())}">${ICONS.terminal}<span>Terminal</span></button>`;
+    : r.provider === 'codex' && !r.nativeTerminal
+      ? '<span class="action pending">Terminal available for new or resumed sessions</span>'
+      : `<button class="action" type="button" data-term="${esc(r.name)}" data-title="${esc(r.dir.split('/').pop())}">${ICONS.terminal}<span>Terminal</span></button>`;
   return `
     <div class="session ${status} ${r.external ? 'external' : ''}">
       <div class="session-head">

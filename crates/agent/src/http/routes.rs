@@ -244,6 +244,13 @@ pub async fn get_term(
             return Err(e.into());
         }
     };
+    if !crate::collect::codex::terminal_supported(&ctx, &name).await {
+        ctx.host.log.push(format!("term refused {name}: legacy Codex bridge"));
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: "This session has no native terminal. Start or resume a Codex session to enable Terminal.".into(),
+        });
+    }
     Ok(ws.on_upgrade(move |socket| bridge(ctx, name, cols, rows, socket)))
 }
 
