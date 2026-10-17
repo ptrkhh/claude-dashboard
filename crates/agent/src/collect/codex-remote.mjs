@@ -444,11 +444,12 @@ async function worker() {
 async function nativeLauncher(statePath, state, script) {
   const dir = await mkdtemp(join(tmpdir(), 'cdash-codex-native-'));
   const endpoint = join(dir, 'backend.sock');
-  let backend, runner, tui, control, log, cleanup;
+  let backend, runner, tui, control, log, cleanup, remoteRetry;
   let closing = false;
   stop = () => {
     if (cleanup) return cleanup;
     closing = true;
+    clearTimeout(remoteRetry);
     cleanup = (async () => {
       // Interrupt tools through their owner before terminating the backend.
       if (control?.turnId) {
@@ -532,25 +533,45 @@ async function nativeLauncher(statePath, state, script) {
   });
   tui.on('error', fatal);
   tui.on('exit', code => { if (!closing) { process.exitCode = code ?? 1; stop(); } });
-  runner = spawn('claude', ['remote-control', '--spawn=session', '--name', state.display_name], {
-    cwd: controlDir, detached: true, stdio: ['ignore', log.fd, log.fd],
-    env: { ...process.env, CLAUDE_CODE_PROCESS_WRAPPER: JSON.stringify([process.execPath, script, '--worker']) },
-  });
-  const remoteStopped = () => {
-    if (!closing) {
-      killGroup(runner);
-      log.write('Remote Control stopped; the native terminal remains available.\n').catch(() => {});
-      rm(statePath.replace(/\.json$/, '') + '.link', { force: true }).catch(() => {});
-    }
+  const debugPath = join(controlDir, 'remote-debug.log');
+  await writeFile(debugPath, '', { flag: 'a', mode: 0o600 });
+  await chmod(debugPath, 0o600);
+  let retries = 0, reuseRemote = false;
+  const startRemote = () => {
+    if (closing) return;
+    const child = runner = spawn('claude', ['remote-control', ...(reuseRemote ? ['--continue'] : ['--spawn=session']), '--name', state.display_name,
+      '--debug-file', debugPath], {
+      cwd: controlDir, detached: true, stdio: ['ignore', log.fd, log.fd],
+      env: { ...process.env, CLAUDE_CODE_PROCESS_WRAPPER: JSON.stringify([process.execPath, script, '--worker']) },
+    });
+    let failure;
+    child.once('error', e => { failure = e.code || 'spawn failed'; });
+    child.once('close', (code, signal) => {
+      if (closing) return;
+      void (async () => {
+        killGroup(child);
+        const link = statePath.replace(/\.json$/, '') + '.link';
+        reuseRemote ||= await access(link).then(() => true, () => false);
+        await rm(link, { force: true });
+        const retry = code !== 0 && retries < 3;
+        state.rc_unavailable = !retry;
+        await saveNative();
+        const delay = 1000 * 2 ** retries;
+        const next = retry ? `retrying ${retries + 1}/3 in ${delay}ms`
+          : `not retrying: ${code === 0 ? 'clean exit' : 'retry budget exhausted'}`;
+        await log.write(`${new Date().toISOString()} Remote Control attempt ${retries + 1}/4 stopped (${failure ? `spawn error ${failure}; ` : ''}exit ${code}, signal ${signal || 'none'}); ${next}; native terminal remains available.\n`);
+        if (retry && !closing) { retries++; remoteRetry = setTimeout(startRemote, delay); }
+      })().catch(e => { if (!closing) fatal(e); });
+    });
   };
-  runner.on('error', remoteStopped);
-  runner.on('exit', remoteStopped);
+  startRemote();
 }
 
 async function launcher() {
   const statePath = resolve(option('--state'));
   const state = JSON.parse(await readFile(statePath, 'utf8'));
   state.pid = process.pid;
+  state.rc_unavailable = false;
   await atomic(statePath, JSON.stringify(state));
   process.env.CDASH_CODEX_STATE = statePath;
   const script = fileURLToPath(import.meta.url);

@@ -285,6 +285,14 @@ project directory you selected. Session metadata lives in
 `$CLAUDE_DIR/cdash-codex`, alongside an embedded bridge script materialized at
 launch; no npm install is needed.
 
+Native sessions retry a failed Claude Remote Control connection up to three
+times, after 1, 2, and 4 seconds, without replacing the Codex thread or terminal.
+An established Claude connection uses `--continue` when reconnecting.
+Every failure's timestamp, attempt number, exit status, signal, next delay, and
+retry exhaustion are recorded in the runner's `native.log`; private diagnostics
+are in `remote-debug.log`. The card shows “Waiting for link…” during startup and
+retries, and directs you to Terminal only after Remote Control stops retrying.
+
 The Claude worker protocol is undocumented and can change. Text prompts,
 completed replies, interruption, and command/file approval requests are mapped.
 Images, Codex interactive questions, and MCP elicitation are currently unsupported

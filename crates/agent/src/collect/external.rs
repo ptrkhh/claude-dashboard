@@ -30,6 +30,8 @@ pub struct Session {
     pub native_terminal: Option<bool>,
     #[serde(rename = "rcLink")]
     pub rc_link: Option<String>,
+    #[serde(rename = "rcUnavailable", skip_serializing_if = "std::ops::Not::not")]
+    pub rc_unavailable: bool,
     pub git: Option<GitStatus>,
     pub working: bool,
     #[serde(rename = "lastMessage")]
@@ -136,6 +138,7 @@ pub async fn external_sessions(
             effort: None,
             provider: None,
             native_terminal: None,
+            rc_unavailable: false,
             rc_link: sess
                 .bridge_session_id
                 .map(|id| format!("https://claude.ai/code/{id}")),
