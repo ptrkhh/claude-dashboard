@@ -9,7 +9,7 @@ async function fixture(t, failure = '') {
   const dir = await mkdtemp(join(tmpdir(), 'cdash-native-test-'));
   const state = join(dir, 'state.json'), wire = join(dir, 'wire.jsonl');
   await mkdir(join(dir,'controls','cdash-test'),{recursive:true});
-  await writeFile(state, JSON.stringify({ dir, native_terminal: true, ...(failure === 'remote-once' ? { sid: '01234567-1234-1234-1234-0123456789ab' } : {}), model: 'gpt-check', effort: 'low', display_name: '[Codex] project · elephant' }));
+  await writeFile(state, JSON.stringify({ dir, native_terminal: true, ...(failure === 'remote-once' ? { sid: '01234567-1234-1234-1234-0123456789ab', rc_unavailable: true } : {}), model: 'gpt-check', effort: 'low', display_name: '[Codex] project · elephant' }));
   await writeFile(wire, '');
   const header = `#!${process.execPath}
 const fs=require('node:fs');
@@ -133,6 +133,8 @@ for(const failure of ['backend','tui']) test(`native ${failure} failure cleans u
 
 test('resumed native session retries Remote Control startup without replacing its thread or TUI', {timeout:15000}, async t=>{
   const f=await fixture(t,'remote-once');
+  await f.wait(async()=> (await f.messages()).some(m=>m.kind==='remote'));
+  assert.equal(JSON.parse(await readFile(f.state.replace(/\.json$/,'.native'),'utf8')).rc_unavailable,false,'resume clears the previous outage while connecting');
   await f.wait(async()=> (await f.messages()).filter(m=>m.kind==='remote').length===2);
   await f.wait(async()=>{try{await stat(f.state.replace(/\.json$/,'')+'.link');return true;}catch{return false;}});
   const messages=await f.messages();
@@ -152,7 +154,10 @@ test('Remote Control stops after three retries and shutdown cancels pending retr
   const f=await fixture(t,'remote-always');
   const logPath=join(f.dir,'controls','cdash-test','native.log');
   await f.wait(async()=> (await f.messages()).some(m=>m.kind==='remote'));
+  await f.wait(async()=> (await readFile(logPath,'utf8')).includes('retrying 1/3'));
+  assert.equal(JSON.parse(await readFile(f.state.replace(/\.json$/,'.native'),'utf8')).rc_unavailable,false,'a pending retry still waits for a link');
   await f.wait(async()=> (await readFile(logPath,'utf8')).includes('not retrying'));
+  assert.equal(JSON.parse(await readFile(f.state.replace(/\.json$/,'.native'),'utf8')).rc_unavailable,true,'exhausted retries publish the Terminal fallback');
   const messages=await f.messages();
   assert.equal(messages.filter(m=>m.kind==='remote').length,4,'initial launch plus three retries');
   const failures=(await readFile(logPath,'utf8')).split('\n').filter(line=>line.includes('Remote Control attempt'));

@@ -554,6 +554,8 @@ async function nativeLauncher(statePath, state, script) {
         reuseRemote ||= await access(link).then(() => true, () => false);
         await rm(link, { force: true });
         const retry = code !== 0 && retries < 3;
+        state.rc_unavailable = !retry;
+        await saveNative();
         const delay = 1000 * 2 ** retries;
         const next = retry ? `retrying ${retries + 1}/3 in ${delay}ms`
           : `not retrying: ${code === 0 ? 'clean exit' : 'retry budget exhausted'}`;
@@ -569,6 +571,7 @@ async function launcher() {
   const statePath = resolve(option('--state'));
   const state = JSON.parse(await readFile(statePath, 'utf8'));
   state.pid = process.pid;
+  state.rc_unavailable = false;
   await atomic(statePath, JSON.stringify(state));
   process.env.CDASH_CODEX_STATE = statePath;
   const script = fileURLToPath(import.meta.url);
