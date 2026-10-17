@@ -152,7 +152,13 @@ test('resumable summary uses escaped, keyboard-expandable peek and retains promp
   const summary = context.card({ ...session, summary: '<script>alert("x")</script>' });
   assert.match(summary, /<details class="peek summary" data-summary="one"><summary class="peek-text">/);
   assert.match(summary, /&lt;script&gt;/);
-  assert.doesNotMatch(summary, /<script>|Earlier prompt/);
+  assert.doesNotMatch(summary, /<script>|Earlier prompt|class="desc"|Title/);
+  const empty = context.card({ sid: 'empty', prompts: [] });
+  assert.match(empty, /No conversation preview available/);
+  assert.doesNotMatch(empty, /undefined|class="desc"/);
+  const codex = context.card({ sid: 'codex', prompts: ['<img src=x onerror=alert(1)>', 'Add tests'] });
+  assert.match(codex, /&lt;img src=x onerror=alert\(1\)&gt; · Add tests/);
+  assert.doesNotMatch(codex, /<img/);
   assert.match(summary, /data-resume="one"/);
 });
 

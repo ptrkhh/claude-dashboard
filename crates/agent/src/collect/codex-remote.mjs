@@ -361,7 +361,6 @@ async function worker() {
       }
       const input = blocks.map(b => ({ type: 'text', text: b.text, text_elements: [] }));
       if (!input.some(b => b.text.trim())) return;
-      state.title ||= input.map(b => b.text).join(' ').slice(0, 200);
       state.ts = Date.now(); await save();
       const clientUserMessageId = payload.uuid || randomUUID();
       submitted.add(clientUserMessageId);
@@ -507,7 +506,6 @@ async function nativeLauncher(statePath, state, script) {
     else if (m.method === 'turn/completed') { state.working = false; state.ts = Date.now(); }
     else if (m.method === 'item/completed' && p.item.type === 'agentMessage') state.last_message = p.item.text;
     else if (m.method === 'item/completed' && p.item.type === 'userMessage') {
-      state.title ||= p.item.content.filter(b => b.type === 'text').map(b => b.text).join(' ').slice(0, 200);
       state.ts = Date.now();
     } else return;
     await saveNative();
@@ -596,7 +594,7 @@ if (args[0] === '--summary') {
     const { DatabaseSync } = await import('node:sqlite');
     const db = new DatabaseSync(join(home, files.sort((a, b) => b[1] - a[1])[0][0]), { readOnly: true });
     try {
-      return db.prepare(`select id as sid, cwd as dir, coalesce(nullif(name, ''), title) as title,
+      return db.prepare(`select id as sid, cwd as dir,
           updated_at_ms as ts, model, reasoning_effort as effort, rollout_path
         from threads
         where originator = 'claude_dashboard' and archived = 0 and coalesce(nullif(name, ''), title) <> ''

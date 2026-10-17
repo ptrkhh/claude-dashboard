@@ -206,7 +206,6 @@ mod tests {
             dir: None,
             ts: 0.,
             branch: None,
-            title: "Title".into(),
             prompts: vec![],
             model: None,
             effort: None,
