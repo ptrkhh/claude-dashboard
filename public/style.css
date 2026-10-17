@@ -389,33 +389,6 @@ button, input, select { font: inherit; }
 .action.ghost { flex: 0 0 auto; color: var(--text-faint); background: transparent; border-color: var(--border); }
 .action.ghost:hover { color: var(--text-muted); background: var(--surface-hover); }
 
-/* Send-to-TUI bar — mirrors the launcher's directory field (button nested in
-   the input) so the card reads as one family with the command bar. */
-.send { position: relative; display: flex; align-items: center; margin-top: 8px; }
-.send-input {
-  flex: 1; min-width: 0; width: 100%;
-  background: var(--surface-2); border: 1px solid var(--border);
-  border-radius: var(--r-md); padding: 10px 42px 10px 12px; color: var(--text);
-  font-family: var(--font-mono); font-size: 13px;
-  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease),
-    background-color var(--dur) var(--ease);
-}
-.send-input::placeholder { color: var(--text-faint); }
-.send-input:focus {
-  outline: none; border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-ring); background: var(--surface);
-}
-.send-btn {
-  position: absolute; right: 5px; top: 50%; transform: translateY(-50%);
-  width: 30px; height: 30px; display: grid; place-items: center; border: 0;
-  background: transparent; color: var(--text-faint); cursor: pointer; border-radius: var(--r-sm);
-  transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease);
-}
-.send-btn:hover { background: var(--surface-hover); color: var(--accent); }
-.send-btn:disabled { opacity: 0.5; cursor: default; }
-.send-btn svg { width: 16px; height: 16px; }
-.send:focus-within .send-btn { color: var(--accent); }
-
 .empty {
   color: var(--text-faint); font-size: 13.5px; padding: 28px; text-align: center;
   border: 1px dashed var(--border-strong); border-radius: var(--r-lg); background: var(--surface-2);
@@ -575,3 +548,34 @@ button, input, select { font: inherit; }
   border-radius: var(--r-md); padding: 10px 14px; font-size: 13px; font-weight: 500; cursor: pointer;
 }
 .btn-ghost:hover { background: var(--surface-hover); }
+
+/* ---------- Terminal overlay ---------- */
+.term {
+  position: fixed; inset: 0; z-index: 50;
+  display: flex; flex-direction: column;
+  height: 100dvh;
+  background: #1a1917; color: #f4f2ec;
+  padding-top: env(safe-area-inset-top);
+}
+.term[hidden] { display: none; }
+.term-bar { display: flex; align-items: center; gap: 10px; padding: 6px 8px 6px 14px; }
+.term-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-status { flex: 1; color: #b0aea5; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.term-reconnect {
+  padding: 6px 12px; border-radius: var(--r-pill); border: 1px solid #47443f;
+  background: transparent; color: inherit; font: inherit; font-size: 13px;
+}
+.term .icon-btn { color: #b0aea5; }
+.term-screen { flex: 1; min-height: 0; padding: 0 4px; }
+.term-keys {
+  display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px;
+  padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
+  background: #201f1d; border-top: 1px solid #383632;
+  touch-action: manipulation; user-select: none; -webkit-user-select: none;
+}
+.term-keys button {
+  min-height: 40px; border-radius: var(--r-sm); border: 1px solid #383632;
+  background: #262523; color: #f4f2ec; font: 500 14px var(--font-mono);
+}
+.term-keys button:active { background: #302e2b; }
+.term-keys button.on { background: var(--accent); border-color: transparent; color: #1a1917; }

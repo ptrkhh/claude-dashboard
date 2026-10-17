@@ -105,9 +105,9 @@ pub async fn get_browse(Query(q): Query<HashMap<String, String>>) -> Result<Resp
 }
 
 use crate::collect::places::{add_recent, toggle_favorite};
-use crate::collect::keys::send_keys;
 use crate::collect::spawn::{kill_session, launch_session, purge_session, resume_session};
-use crate::collect::validate::assert_path;
+use crate::collect::term::{bridge, origin_allowed, parse_size};
+use crate::collect::validate::{assert_kill_name, assert_path};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -209,24 +209,49 @@ pub async fn post_kill(
     Ok(Json(serde_json::json!({ "ok": true })).into_response())
 }
 
-#[derive(Deserialize)]
-pub struct KeysBody {
-    #[serde(default)]
-    pub name: String,
-    /// Deliberately not defaulted: an absent field is "text required", not an
-    /// empty keystroke sent to a live pane.
-    pub text: Option<String>,
-}
-
-/// Type into a session's TUI. Stopgap for the Claude app's remote control,
-/// which can send prompts but can't answer a session that asks you to run
-/// something interactively (`! gcloud auth login`).
-pub async fn post_keys(
+/// The session's real TUI over a WebSocket. Every check runs before the
+/// upgrade, so a refused request spawns nothing; the browser sees only a
+/// failed handshake, so each refusal is also logged.
+pub async fn get_term(
     State(ctx): State<Arc<Ctx>>,
-    Json(body): Json<KeysBody>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
+    ws: axum::extract::ws::WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
-    send_keys(&ctx, &body.name, body.text.as_deref()).await?;
-    Ok(Json(serde_json::json!({ "ok": true })).into_response())
+    let h = |k: axum::http::HeaderName| headers.get(k).and_then(|v| v.to_str().ok());
+    let origin = h(axum::http::header::ORIGIN);
+    let public = std::env::var("CDASH_PUBLIC_URL").ok();
+    if !origin_allowed(origin, h(axum::http::header::HOST), public.as_deref()) {
+        ctx.host
+            .log
+            .push(format!("term refused: origin {origin:?}"));
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            message: "origin not allowed".into(),
+        });
+    }
+    let name = q.get("name").cloned().unwrap_or_default();
+    let checked = assert_kill_name(&name).and_then(|()| {
+        parse_size(
+            q.get("cols").map(String::as_str),
+            q.get("rows").map(String::as_str),
+        )
+    });
+    let (cols, rows) = match checked {
+        Ok(size) => size,
+        Err(e) => {
+            ctx.host.log.push(format!("term refused: {}", e.0));
+            return Err(e.into());
+        }
+    };
+    if !crate::collect::codex::terminal_supported(&ctx, &name).await {
+        ctx.host.log.push(format!("term refused {name}: legacy Codex bridge"));
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: "This session has no native terminal. Start or resume a Codex session to enable Terminal.".into(),
+        });
+    }
+    Ok(ws.on_upgrade(move |socket| bridge(ctx, name, cols, rows, socket)))
 }
 
 pub async fn post_purge(
@@ -459,49 +484,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn keys_rejects_a_name_that_is_not_a_cdash_session() {
-        // The value reaches `tmux send-keys -t`, so it answers to the same
-        // allowlist `/api/kill` does.
-        let b = serve(cfg_for(tempdir("keys-guard"))).await.unwrap();
-        let (status, body) = http_post(
-            &format!("http://{}/api/keys", b.addr),
-            "{\"name\":\"other; rm -rf /\",\"text\":\"hi\"}",
-        )
-        .await;
-        assert_eq!(status, 400);
-        assert!(body.contains("bad name"));
-    }
-
-    #[tokio::test]
-    async fn keys_rejects_an_absent_or_empty_text_before_touching_tmux() {
-        let b = serve(cfg_for(tempdir("keys-text"))).await.unwrap();
-        let url = format!("http://{}/api/keys", b.addr);
-
-        let (status, body) = http_post(&url, "{\"name\":\"cdash-a\"}").await;
-        assert_eq!(status, 400, "an absent text must not become a bare Enter");
-        assert!(body.contains("text required"));
-
-        let (status, body) = http_post(&url, "{\"name\":\"cdash-a\",\"text\":\"  \"}").await;
-        assert_eq!(status, 400);
-        assert!(body.contains("empty text"));
-    }
-
-    #[tokio::test]
-    async fn a_failed_send_is_a_500_not_a_cheerful_ok() {
-        // No tmux server is running under test, so the send must fail — and
-        // reporting a keystroke that never reached the pane is the defect this
-        // guards. `Refused::Failed` is what makes it a 500 rather than `{ok:true}`.
-        let b = serve(cfg_for(tempdir("keys-fail"))).await.unwrap();
-        let (status, body) = http_post(
-            &format!("http://{}/api/keys", b.addr),
-            "{\"name\":\"cdash-no-such-session\",\"text\":\"hello\"}",
-        )
-        .await;
-        assert_eq!(status, 500);
-        assert!(body.contains("tmux send-keys"), "the error names the failing command: {body}");
-    }
-
-    #[tokio::test]
     async fn purge_guards_the_sid_and_then_hides_it() {
         let b = serve(cfg_for(tempdir("purge"))).await.unwrap();
         let url = format!("http://{}/api/purge", b.addr);
@@ -521,6 +503,20 @@ mod tests {
         let b = serve(cfg_for(tempdir("embedded-ui"))).await.unwrap();
         let body = reqwest_get(&format!("http://{}/", b.addr)).await;
         assert!(body.contains("<title>Claude Dashboard</title>"));
+    }
+
+    #[tokio::test]
+    async fn terminal_assets_are_embedded() {
+        let b = serve(cfg_for(tempdir("term-assets"))).await.unwrap();
+        for (path, needle) in [
+            ("/vendor/xterm.js", "Terminal"),
+            ("/vendor/addon-fit.js", "FitAddon"),
+            ("/vendor/xterm.css", ".xterm"),
+            ("/term/keys.js", "cdashKeys"),
+        ] {
+            let body = reqwest_get(&format!("http://{}{path}", b.addr)).await;
+            assert!(body.contains(needle), "{path} is served");
+        }
     }
 
     #[tokio::test]

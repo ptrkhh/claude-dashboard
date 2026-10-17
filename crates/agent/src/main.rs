@@ -40,8 +40,13 @@ fn prompt_hidden(prompt: &str) -> Result<String, String> {
     Ok(line.trim_end_matches(['\n', '\r']).to_string())
 }
 
+fn main() {
+    if cdash_agent::collect::codex_proxy::run_if_requested() { return; }
+    run_agent();
+}
+
 #[tokio::main]
-async fn main() {
+async fn run_agent() {
     match std::env::args().nth(1).as_deref() {
         None => {}
         Some("set-password") => match read_password_twice() {

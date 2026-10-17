@@ -12,10 +12,8 @@ const $ = s => document.querySelector(s);
 const MODELS = ['sonnet', 'opus', 'haiku', 'fable'].map(value => ({ value, label: `Claude ${value.charAt(0).toUpperCase() + value.slice(1)}` }));
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 let armedKill = null; // ponytail: survives render() replacing #running.innerHTML
-const drafts = {}; // half-typed send-bar text by session name, for the same reason
 const picks = {}; // explicit model/effort choices on resumable cards by sid, kept across the poll's re-render
 let resLimit = 20; // resumable entries asked for; "Show more" raises it, and it matches the server's first page
-const sending = new Set(); // sessions with a send in flight: a re-render hands back a fresh, enabled button
 const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 const esc = s => (s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const effortLabel = value => value === 'xhigh' ? 'xHigh' : cap(value);
@@ -25,6 +23,7 @@ const svg = body => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" 
 const ICONS = {
   play: `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15a1 1 0 0 0 1.5.87l12-7.5a1 1 0 0 0 0-1.74l-12-7.5A1 1 0 0 0 7 4.5z"/></svg>`,
   external: svg('<path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/>'),
+  terminal: svg('<path d="M4 17l6-5-6-5"/><path d="M12 19h8"/>'),
   x: svg('<path d="M18 6 6 18"/><path d="M6 6l12 12"/>'),
   download: svg('<path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/>'),
   refresh: svg('<path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/>'),
@@ -33,7 +32,6 @@ const ICONS = {
   sun: svg('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>'),
   moon: svg('<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>'),
   system: svg('<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>'),
-  send: svg('<path d="M21.5 2.5 11 13"/><path d="M21.5 2.5 15 21l-4-8-8-4z"/>'),
   folder: svg('<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>'),
   chevronRight: svg('<path d="M9 6l6 6-6 6"/>'),
   clock: svg('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'),
@@ -257,14 +255,12 @@ function runningCard(r) {
     : `<span class="action pending">${ICONS.spinner}<span>Waiting for link…</span></span>`;
   const kill = r.external ? ''
     : `<button class="action danger" type="button" data-kill="${esc(r.name)}" ${r.name === armedKill ? 'data-arm="1"' : ''} aria-label="Kill session">${r.name === armedKill ? 'Sure?' : ICONS.x}</button>`;
-  // Types into the session's TUI — the thing the Claude app's remote control
-  // can't do. tmux-owned panes only; external sessions live elsewhere.
-  const send = r.external ? ''
-    : `<form class="send" data-send="${esc(r.name)}">
-         <input class="send-input" type="text" placeholder="${r.provider === 'codex' || r.model === 'codex' ? 'Send a prompt' : '! gcloud auth login'}" aria-label="Send input to session"
-                value="${esc(drafts[r.name])}" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
-         <button class="send-btn" type="submit" aria-label="Send to session">${ICONS.send}</button>
-       </form>`;
+  // The session's real TUI. tmux-owned panes only: an external session lives
+  // in another terminal app's PTY, which nothing can attach to.
+  const termBtn = r.external ? ''
+    : r.provider === 'codex' && !r.nativeTerminal
+      ? '<span class="action pending">Terminal available for new or resumed sessions</span>'
+      : `<button class="action" type="button" data-term="${esc(r.name)}" data-title="${esc(r.dir.split('/').pop())}">${ICONS.terminal}<span>Terminal</span></button>`;
   return `
     <div class="session ${status} ${r.external ? 'external' : ''}">
       <div class="session-head">
@@ -278,8 +274,7 @@ function runningCard(r) {
         <span class="time">${fmtUp(r.uptimeSec)}</span>
       </div>
       ${peek}
-      <div class="actions">${rc}${kill}</div>
-      ${send}
+      <div class="actions">${rc}${termBtn}${kill}</div>
     </div>`;
 }
 
@@ -379,11 +374,7 @@ function render(d) {
   $('#stats').innerHTML = [hardwareTiles, usageTiles].filter(row => row.length)
     .map(row => `<div class="stats-row">${row.map(statTile).join('')}</div>`).join('');
 
-  // The poll replaces this grid wholesale, which would drop the phone keyboard
-  // mid-sentence. Leave it alone while someone is typing into a card; it
-  // refreshes on the next poll after blur (the text itself survives in `drafts`).
-  if (!document.activeElement?.classList.contains('send-input'))
-    $('#running').innerHTML = d.running.map(runningCard).join('') || '<div class="empty">No running sessions</div>';
+  $('#running').innerHTML = d.running.map(runningCard).join('') || '<div class="empty">No running sessions</div>';
   lastRes = d.resumable;
   // Same rule for the pickers: re-rendering would snap an open menu shut.
   if (!document.activeElement?.closest('.pick-dd') && !$('#resumable .cb-menu:not([hidden])')) renderResumable();
@@ -393,6 +384,8 @@ function render(d) {
 }
 
 document.body.addEventListener('click', async e => {
+  const t = e.target.closest('[data-term]');
+  if (t) { openTerm(t.dataset.term, t.dataset.title); return; }
   const el = e.target.closest('[data-kill],[data-resume],[data-purge],[data-more]');
   if (!el) return;
   try {
@@ -463,30 +456,135 @@ document.addEventListener('keydown', e => {
   }
 });
 
-// Send-to-TUI: delegated, because render() replaces the cards every poll.
-document.body.addEventListener('input', e => {
-  const form = e.target.closest('form.send');
-  if (form) drafts[form.dataset.send] = e.target.value;
-});
-document.body.addEventListener('submit', async e => {
-  const form = e.target.closest('form.send');
-  if (!form) return;
+/* ---------- Terminal: the session's real TUI over a WebSocket ----------
+   The agent runs `tmux attach` in a PTY and pipes it here. tmux owns the
+   history, so xterm keeps no scrollback; PgUp/PgDn scroll inside Claude Code's
+   fullscreen renderer instead. */
+let term = null; // { name, xterm, fit, ro, ws, ctrl, retry } while the overlay is open
+
+async function termUrl(name, cols, rows) {
+  const q = `/api/term?name=${encodeURIComponent(name)}&cols=${cols}&rows=${rows}`;
+  // The webview cannot proxy a WebSocket through invoke, so it dials the agent.
+  if (isTauri) return (await invoke('agent_base')).replace(/^http/, 'ws') + q;
+  return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${q}`;
+}
+
+function termStatus(text, reconnect) {
+  $('#term-status').textContent = text;
+  $('#term-reconnect').hidden = !reconnect;
+}
+
+function termSend(data) {
+  if (term?.ws?.readyState === WebSocket.OPEN) term.ws.send(new TextEncoder().encode(data));
+}
+
+async function termConnect() {
+  const t = term;
+  t.retry = false;
+  t.xterm.reset();
+  termStatus('Connecting…', false);
+  let url;
+  try { url = await termUrl(t.name, t.xterm.cols, t.xterm.rows); }
+  catch (e) { termStatus(String(e?.message ?? e), true); return; }
+  if (term !== t) return; // closed while resolving the URL
+  const ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+  t.ws = ws;
+  let opened = false;
+  ws.onopen = () => {
+    opened = true;
+    termStatus('', false);
+    // onResize drops sizes while connecting, and the keyboard that focus()
+    // opens usually lands then; send the size the screen has now.
+    ws.send(JSON.stringify({ resize: [t.xterm.cols, t.xterm.rows] }));
+  };
+  ws.onmessage = e => { if (typeof e.data !== 'string') t.xterm.write(new Uint8Array(e.data)); };
+  ws.onclose = e => {
+    if (term !== t || t.ws !== ws) return; // the UI closed it, or a newer socket replaced it
+    t.ws = null;
+    if (e.code === 4000) return termStatus('Session ended', false);
+    if (e.code === 4001) return termStatus('Disconnected', true);
+    // Unexpected: network, agent restart, phone sleep. One automatic retry
+    // when the page is next visible; the button covers the rest.
+    termStatus(e.reason || (opened ? 'Disconnected' : 'Couldn’t connect'), true);
+    t.retry = true;
+  };
+}
+
+function setCtrl(on) {
+  term.ctrl = on;
+  const b = $('#term-keys [data-key="ctrl"]');
+  b.classList.toggle('on', on);
+  b.setAttribute('aria-pressed', String(on));
+}
+
+function openTerm(name, title) {
+  if (term) return;
+  $('#term-title').textContent = title;
+  $('#term').hidden = false;
+  const xterm = new Terminal({
+    fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--font-mono'),
+    fontSize: 13,
+    cursorBlink: true,
+    scrollback: 0,
+    // Dark regardless of the dashboard theme: Claude Code's own colors assume one.
+    theme: { background: '#1a1917', foreground: '#f4f2ec' },
+  });
+  const fit = new FitAddon.FitAddon();
+  xterm.loadAddon(fit);
+  xterm.open($('#term-screen'));
+  // The hidden textarea is what the phone keyboard types into.
+  for (const [k, v] of [['autocapitalize', 'off'], ['autocorrect', 'off'], ['autocomplete', 'off'], ['spellcheck', 'false']])
+    xterm.textarea.setAttribute(k, v);
+  fit.fit();
+  term = { name, xterm, fit, ro: null, ws: null, ctrl: false, retry: false };
+  setCtrl(false); // the key bar is shared DOM: clear a highlight left by the last session
+  xterm.onData(d => {
+    if (term.ctrl) { d = cdashKeys.applyCtrl(d); setCtrl(false); }
+    termSend(d);
+  });
+  xterm.onResize(({ cols, rows }) => {
+    if (term.ws?.readyState === WebSocket.OPEN) term.ws.send(JSON.stringify({ resize: [cols, rows] }));
+  });
+  // Rotation and the keyboard opening both resize the container.
+  term.ro = new ResizeObserver(() => fit.fit());
+  term.ro.observe($('#term-screen'));
+  history.pushState({ term: name }, ''); // Android back closes the overlay
+  termConnect();
+  xterm.focus();
+}
+
+function closeTerm() {
+  if (!term) return;
+  const t = term;
+  term = null;
+  t.ro.disconnect();
+  t.ws?.close();
+  t.xterm.dispose();
+  $('#term').hidden = true;
+  poll(); // the poll paused while the overlay was open
+}
+
+$('#term-close').innerHTML = ICONS.x;
+$('#term-close').addEventListener('click', () => history.back()); // popstate closes it
+addEventListener('popstate', closeTerm);
+$('#term-reconnect').addEventListener('click', () => { if (term && !term.ws) termConnect(); });
+// Act on pointerdown and cancel it, so a tap neither moves focus nor closes
+// the phone keyboard; mousedown is cancelled too for browsers that still
+// focus on it.
+$('#term-keys').addEventListener('mousedown', e => e.preventDefault());
+$('#term-keys').addEventListener('pointerdown', e => {
+  const b = e.target.closest('[data-key]');
+  if (!b || !term) return;
   e.preventDefault();
-  const input = form.querySelector('.send-input');
-  const btn = form.querySelector('.send-btn');
-  const text = input.value.trim();
-  const name = form.dataset.send;
-  if (!text || sending.has(name)) return;
-  sending.add(name);
-  btn.disabled = true;
-  try {
-    await api('/api/keys', { name, text });
-    delete drafts[name]; input.value = ''; toast('Sent to session');
-    // A focused input freezes the grid (see render), so let go of it and poll
-    // now: the point of sending is to watch the session answer.
-    input.blur(); poll();
-  } catch (err) { toast(err.message); }
-  finally { sending.delete(name); btn.disabled = false; }
+  const k = b.dataset.key;
+  if (k === 'ctrl') return setCtrl(!term.ctrl);
+  if (term.ctrl) setCtrl(false); // Ctrl applies to the next typed character only
+  termSend(cdashKeys.KEYS[k]);
+  if (document.activeElement !== term.xterm.textarea) term.xterm.focus();
+});
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && term?.retry && !term.ws) termConnect();
 });
 
 // Launch: submitting the command bar (button or Enter in the directory field).
@@ -641,6 +739,7 @@ function arm() {
 }
 
 async function tick() {
+  if (term) return; // paused under the terminal; closeTerm() restarts it
   const g = gen;
   // Skip background polls, but never the first one. An Android WebView is
   // hidden until its activity resumes, and `visibilitychange` can fire before

@@ -4,7 +4,7 @@ A small local web dashboard for launching, monitoring, resuming, and killing Cla
 
 The stats strip mirrors the `claude /usage` limit bars: session and weekly usage percentages, each with its reset time beneath the meter. These read the same OAuth-only `/api/oauth/usage` endpoint the CLI uses, so they appear only when you're signed in with a Claude subscription — API-key users see just CPU/RAM/disk. The lookup is refreshed in the background on a 5-minute TTL, so the 4s poll never waits on the network, and a transient failure keeps the last good numbers for up to 20 minutes rather than blanking the tiles (after that they disappear, so a dead token never leaves stale percentages up). Failed requests back off exponentially, to 20 minutes, because the endpoint rate-limits hard — polling it every minute drew a `429` every few minutes. A failure the last good numbers still cover is not written to the log panel; only an outage that has cost the tiles is, once. It is an undocumented endpoint the Claude CLI happens to use, so it may change or stop working without notice.
 
-Each running session card has a **send bar** that types straight into that session's TUI via `tmux send-keys`. It exists because the Claude app's remote control can send prompts but can't type into the TUI, so a session that stops and asks you to run something interactively (`! gcloud auth login`) is a dead end from a phone. What you type is sent as one line followed by Enter, exactly as if you'd typed it at the terminal — newline runs collapse to spaces and control characters are stripped, so a paste can't smuggle arrow keys or mode switches into the pane. The half-typed text of each bar survives the dashboard's refreshes, and the log panel records only how many characters were sent, never the text, since what gets typed at these prompts is often a login code or token. Like the launcher, the bar is command execution for anyone who can reach the dashboard (`! cmd` runs in the session), so it sits behind the same `CDASH_AUTH` guards. The text reaches tmux on its command line, so other local users can glimpse it in `ps` while it is being sent. External sessions aren't in tmux, so they don't get the bar. Delete `crates/agent/src/collect/keys.rs`, `POST /api/keys`, and the `.send` block in `public/` once remote control grows an input of its own.
+Each running session card has a **Terminal** button that opens that session's real Claude Code TUI, the way an SSH client would: arrow through `/mcp` menus, toggle modes with Shift+Tab, interrupt with Esc. The agent runs `tmux attach` in a PTY and streams it over a WebSocket (`GET /api/term`). Letters, digits and symbols come from the phone's own keyboard; a key bar adds Esc, Tab, Shift+Tab, a sticky Ctrl (tap Ctrl, then a letter), PgUp/PgDn, Ctrl+C, the arrows and Enter. Closing the terminal only detaches; the session keeps running. Sessions the dashboard launches or resumes start in Claude Code's fullscreen renderer so PgUp/PgDn scroll the conversation (a session already running keeps its old renderer until it is relaunched); `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN` or `CLAUDE_CODE_NO_FLICKER=0` in the agent's environment overrides that, and then PgUp/PgDn do not scroll (use Ctrl, then `o`, for transcript mode). The terminal is command execution for anyone who can reach the dashboard, so it sits behind the same `CDASH_AUTH` guards, and it refuses WebSocket upgrades from any page whose `Origin` is not the dashboard itself (or `CDASH_PUBLIC_URL`, or the desktop/Android app). The log panel records when a terminal opens and closes (`term open` / `term close`), never what is typed. External sessions aren't in tmux, so they don't get the button. A remote profile in the desktop/Android app cannot yet open the terminal against an agent that needs auth headers, because a browser WebSocket cannot carry them; profiles support only `auth: none` today.
 
 The launcher has a touch-friendly folder picker (the folder button in the directory field) that browses the server's filesystem from `/`, with server-backed **Recents** (auto-recorded on launch) and **Favorites**. Since it can enumerate any directory, keep the "trusted LAN / behind Cloudflare Access" caveat above in mind. Recents and favorites persist to `$CLAUDE_DIR/cdash-places.json`.
 
@@ -22,7 +22,7 @@ cargo run -p cdash-tauri
 
 A Tauri desktop wrapper around the same UI. On Linux and macOS, the agent runs in-process (no separate server, no port to remember) and starts when the app opens. The HTTP boundary is kept even in-process: the same `/api/*` calls still speak HTTP to loopback, tunnelled through the `api_request` Tauri command rather than webview `fetch`. Connection profiles are stored in the app's config directory via `tauri-plugin-store`. Secrets handling arrives in step 10.
 
-Linux and macOS therefore open directly into the dashboard; there is no separate-agent setup command to paste. The session send bar still types copied prompts or commands into a running terminal session.
+Linux and macOS therefore open directly into the dashboard; there is no separate-agent setup command to paste. The session card's **Terminal** button still gets copied prompts or commands into a running session: open it and paste or type them into the session's own TUI.
 
 **On Windows the client links no agent at all** — `cdash-agent` is a
 `cfg(not(windows))` dependency. tmux, `claude` and `/proc` live in a WSL distro,
@@ -216,8 +216,16 @@ they never block the session poll. Other returned quota buckets carry their own 
 signed-out Codex, and API-key-only providers quietly omit Codex quota tiles;
 Claude usage and session controls remain available. Model availability and
 subscription quota availability are independent.
-The dashboard owns the tmux pane and supports send, kill, resume, and **Open in
-Claude**. Codex uses the selected model and effort with its existing permissions.
+New and resumed Codex sessions run the native Codex TUI in tmux. **Terminal**
+opens that TUI with working navigation keys and scrolling; **Open in Claude**
+controls the same thread through Remote Control. Both clients share one local
+app-server over a private Unix socket. Codex CLI **0.162.1 or later** is required.
+Codex uses the selected model and effort with its existing permissions.
+Closing the terminal overlay only detaches. Quitting the TUI or killing its
+session stops the owned backend and bridge; a Remote Control process failure
+leaves the native TUI usable. Existing running sessions keep their old bridge
+until deliberately relaunched or resumed, and do not offer native terminal
+controls. No active session is restarted automatically.
 Running sessions show their effective model, display name, and effort.
 Resumable cards show the model each session last used and have model and
 effort pickers, preselected to it; **Resume** applies what is selected, for
@@ -339,6 +347,8 @@ or services share the box** — with `none`, any local user reaching
 `127.0.0.1:23274` gets code execution as *you*, which is a real escalation rather
 than a no-op. `bearer` does not substitute here: browsers do not send
 `Authorization` headers.
+
+The terminal's Origin check compares the browser's `Origin` with the `Host` the agent receives. Cloudflare's documentation does not say whether `cloudflared` passes the original `Host` through unchanged by default (it documents only `originRequest.httpHostHeader`, which sets the `Host` sent to the origin), so behind a tunnel set `CDASH_PUBLIC_URL` to the public `https://` address, which is always safe.
 
 The JWKS fetch is gated on `cf-access` being in the chain, not on the two
 `CDASH_CF_*` variables being set, so leaving them in a unit file after switching

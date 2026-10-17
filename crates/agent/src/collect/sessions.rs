@@ -105,6 +105,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
                 uptime_sec: ((now / 1000.0 - p.created as f64).round() as i64).max(0),
                 model: s.model_label.or(s.model).or_else(|| Some("Codex".into())), effort: s.effort,
                 provider: Some("codex".into()),
+                native_terminal: Some(s.native_terminal),
                 rc_link: super::codex::link(ctx, &p.name).await,
                 git: git.as_deref().map(parse_git_status), working: s.working,
                 last_message: s.last_message, sid: s.sid,
@@ -175,6 +176,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             model: meta.model.clone(),
             effort: meta.effort.clone(),
             provider: None,
+            native_terminal: None,
             rc_link,
             git: git_out.as_deref().map(parse_git_status),
             working,
@@ -508,7 +510,7 @@ mod tests {
         let s = Session {
             display_name: None,
             name: "x".into(), dir: "/x".into(), pid: 1, uptime_sec: 0,
-            model: None, effort: None, provider: None, rc_link: None, git: None, working: false,
+            model: None, effort: None, provider: None, native_terminal: None, rc_link: None, git: None, working: false,
             last_message: None, sid: None, cpu: None, rss_kb: 0,
             cpu_sample_age_ms: 0, external: false,
         };

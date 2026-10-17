@@ -26,6 +26,8 @@ pub struct Session {
     pub effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    #[serde(rename = "nativeTerminal", skip_serializing_if = "Option::is_none")]
+    pub native_terminal: Option<bool>,
     #[serde(rename = "rcLink")]
     pub rc_link: Option<String>,
     pub git: Option<GitStatus>,
@@ -133,6 +135,7 @@ pub async fn external_sessions(
             model: None,
             effort: None,
             provider: None,
+            native_terminal: None,
             rc_link: sess
                 .bridge_session_id
                 .map(|id| format!("https://claude.ai/code/{id}")),

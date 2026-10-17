@@ -36,12 +36,12 @@ crate::guarded_routes! {
     get "/api/places" => routes::get_places,
     get "/api/browse" => routes::get_browse,
     get "/api/hostinfo" => routes::get_hostinfo,
+    get "/api/term" => routes::get_term,
     get "/api/models" => routes::get_models,
     post "/api/favorites" => routes::post_favorites,
     post "/api/launch" => routes::post_launch,
     post "/api/resume" => routes::post_resume,
     post "/api/kill" => routes::post_kill,
-    post "/api/keys" => routes::post_keys,
     post "/api/purge" => routes::post_purge,
     post "/api/logout" => routes::post_logout,
 }
@@ -134,6 +134,22 @@ async fn embedded_asset(uri: OriginalUri) -> Response {
         "transport/backoff.js" => (
             "text/javascript; charset=utf-8",
             include_bytes!("../../../../public/transport/backoff.js"),
+        ),
+        "term/keys.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("../../../../public/term/keys.js"),
+        ),
+        "vendor/xterm.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("../../../../public/vendor/xterm.js"),
+        ),
+        "vendor/addon-fit.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("../../../../public/vendor/addon-fit.js"),
+        ),
+        "vendor/xterm.css" => (
+            "text/css; charset=utf-8",
+            include_bytes!("../../../../public/vendor/xterm.css"),
         ),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
