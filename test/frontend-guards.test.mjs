@@ -114,6 +114,9 @@ test('legacy Codex sessions do not offer unsupported terminal controls', () => {
   assert.doesNotMatch(context.card(session), /data-term=/);
   assert.match(context.card(session), /Terminal.*new or resumed sessions/);
   assert.match(context.card({ ...session, nativeTerminal: true }), /data-term=/);
+  assert.match(context.card({ ...session, nativeTerminal: true }), /Claude link unavailable/);
+  assert.doesNotMatch(context.card({ ...session, nativeTerminal: true }), /Waiting for link/);
+  assert.match(context.card({ ...session, nativeTerminal: true, rcLink: 'https://claude.ai/code/session_test' }), /Open in Claude/);
   assert.match(context.card({ ...session, provider: undefined }), /data-term=/);
   assert.doesNotMatch(context.card({ ...session, nativeTerminal: true, external: true }), /data-term=/);
 });

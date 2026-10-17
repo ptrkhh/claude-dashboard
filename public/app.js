@@ -252,7 +252,9 @@ function runningCard(r) {
     ? `<div class="peek" onclick="this.classList.toggle('open')"><span class="peek-text">${esc(r.lastMessage)}</span></div>` : '';
   const rc = r.rcLink
     ? `<a class="action primary" href="${esc(r.rcLink)}" target="_blank" rel="noopener">${ICONS.external}<span>Open in Claude</span></a>`
-    : `<span class="action pending">${ICONS.spinner}<span>Waiting for link…</span></span>`;
+    : r.nativeTerminal
+      ? '<span class="action pending">Claude link unavailable · use Terminal</span>'
+      : `<span class="action pending">${ICONS.spinner}<span>Waiting for link…</span></span>`;
   const kill = r.external ? ''
     : `<button class="action danger" type="button" data-kill="${esc(r.name)}" ${r.name === armedKill ? 'data-arm="1"' : ''} aria-label="Kill session">${r.name === armedKill ? 'Sure?' : ICONS.x}</button>`;
   // The session's real TUI. tmux-owned panes only: an external session lives
