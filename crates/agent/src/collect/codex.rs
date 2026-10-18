@@ -71,6 +71,8 @@ pub struct CodexSession {
     #[serde(default)]
     pub native_terminal: bool,
     #[serde(default)]
+    pub rc_unavailable: bool,
+    #[serde(default)]
     pub display_name: Option<String>,
     pub dir: String,
     pub pid: Option<i32>,

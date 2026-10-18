@@ -107,6 +107,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
                 provider: Some("codex".into()),
                 native_terminal: Some(s.native_terminal),
                 rc_link: super::codex::link(ctx, &p.name).await,
+                rc_unavailable: s.rc_unavailable,
                 git: git.as_deref().map(parse_git_status), working: s.working,
                 last_message: s.last_message, sid: s.sid,
                 cpu: cpu.cpu, rss_kb: cpu.rss_kb, cpu_sample_age_ms: cpu.cpu_sample_age_ms,
@@ -177,6 +178,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             effort: meta.effort.clone(),
             provider: None,
             native_terminal: None,
+            rc_unavailable: false,
             rc_link,
             git: git_out.as_deref().map(parse_git_status),
             working,
@@ -481,6 +483,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_remote_failure_reaches_the_session_card() {
+        let d = tempdir("native-remote-status");
+        let root = d.join("cdash-codex");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut state = serde_json::json!({
+            "native_terminal": true, "pid": 4242, "sid": "native-thread", "dir": "/proj",
+        });
+        std::fs::write(root.join("cdash-test-1200-abc.json"), state.to_string()).unwrap();
+        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000|/proj");
+        let ctx = ctx_with_path(d.clone(), path);
+        for unavailable in [false, true] {
+            state["rc_unavailable"] = unavailable.into();
+            std::fs::write(root.join("cdash-test-1200-abc.native"), state.to_string()).unwrap();
+            let response = collect_sessions(&ctx, RESUMABLE_MAX).await;
+            let card = serde_json::to_value(&response.running[0]).unwrap();
+            assert_eq!(card.get("rcUnavailable"), unavailable.then_some(&serde_json::Value::Bool(true)));
+            assert!(card.get("rc_unavailable").is_none());
+        }
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[tokio::test]
     async fn a_link_discovered_from_the_session_file_is_memoized_into_meta() {
         // D9: rediscovering it on every 4s poll is wasted work, and the meta
         // entry is what survives the session file being rewritten.
@@ -510,7 +534,7 @@ mod tests {
         let s = Session {
             display_name: None,
             name: "x".into(), dir: "/x".into(), pid: 1, uptime_sec: 0,
-            model: None, effort: None, provider: None, native_terminal: None, rc_link: None, git: None, working: false,
+            model: None, effort: None, provider: None, native_terminal: None, rc_link: None, rc_unavailable: false, git: None, working: false,
             last_message: None, sid: None, cpu: None, rss_kb: 0,
             cpu_sample_age_ms: 0, external: false,
         };
