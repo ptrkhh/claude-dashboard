@@ -9,7 +9,7 @@ async function fixture(t, failure = '') {
   const dir = await mkdtemp(join(tmpdir(), 'cdash-native-test-'));
   const state = join(dir, 'state.json'), wire = join(dir, 'wire.jsonl');
   await mkdir(join(dir,'controls','cdash-test'),{recursive:true});
-  await writeFile(state, JSON.stringify({ dir, native_terminal: true, ...(failure === 'remote-once' ? { sid: '01234567-1234-1234-1234-0123456789ab', rc_unavailable: true } : {}), model: 'gpt-check', effort: 'low', display_name: '[Codex] project · elephant' }));
+  await writeFile(state, JSON.stringify({ dir, native_terminal: true, ...(failure.startsWith('remote-once') ? { sid: '01234567-1234-1234-1234-0123456789ab', rc_unavailable: true } : {}), model: 'gpt-check', effort: 'low', display_name: '[Codex] project · elephant' }));
   await writeFile(wire, '');
   const header = `#!${process.execPath}
 const fs=require('node:fs');
@@ -51,13 +51,13 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
 `, { mode: 0o700 });
   await writeFile(join(dir, 'claude'), header + `
 log({kind:'remote',pid:process.pid,args:process.argv.slice(2)});
-if(process.env.CDASH_CHECK_FAILURE==='remote-once' && !fs.existsSync(process.env.CDASH_CHECK_ROOT+'/attempted')) {
- fs.writeFileSync(process.env.CDASH_CHECK_ROOT+'/attempted','1');process.exit(1);
+if(process.env.CDASH_CHECK_FAILURE.startsWith('remote-once') && !fs.existsSync(process.env.CDASH_CHECK_ROOT+'/attempted')) {
+ fs.writeFileSync(process.env.CDASH_CHECK_ROOT+'/attempted','1');process.exit(process.env.CDASH_CHECK_FAILURE==='remote-once-zero'?0:1);
 }
 if(process.env.CDASH_CHECK_FAILURE==='remote-always')process.exit(1);
 fs.writeFileSync(process.env.CDASH_CODEX_STATE.replace(/\\.json$/,'' )+'.link','https://claude.ai/code/session_test');
 console.log('REMOTE_LOG_ONLY');
-setInterval(()=>{const marker=process.env.CDASH_CHECK_ROOT+'/stop-remote';if(fs.existsSync(marker)){fs.unlinkSync(marker);process.exit(1)}},30);
+setInterval(()=>{const marker=process.env.CDASH_CHECK_ROOT+'/stop-remote';if(fs.existsSync(marker)){const code=fs.readFileSync(marker,'utf8')==='0'?0:1;fs.unlinkSync(marker);process.exit(code)}},30);
 `, { mode: 0o700 });
   const child = spawn(process.execPath, [resolve('crates/agent/src/collect/codex-remote.mjs'), '--state', state, '--name', 'cdash-test'], {
     env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, CDASH_CHECK_ROOT: dir, CDASH_CHECK_WIRE: wire,
@@ -131,8 +131,8 @@ for(const failure of ['backend','tui']) test(`native ${failure} failure cleans u
   await f.wait(async()=> (await f.messages()).filter(m=>m.pid).every(m=>!f.alive(m.pid)));
 });
 
-test('resumed native session retries Remote Control startup without replacing its thread or TUI', {timeout:15000}, async t=>{
-  const f=await fixture(t,'remote-once');
+for(const exitCode of [0,1]) test(`resumed native session retries Remote Control startup exit ${exitCode} without replacing its thread or TUI`, {timeout:15000}, async t=>{
+  const f=await fixture(t,exitCode===0?'remote-once-zero':'remote-once');
   await f.wait(async()=> (await f.messages()).some(m=>m.kind==='remote'));
   assert.equal(JSON.parse(await readFile(f.state.replace(/\.json$/,'.native'),'utf8')).rc_unavailable,false,'resume clears the previous outage while connecting');
   await f.wait(async()=> (await f.messages()).filter(m=>m.kind==='remote').length===2);
@@ -144,7 +144,7 @@ test('resumed native session retries Remote Control startup without replacing it
   assert.equal(messages.find(m=>m.rpc?.method==='thread/resume').rpc.params.threadId,'01234567-1234-1234-1234-0123456789ab');
   assert.equal(messages.some(m=>m.rpc?.method==='turn/start'),false,'reconnection must not submit a prompt');
   const log=await readFile(join(f.dir,'controls','cdash-test','native.log'),'utf8');
-  assert.match(log,/exit 1.*retry/i);
+  assert.match(log,new RegExp(`exit ${exitCode}.*retry`,'i'));
   f.child.stdin.write('quit\n');
   await f.wait(()=>f.child.exitCode!==null);
   await f.wait(async()=> (await f.messages()).filter(m=>m.pid).every(m=>!f.alive(m.pid)));
@@ -180,11 +180,11 @@ test('Remote Control stops after three retries and shutdown cancels pending retr
   assert.equal((await closing.messages()).filter(m=>m.kind==='remote').length,1);
 });
 
-test('Remote Control reconnect continues its existing session without incompatible spawn flags', {timeout:15000}, async t=>{
+for(const exitCode of [0,1]) test(`Remote Control reconnect after exit ${exitCode} continues its existing session without incompatible spawn flags`, {timeout:15000}, async t=>{
   const f=await fixture(t);
   const link=f.state.replace(/\.json$/,'')+'.link';
   await f.wait(async()=>{try{await stat(link);return true;}catch{return false;}});
-  await writeFile(join(f.dir,'stop-remote'),'stop');
+  await writeFile(join(f.dir,'stop-remote'),String(exitCode));
   await f.wait(async()=> (await f.messages()).filter(m=>m.kind==='remote').length===2);
   const reconnect=(await f.messages()).filter(m=>m.kind==='remote')[1];
   assert.ok(reconnect.args.includes('--continue'));

@@ -551,12 +551,13 @@ async function nativeLauncher(statePath, state, script) {
         const link = statePath.replace(/\.json$/, '') + '.link';
         reuseRemote ||= await access(link).then(() => true, () => false);
         await rm(link, { force: true });
-        const retry = code !== 0 && retries < 3;
+        // Remote Control can exit 0 after a worker failure; only shutdown is intentional.
+        const retry = retries < 3;
         state.rc_unavailable = !retry;
         await saveNative();
         const delay = 1000 * 2 ** retries;
         const next = retry ? `retrying ${retries + 1}/3 in ${delay}ms`
-          : `not retrying: ${code === 0 ? 'clean exit' : 'retry budget exhausted'}`;
+          : 'not retrying: retry budget exhausted';
         await log.write(`${new Date().toISOString()} Remote Control attempt ${retries + 1}/4 stopped (${failure ? `spawn error ${failure}; ` : ''}exit ${code}, signal ${signal || 'none'}); ${next}; native terminal remains available.\n`);
         if (retry && !closing) { retries++; remoteRetry = setTimeout(startRemote, delay); }
       })().catch(e => { if (!closing) fatal(e); });
