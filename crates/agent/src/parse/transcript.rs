@@ -1,10 +1,11 @@
-use super::history::parse_lines;
+use super::history::{parse_lines, usable_prompts};
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Transcript {
     pub branch: Option<String>,
-    pub title: Option<String>,
+    /// Recent Codex user messages; Claude previews come from history.jsonl.
+    pub prompts: Vec<String>,
     pub assistant_count: u32,
     pub last_assistant_text: Option<String>,
     /// Full model id of the last assistant turn that named a real one, and that
@@ -32,11 +33,16 @@ pub fn parse_transcript(jsonl: &str) -> Transcript {
             }
         }
 
-        if t.title.is_none() && e.get("type").and_then(|v| v.as_str()) == Some("ai-title") {
-            if let Some(title) = e.get("aiTitle").and_then(|v| v.as_str()) {
-                if !title.is_empty() {
-                    t.title = Some(title.to_string());
-                }
+        if e.get("type").and_then(Value::as_str) == Some("response_item")
+            && e.pointer("/payload/type").and_then(Value::as_str) == Some("message")
+            && e.pointer("/payload/role").and_then(Value::as_str) == Some("user")
+        {
+            if let Some(content) = e.pointer("/payload/content").and_then(Value::as_array) {
+                let text = content.iter()
+                    .filter(|part| part.get("type").and_then(Value::as_str) == Some("input_text"))
+                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>().join("\n");
+                t.prompts.push(text);
             }
         }
 
@@ -69,6 +75,8 @@ pub fn parse_transcript(jsonl: &str) -> Transcript {
         }
     }
 
+    t.prompts = usable_prompts(&t.prompts);
+    t.prompts.drain(..t.prompts.len().saturating_sub(3));
     t
 }
 
@@ -99,10 +107,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extracts_branch_title_count_and_last_text() {
+    fn codex_prompts_keep_last_three_usable_user_messages_without_event_duplicates() {
+        let mut lines = vec!["not json".to_string()];
+        for text in ["first task", "second task", "/model", "YES", "third task", "fourth task"] {
+            lines.push(serde_json::json!({"type":"response_item", "payload":{
+                "type":"message", "role":"user", "content":[{"type":"input_text", "text":text}]
+            }}).to_string());
+            lines.push(serde_json::json!({"type":"event_msg", "payload":{
+                "type":"user_message", "message":text
+            }}).to_string());
+        }
+        lines.extend([
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"assistant reply"}]}}"#.into(),
+            r#"{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"instructions"}]}}"#.into(),
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:..."},{"type":"input_text","text":42}]}}"#.into(),
+        ]);
+        assert_eq!(parse_transcript(&lines.join("\n")).prompts,
+            vec!["second task", "third task", "fourth task"]);
+    }
+
+    #[test]
+    fn extracts_branch_count_and_last_text() {
         let jsonl = [
             r#"{"type":"user","gitBranch":"main","message":{}}"#,
-            r#"{"type":"ai-title","aiTitle":"Fix auth bug"}"#,
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"first reply"}]}}"#,
             r#"{"type":"assistant","message":{"content":[{"type":"tool_use"},{"type":"text","text":"done, tests pass"}]}}"#,
         ]
@@ -110,7 +137,6 @@ mod tests {
 
         let t = parse_transcript(&jsonl);
         assert_eq!(t.branch.as_deref(), Some("main"));
-        assert_eq!(t.title.as_deref(), Some("Fix auth bug"));
         assert_eq!(t.assistant_count, 2);
         assert_eq!(t.last_assistant_text.as_deref(), Some("done, tests pass"));
     }
@@ -152,7 +178,6 @@ mod tests {
     fn drops_head_branch_and_nulls_when_absent() {
         let t = parse_transcript(r#"{"type":"user","gitBranch":"HEAD"}"#);
         assert_eq!(t.branch, None);
-        assert_eq!(t.title, None);
         assert_eq!(t.last_assistant_text, None);
     }
 
@@ -194,18 +219,15 @@ mod tests {
     }
 
     #[test]
-    fn empty_string_branch_and_title_are_skipped_in_favor_of_later_entries() {
+    fn empty_string_branch_is_skipped_in_favor_of_later_entries() {
         let jsonl = [
             r#"{"type":"user","gitBranch":""}"#,
-            r#"{"type":"ai-title","aiTitle":""}"#,
             r#"{"type":"user","gitBranch":"feature/x"}"#,
-            r#"{"type":"ai-title","aiTitle":"Real Title"}"#,
         ]
         .join("\n");
 
         let t = parse_transcript(&jsonl);
         assert_eq!(t.branch.as_deref(), Some("feature/x"));
-        assert_eq!(t.title.as_deref(), Some("Real Title"));
     }
 
     #[test]

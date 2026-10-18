@@ -341,8 +341,8 @@ test('Codex --threads lists only unarchived dashboard threads from the newest st
     child.on('exit', () => { try { done(JSON.parse(out)); } catch (e) { reject(e); } });
   });
   assert.deepEqual(await run(home), [
-    { sid: 'a', dir: '/work/a', title: 'first prompt', ts: 300, model: 'gpt-b', effort: 'high', rollout_path: '/work/history.jsonl' },
-    { sid: 'b', dir: '/work/b', title: 'Renamed', ts: 200, model: null, effort: null, rollout_path: '/work/history.jsonl' },
+    { sid: 'a', dir: '/work/a', ts: 300, model: 'gpt-b', effort: 'high', rollout_path: '/work/history.jsonl' },
+    { sid: 'b', dir: '/work/b', ts: 200, model: null, effort: null, rollout_path: '/work/history.jsonl' },
   ]);
   assert.deepEqual(await run(join(home, 'no-codex-here')), [], 'no Codex state is an empty list, not an error');
 });
