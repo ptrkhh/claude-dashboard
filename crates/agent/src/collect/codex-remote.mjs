@@ -381,7 +381,7 @@ async function worker() {
       await reportError(`Codex request failed: ${e.message}`);
     }
   };
-  await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', title: 'Claude Dashboard Codex Bridge', version: '0.5.0' }, ...(state.native_terminal ? { capabilities: { experimentalApi: true } } : {}) });
+  await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', title: 'Claude Dashboard Codex Bridge', version: '0.5.1' }, ...(state.native_terminal ? { capabilities: { experimentalApi: true } } : {}) });
   codex.send({ method: 'initialized' });
   if (!await codex.ready()) throw Error('Codex is signed out; run codex login on the agent host.');
   const savedModel = state.model, savedLabel = state.model_label, resuming = !!state.sid;
@@ -511,7 +511,7 @@ async function nativeLauncher(statePath, state, script) {
     } else return;
     await saveNative();
   }); // also tracks the active turn for shutdown; never answers approvals
-  await control.call('initialize', { clientInfo: { name: 'claude_dashboard', version: '0.5.0' }, capabilities: { experimentalApi: true } });
+  await control.call('initialize', { clientInfo: { name: 'claude_dashboard', version: '0.5.1' }, capabilities: { experimentalApi: true } });
   control.send({ method: 'initialized' });
   if (!await control.ready()) throw Error('Codex is signed out; run codex login on the agent host.');
   const result = await control.call(state.sid ? 'thread/resume' : 'thread/start', {
@@ -634,7 +634,7 @@ if (args[0] === '--summary') {
   const deadline = setTimeout(() => { timedOut = true; codex.close(); }, 12_000);
   (async () => {
     try {
-      await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', version: '0.5.0' } }, 10_000);
+      await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', version: '0.5.1' } }, 10_000);
       codex.send({ method: 'initialized' });
       let result;
       if (queryMode === '--usage') {
