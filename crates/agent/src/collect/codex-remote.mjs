@@ -228,7 +228,7 @@ async function replayHistory(codex, threadId, remoteSid, emit, submitted = new S
 }
 
 let stop = () => {};
-function fatal(e) { console.error(`Codex bridge: ${e.message}`); stop(); setTimeout(() => process.exit(1), 5000).unref(); process.exitCode = 1; }
+function fatal(e) { console.error(`Codex bridge: ${e.message}${e.cause ? ` (${e.cause.code || e.cause.message})` : ''}`); stop(); setTimeout(() => process.exit(1), 5000).unref(); process.exitCode = 1; }
 
 async function worker() {
   const statePath = process.env.CDASH_CODEX_STATE;
@@ -534,7 +534,7 @@ async function nativeLauncher(statePath, state, script) {
   const debugPath = join(controlDir, 'remote-debug.log');
   await writeFile(debugPath, '', { flag: 'a', mode: 0o600 });
   await chmod(debugPath, 0o600);
-  let retries = 0, reuseRemote = false;
+  let failures = 0, reuseRemote = false;
   const startRemote = () => {
     if (closing) return;
     const child = runner = spawn('claude', ['remote-control', ...(reuseRemote ? ['--continue'] : ['--spawn=session']), '--name', state.display_name,
@@ -549,17 +549,20 @@ async function nativeLauncher(statePath, state, script) {
       void (async () => {
         killGroup(child);
         const link = statePath.replace(/\.json$/, '') + '.link';
-        reuseRemote ||= await access(link).then(() => true, () => false);
+        const connected = await access(link).then(() => true, () => false);
+        reuseRemote ||= connected;
         await rm(link, { force: true });
         // Remote Control can exit 0 after a worker failure; only shutdown is intentional.
-        const retry = retries < 3;
-        state.rc_unavailable = !retry;
+        // Retry for as long as the native session lives: an outage can outlast any
+        // fixed budget, and an established connection earns a fresh backoff.
+        // ponytail: a permanent failure (signed out, no claude binary) respawns once a minute.
+        if (connected) failures = 0;
+        const delay = Math.min(1000 * 2 ** failures, 60_000);
+        failures++;
+        state.rc_unavailable = failures > 3;
         await saveNative();
-        const delay = 1000 * 2 ** retries;
-        const next = retry ? `retrying ${retries + 1}/3 in ${delay}ms`
-          : 'not retrying: retry budget exhausted';
-        await log.write(`${new Date().toISOString()} Remote Control attempt ${retries + 1}/4 stopped (${failure ? `spawn error ${failure}; ` : ''}exit ${code}, signal ${signal || 'none'}); ${next}; native terminal remains available.\n`);
-        if (retry && !closing) { retries++; remoteRetry = setTimeout(startRemote, delay); }
+        await log.write(`${new Date().toISOString()} Remote Control failure ${failures} (${failure ? `spawn error ${failure}; ` : ''}exit ${code}, signal ${signal || 'none'}); retrying in ${delay}ms; native terminal remains available.\n`);
+        if (!closing) remoteRetry = setTimeout(startRemote, delay);
       })().catch(e => { if (!closing) fatal(e); });
     });
   };

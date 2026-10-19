@@ -150,21 +150,20 @@ for(const exitCode of [0,1]) test(`resumed native session retries Remote Control
   await f.wait(async()=> (await f.messages()).filter(m=>m.pid).every(m=>!f.alive(m.pid)));
 });
 
-test('Remote Control stops after three retries and shutdown cancels pending retries', {timeout:20000}, async t=>{
+test('Remote Control keeps retrying after the Terminal fallback and shutdown cancels pending retries', {timeout:20000}, async t=>{
   const f=await fixture(t,'remote-always');
   const logPath=join(f.dir,'controls','cdash-test','native.log');
   await f.wait(async()=> (await f.messages()).some(m=>m.kind==='remote'));
-  await f.wait(async()=> (await readFile(logPath,'utf8')).includes('retrying 1/3'));
+  await f.wait(async()=> (await readFile(logPath,'utf8')).includes('failure 1 '));
   assert.equal(JSON.parse(await readFile(f.state.replace(/\.json$/,'.native'),'utf8')).rc_unavailable,false,'a pending retry still waits for a link');
-  await f.wait(async()=> (await readFile(logPath,'utf8')).includes('not retrying'));
-  assert.equal(JSON.parse(await readFile(f.state.replace(/\.json$/,'.native'),'utf8')).rc_unavailable,true,'exhausted retries publish the Terminal fallback');
+  await f.wait(async()=> (await readFile(logPath,'utf8')).includes('failure 4 '));
+  assert.equal(JSON.parse(await readFile(f.state.replace(/\.json$/,'.native'),'utf8')).rc_unavailable,true,'repeated failures publish the Terminal fallback');
   const messages=await f.messages();
   assert.equal(messages.filter(m=>m.kind==='remote').length,4,'initial launch plus three retries');
-  const failures=(await readFile(logPath,'utf8')).split('\n').filter(line=>line.includes('Remote Control attempt'));
+  const failures=(await readFile(logPath,'utf8')).split('\n').filter(line=>line.includes('Remote Control failure'));
   assert.equal(failures.length,4,'every failed attempt is logged exactly once');
   failures.forEach((line,i)=>{
-    assert.match(line,new RegExp(`^\\d{4}-\\d{2}-\\d{2}T\\S+ Remote Control attempt ${i+1}/4 stopped \\(exit 1, signal none\\)`));
-    assert.ok(line.includes(i<3 ? `retrying ${i+1}/3 in ${1000*2**i}ms` : 'not retrying: retry budget exhausted'));
+    assert.match(line,new RegExp(`^\\d{4}-\\d{2}-\\d{2}T\\S+ Remote Control failure ${i+1} \\(exit 1, signal none\\); retrying in ${1000*2**i}ms;`));
   });
   assert.ok(messages.filter(m=>m.kind==='backend'||m.kind==='tui').every(m=>f.alive(m.pid)));
   assert.equal((await stat(join(f.dir,'controls','cdash-test','remote-debug.log'))).mode & 0o777,0o600);
@@ -178,6 +177,25 @@ test('Remote Control stops after three retries and shutdown cancels pending retr
   await closing.wait(()=>closing.child.exitCode!==null);
   await new Promise(r=>setTimeout(r,1200));
   assert.equal((await closing.messages()).filter(m=>m.kind==='remote').length,1);
+});
+
+test('an established Remote Control connection resets the retry backoff', {timeout:20000}, async t=>{
+  const f=await fixture(t);
+  const link=f.state.replace(/\.json$/,'')+'.link';
+  const logPath=join(f.dir,'controls','cdash-test','native.log');
+  for(let i=1;i<=5;i++){
+    await f.wait(async()=> (await f.messages()).filter(m=>m.kind==='remote').length===i);
+    await f.wait(async()=>{try{await stat(link);return true;}catch{return false;}});
+    await writeFile(join(f.dir,'stop-remote'),'1');
+    await f.wait(async()=> (await readFile(logPath,'utf8')).split('\n').filter(line=>line.includes('Remote Control failure')).length===i);
+  }
+  const failures=(await readFile(logPath,'utf8')).split('\n').filter(line=>line.includes('Remote Control failure'));
+  assert.ok(failures.every(line=>line.includes('failure 1 ') && line.includes('retrying in 1000ms')),'each drop after a connection starts the backoff over');
+  assert.equal(JSON.parse(await readFile(f.state.replace(/\.json$/,'.native'),'utf8')).rc_unavailable,false,'drops spread over time never exhaust a budget');
+  await f.wait(async()=> (await f.messages()).filter(m=>m.kind==='remote').length===6);
+  f.child.stdin.write('quit\n');
+  await f.wait(()=>f.child.exitCode!==null);
+  await f.wait(async()=> (await f.messages()).filter(m=>m.pid).every(m=>!f.alive(m.pid)));
 });
 
 for(const exitCode of [0,1]) test(`Remote Control reconnect after exit ${exitCode} continues its existing session without incompatible spawn flags`, {timeout:15000}, async t=>{
