@@ -33,6 +33,11 @@
 - Input with no frame yet, or a tap outside the frame: dropped or clamped, never sent with garbage coordinates. Test: Task 6, `input_before_first_frame_is_dropped` and Task 3, `clamp_keeps_points_inside_the_viewport`.
 - Non-ASCII and astral text (`é`, `😀`): one key press per Unicode scalar, `text` equal to that character, no virtual key code. Test: Task 3, `chars_become_one_key_press_each`.
 
+## Deviations from the spec
+
+- **Tab picker does not open by itself** (spec section 5). `HTMLSelectElement.showPicker()` needs transient user activation and throws `NotAllowedError` from a WebSocket handler. When `active` is null the overlay selects the `Pick a tab` placeholder and shows `Tab closed. Pick a tab.`; the user opens the picker.
+- **Frame metadata is `deviceWidth` and `deviceHeight` only** (spec section 4 also names `offsetTop` and `pageScaleFactor`). In DevTools' own screencast view `offsetTop` is the strip above the image, so a point measured from the image's top needs no offset; desktop Edge reports 0 anyway. `pageScaleFactor` has no use without pinch-zoom on the PC.
+
 ---
 
 ### Task 1: Port map and folder matching
@@ -98,8 +103,8 @@ git commit -m "feat(agent): read the browser port map"
 
 **Files:**
 - Modify: `crates/agent/src/collect/browser.rs`
-- Modify: `crates/agent/src/collect/external.rs` (`Session` field + `browser: None` in its constructor; delete the two stale parity-gate comments at lines 13-15 and 41)
-- Modify: `crates/agent/src/collect/sessions.rs` (`browser: None` in both constructors; set flags after the pane loop)
+- Modify: `crates/agent/src/collect/external.rs` (`Session` field + `browser: None` in its constructor; delete the two stale parity-gate comments at lines 13-15 and 43)
+- Modify: `crates/agent/src/collect/sessions.rs` (`browser: None` in its three `Session` literals, the third being the test at line 560; set flags after the pane loop)
 
 **Interfaces:**
 - Consumes: `read_port_map`, `port_for` (Task 1).
@@ -133,7 +138,7 @@ Read the map once. For each dir with a port, `GET http://127.0.0.1:{port}/json/v
 
 - [ ] **Step 4: Add the field and wire it**
 
-Add `browser: Option<bool>` to `Session` next to `native_terminal`, `browser: None` in all three constructors. In `collect_sessions`, after the pane loop and before `running.extend(external_sessions(...))`, call `browser_flags(&ctx.claude_dir, &dirs)` over the pane rows' `dir` and set `browser = Some(true)` where true. External rows are never probed.
+Add `browser: Option<bool>` to `Session` next to `native_terminal`, `browser: None` in all four `Session` literals. In `collect_sessions`, after the pane loop and before `running.extend(external_sessions(...))`, call `browser_flags(&ctx.claude_dir, &dirs)` with `dirs` = each pane's `p.path` (the `pane_current_path` the `/api/browser` handler also looks up; Codex rows carry a saved `dir` instead). Both loop branches push one row per pane, so `running[i]` is `panes[i]`; set `browser = Some(true)` where true. External rows are never probed.
 
 - [ ] **Step 5: Run the agent suite**
 
@@ -251,7 +256,7 @@ git commit -m "feat(agent): parse browser view messages and build key events"
 - Produces:
   - `pub struct Event { pub method: String, pub params: serde_json::Value, pub session: Option<String> }`
   - `pub struct Cdp` with `pub async fn connect(ws_url: &str) -> Result<(Cdp, tokio::sync::mpsc::UnboundedReceiver<Event>), String>` and `pub async fn call(&self, method: &str, params: serde_json::Value, session: Option<&str>) -> Result<serde_json::Value, String>` (5 s timeout per call; a CDP `error` becomes `Err(message)`). Dropping `Cdp` closes the socket. The event receiver yields `None` once the socket closes; pending calls then fail.
-  - `pub async fn browser_ws_url(port: u16) -> Result<String, String>`: `webSocketDebuggerUrl` from `http://127.0.0.1:{port}/json/version`.
+  - `pub async fn browser_ws_url(port: u16) -> Result<String, String>`: `ws://127.0.0.1:{port}` plus the path of `webSocketDebuggerUrl` from `http://127.0.0.1:{port}/json/version`. Only the path is taken, so a process squatting the port cannot point cdash-agent at another host. Same client rules as `browser_flags` but a 5 s timeout.
   - `pub async fn page_order(port: u16) -> Vec<String>`: ids of `type == "page"` entries from `/json/list`, in the order Edge returns them; empty on any error.
   - Test-only, `#[cfg(test)] pub(crate) mod fake`: `pub(crate) async fn fake_edge(pages: &[(&str, &str, &str)]) -> FakeEdge` (id, url, title) where `FakeEdge { pub port: u16, pub calls: mpsc::UnboundedReceiver<(String, Value, Option<String>)>, pub events: mpsc::UnboundedSender<Value>, pub drop_socket: Arc<tokio::sync::Notify> }`. Serves `/json/version`, `/json/list` and one CDP WebSocket at `/devtools/browser/fake`. Replies: `Target.getTargets` lists `pages` as `targetInfos` (`targetId`, `type: "page"`, `url`, `title`); `/json/list` returns them as `[{id, type: "page", url, title}]`; `Target.attachToTarget` returns `{"sessionId":"S-<targetId>"}`; `Page.getNavigationHistory` returns `{"currentIndex":1,"entries":[{"id":10},{"id":11}]}`; anything else `{}`. Every received call is pushed to `calls`. A value sent on `events` is written to the socket as-is. `drop_socket.notify_one()` closes the CDP socket.
 
@@ -284,7 +289,7 @@ Expected: compile error.
 
 - [ ] **Step 3: Implement `Cdp` and the fake**
 
-One reader task routes replies by `id` to `oneshot` senders in a `Mutex<HashMap>` and forwards messages that have `method` to the event channel. One writer task drains an `mpsc` of outgoing frames. Connect with `tokio_tungstenite::connect_async(ws_url)` (no Origin header). HTTP via `reqwest` with `.no_proxy()`.
+One reader task routes replies by `id` to `oneshot` senders in a `Mutex<HashMap>` and forwards messages that have `method` to the event channel. One writer task drains an `mpsc` of outgoing frames. Connect with `tokio_tungstenite::connect_async(ws_url)` (no Origin header) inside a 5 s `tokio::time::timeout`, so a hung Edge closes `4002` instead of leaving the overlay on "Connecting…". HTTP via `reqwest` with `.no_proxy()`.
 
 - [ ] **Step 4: Run to verify pass**
 
@@ -305,11 +310,11 @@ git commit -m "feat(agent): add a minimal CDP client"
 **Files:**
 - Create: `crates/agent/src/collect/browser_bridge.rs` (+ `pub mod browser_bridge;`)
 - Modify: `crates/agent/src/http/routes.rs` (add `get_browser`), `crates/agent/src/http/serve.rs` (`get "/api/browser" => routes::get_browser,` in `guarded_routes!`)
-- Modify: `crates/agent/src/collect/term.rs`: make `PING_EVERY` and `send_or_drop` `pub(crate)`; `mod tests` becomes `pub(crate) mod tests` with `Session`, `have_tmux`, `tempdir`, `status_of`, `close_code` `pub(crate)`, plus `Session::in_dir(tag: &str, dir: &Path) -> Session` (`tmux new-session -d -s <name> -c <dir> ... sh`).
+- Modify: `crates/agent/src/collect/term.rs`: make `PING_EVERY`, `send_or_drop` and `close_reason` (the 1011 reason must fit 123 bytes) `pub(crate)`; `mod tests` becomes `pub(crate) mod tests` with `Session`, `have_tmux`, `tempdir`, `status_of`, `close_code` `pub(crate)`, plus `Session::in_dir(tag: &str, dir: &Path) -> Session` (`tmux new-session -d -s <name> -c <dir> ... sh`).
 
 **Interfaces:**
 - Consumes: `read_port_map`, `port_for` (Task 1); `Cdp`, `browser_ws_url`, `page_order`, `fake::fake_edge` (Task 4); `origin_allowed`, `assert_kill_name`.
-- Produces: `pub async fn bridge(ctx: Arc<Ctx>, name: String, port: u16, ws: WebSocket)`. Phone-bound text frames `{"frame":{"deviceWidth":f64,"deviceHeight":f64,"offsetTop":f64,"pageScaleFactor":f64}}` (copied from the CDP frame `metadata`) immediately before each binary JPEG frame, and `{"tabs":[{"id","title","origin"}],"active":"<id>"|null}`.
+- Produces: `pub async fn bridge(ctx: Arc<Ctx>, name: String, port: u16, ws: WebSocket)`. Phone-bound text frames `{"frame":{"deviceWidth":f64,"deviceHeight":f64}}` (copied from the CDP frame `metadata`; see Deviations) immediately before each binary JPEG frame, and `{"tabs":[{"id","title","origin"}],"active":"<id>"|null}`.
 
 Handler order (all before upgrade): `origin_allowed` (403), `assert_kill_name` (400), session dir from `tmux list-panes -a -F PANE_FORMAT` (404 `no such session`), `port_for` (404 `no browser for this session`). Each refusal logs `browser refused: <reason>`.
 
@@ -393,7 +398,7 @@ git commit -m "feat(agent): forward taps, typing, tabs and navigation to Edge"
 **Interfaces:**
 - Produces `globalThis.cdashBrowser`:
   - `KEYBAR`: `{ tab: 'Tab', bksp: 'Backspace', left: 'ArrowLeft', right: 'ArrowRight', esc: 'Escape', enter: 'Enter' }`
-  - `toPage(x, y, shown, meta) -> [number, number]`: `x`,`y` relative to the displayed image's top-left; `shown` `{ w, h }` its displayed size; `meta` the last frame metadata. Returns `[x / shown.w * meta.deviceWidth, y / shown.h * meta.deviceHeight + (meta.offsetTop || 0)]`.
+  - `toPage(x, y, shown, meta) -> [number, number]`: `x`,`y` relative to the displayed image's top-left; `shown` `{ w, h }` its displayed size; `meta` the last frame metadata. Returns `[x / shown.w * meta.deviceWidth, y / shown.h * meta.deviceHeight]` (no `offsetTop`; see Deviations).
   - `fromInput(inputType, data) -> object[]`: `insertText`, `insertFromPaste`, `insertReplacementText` with non-empty `data` give `[{ text: data }]`; `deleteContentBackward` gives `[{ key: 'Backspace' }]`; `insertLineBreak` gives `[{ key: 'Enter' }]`; anything else `[]`.
 
 - [ ] **Step 1: Write the failing test**
@@ -405,7 +410,7 @@ import '../public/browser/view.js';
 const B = globalThis.cdashBrowser;
 
 test('taps map from displayed image pixels to page CSS pixels', () => {
-  const meta = { deviceWidth: 985, deviceHeight: 640, offsetTop: 0 };
+  const meta = { deviceWidth: 985, deviceHeight: 640 };
   assert.deepEqual(B.toPage(0, 0, { w: 394, h: 256 }, meta), [0, 0]);
   assert.deepEqual(B.toPage(197, 128, { w: 394, h: 256 }, meta), [492.5, 320]);
 });
@@ -456,7 +461,7 @@ Behaviour in `app.js`:
 - `termUrl` becomes `wsUrl(q)` (same Tauri and `wss` rules) used by both overlays.
 - `runningCard`: `browserBtn` after `termBtn`, only when `r.browser`: `<button class="action" type="button" data-browser="${esc(r.name)}" data-title="${esc(r.dir.split('/').pop())}">${ICONS.globe}<span>Browser</span></button>`. Add a `globe` icon to `ICONS`.
 - State `browserView = { name, ws, meta, url, retry }`. `openBrowser(name, title)` / `closeBrowser()` mirror `openTerm` / `closeTerm` (history push, popstate close, one retry on visibility, `tick()` paused while open: `if (term || browserView) return;`).
-- Frames: text `{frame}` sets `meta`; next binary becomes a `Blob` object URL on `#browser-screen`, revoking the previous one. `{tabs, active}` rebuilds the select; `active === null` selects the placeholder, sets status `Tab closed. Pick a tab.`, and calls `select.showPicker?.()` inside `try`.
+- Frames: text `{frame}` sets `meta`; next binary becomes a `Blob` object URL on `#browser-screen`, revoking the previous one. `{tabs, active}` rebuilds the select; `active === null` selects the placeholder and sets status `Tab closed. Pick a tab.` (no `showPicker()`; see Deviations).
 - Close codes: 4002 shows `Browser not running`, 4003 `Browser closed`, both with Reconnect.
 - Gestures on `#browser-stage` (pointer events, `touch-action: none`): a short tap with little movement sends `{tap: toPage(...)}`; two pointers pinch the image scale (1 to 5) via CSS transform; one-pointer drag pans when scale > 1 and sends `{scroll:[x,y,dx,dy]}` (page CSS px, sign so dragging up scrolls down) at scale 1. Cancel `pointerdown`/`mousedown` default so the phone keyboard stays open.
 - Typing: `Kbd` focuses `#browser-input`. Keep one sentinel character in it so Backspace on an "empty" field still fires `input`; on each `input` event send `cdashBrowser.fromInput(e.inputType, e.data)` messages, then reset the value to the sentinel. Key-bar buttons send `{key: KEYBAR[k]}`.
@@ -468,12 +473,11 @@ Behaviour in `app.js`:
 test('only sessions with a live browser get the Browser button', () => {
   const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const card = src.slice(src.indexOf('function runningCard('), src.indexOf('\n}\n', src.indexOf('function runningCard(')) + 2);
-  const context = { esc: s => s, effortLabel: s => s, gitBadge: () => '', armedKill: null, ICONS: new Proxy({}, { get: () => '' }) };
+  const context = { esc: s => s, effortLabel: s => s, gitBadge: () => '', fmtUp: () => '', armedKill: null, ICONS: new Proxy({}, { get: () => '' }) };
   runInNewContext(`${card}; this.runningCard = runningCard;`, context);
   const row = { name: 'cdash-a', dir: '/x/JOBS', working: false };
   assert.match(context.runningCard({ ...row, browser: true }), /data-browser="cdash-a"/);
   assert.doesNotMatch(context.runningCard(row), /data-browser/);
-  assert.doesNotMatch(context.runningCard({ ...row, external: true }), /data-browser/);
 });
 ```
 
@@ -531,7 +535,10 @@ git commit -m "docs: describe the Browser view"
 - Create: `~/.claude/cdash-browsers.json` with `{"/mnt/d/p/Downloads/JOBS": 9301, "/mnt/d/p/Downloads/INVEST": 9302}` (use the agent's `CLAUDE_DIR` if it differs)
 
 - [ ] **Step 1: Confirm no JOBS or INVEST session is running** (the profile lock would block the check), then make the edits above.
-- [ ] **Step 2: Verify each launcher opens its port.** Drive the `.cmd` with a minimal MCP client (initialize, then `browser_navigate` to `about:blank`), then from WSL: `curl -s 127.0.0.1:9301/json/version` (and 9302 for INVEST). Expected: JSON with `"Browser": "Edg/…"`. Close the browser with `browser_close`.
+- [ ] **Step 2: Verify each launcher adds its port.** Drive the `.cmd` with a minimal MCP client (initialize, then `browser_navigate` to `about:blank`).
+  - JOBS: from WSL, `curl -s 127.0.0.1:9301/json/version`. Expected: JSON with `"Browser": "Edg/…"`.
+  - INVEST: **do not connect to 9302.** The INVEST amendment says agents never connect to that port, and the builder is an agent. Read Edge's command line instead: `/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -Command "Get-CimInstance Win32_Process -Filter 'Name=''msedge.exe''' | % CommandLine" | grep -- '--remote-debugging-port=9302'`. Expected: a line that also holds `--user-data-dir=D:/p/Downloads/INVEST/PlaywrightProfile`. That 9302 answers is proven by cdash-agent's probe and the user's phone check (Step 4).
+  - Close each browser with `browser_close`.
 - [ ] **Step 3: Install the build** the user runs (per memory `cdash-release-install-paths`) and restart the agent.
 - [ ] **Step 4: Hand the user the phone check** from the spec's Testing section: a dashboard-launched JOBS session reaches a login page; on the phone with the PC locked, open Browser, check the origin line, type into a field, submit, close the overlay, confirm the agent continues. Repeat once for INVEST.
 - [ ] **Step 5: Mark the spec** `Status: implemented; phone verification <passed|pending>` and commit.
