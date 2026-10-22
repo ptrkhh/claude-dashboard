@@ -1,7 +1,7 @@
 // Claude 2.1.296 worker transport. Authentication/registration stays in Claude.
 // ponytail: one worker + one Codex thread per tmux pane; no daemon or packages.
 import { spawn } from 'node:child_process';
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { createServer, createConnection } from 'node:net';
 import { createInterface } from 'node:readline';
 import { readFile, writeFile, rename, mkdir, chmod, rm, readdir, mkdtemp, open, access } from 'node:fs/promises';
@@ -43,7 +43,8 @@ class Codex {
     const executable = backend ? process.env.CDASH_CODEX_AGENT : 'codex';
     if (!executable) throw Error('Native Codex transport executable is missing');
     this.child = spawn(executable, backend ? ['codex-proxy', backend] : ['app-server', '--listen', 'stdio://'], {
-      env: options.env || codexEnv(), cwd: options.cwd, detached: true, stdio: ['pipe', 'pipe', options.quiet ? 'ignore' : 'inherit'],
+      // Only the proxy, never Codex, receives an Android loopback backend's token.
+      env: { ...(options.env || codexEnv()), ...(backend && { CDASH_CODEX_TOKEN: process.env.CDASH_CODEX_TOKEN }) }, cwd: options.cwd, detached: true, stdio: ['pipe', 'pipe', options.quiet ? 'ignore' : 'inherit'],
     });
     let notifications = Promise.resolve();
     createInterface({ input: this.child.stdout }).on('line', line => {
@@ -442,7 +443,11 @@ async function worker() {
 
 async function nativeLauncher(statePath, state, script) {
   const dir = await mkdtemp(join(tmpdir(), 'cdash-codex-native-'));
-  const endpoint = join(dir, 'backend.sock');
+  // Codex's Unix listener fails its socket-parent check on every Android path
+  // (/ and /data are unreadable to apps), so Android uses token-guarded loopback.
+  const loopback = process.platform === 'android';
+  const socket = join(dir, 'backend.sock'), tokenFile = join(dir, 'token');
+  let endpoint = loopback ? undefined : socket;
   let backend, runner, tui, control, log, cleanup, remoteRetry;
   let closing = false;
   stop = () => {
@@ -476,14 +481,25 @@ async function nativeLauncher(statePath, state, script) {
   log = await open(join(controlDir, 'native.log'), 'a', 0o600);
   // Buffer input without echo while the native TUI is starting.
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
-  backend = spawn('codex', ['app-server', '--listen', `unix://${endpoint}`], {
-    cwd: state.dir, env: codexEnv(), detached: true, stdio: ['ignore', log.fd, log.fd],
+  if (loopback) {
+    process.env.CDASH_CODEX_TOKEN = randomBytes(32).toString('hex');
+    await writeFile(tokenFile, process.env.CDASH_CODEX_TOKEN, { mode: 0o600 });
+  }
+  backend = spawn('codex', ['app-server', ...(loopback
+    ? ['--listen', 'ws://127.0.0.1:0', '--ws-auth', 'capability-token', '--ws-token-file', tokenFile]
+    : ['--listen', `unix://${socket}`])], {
+    cwd: state.dir, env: codexEnv(), detached: true, stdio: ['ignore', log.fd, loopback ? 'pipe' : log.fd],
   });
   backend.on('error', fatal);
   backend.on('exit', code => { if (!closing) fatal(Error(`Codex backend exited (${code})`)); });
+  // Codex reports the port it bound only on stderr.
+  if (loopback) createInterface({ input: backend.stderr }).on('line', line => {
+    endpoint ??= /listening on: (ws:\/\/127\.0\.0\.1:\d+)/.exec(line)?.[1];
+    log.write(`${line}\n`).catch(() => {});
+  });
   let ready = false;
   for (let i = 0; i < 100 && !closing; i++) {
-    ready = await access(endpoint).then(() => true, () => false);
+    ready = loopback ? Boolean(endpoint) : await access(socket).then(() => true, () => false);
     if (ready) break;
     await sleep(100);
   }
@@ -526,8 +542,8 @@ async function nativeLauncher(statePath, state, script) {
   await control.call('thread/name/set', { threadId: state.sid, name: state.display_name });
   await atomic(statePath, JSON.stringify(state));
   await saveNative();
-  tui = spawn('codex', ['resume', '--remote', `unix://${endpoint}`, '-c', 'tui.fullscreen_transcript=true', '-c', 'tui.alternate_screen="always"', state.sid], {
-    cwd: state.dir, env: codexEnv(), stdio: 'inherit',
+  tui = spawn('codex', ['resume', '--remote', loopback ? endpoint : `unix://${socket}`, ...(loopback ? ['--remote-auth-token-env', 'CDASH_CODEX_TOKEN'] : []), '-c', 'tui.fullscreen_transcript=true', '-c', 'tui.alternate_screen="always"', state.sid], {
+    cwd: state.dir, env: { ...codexEnv(), CDASH_CODEX_TOKEN: process.env.CDASH_CODEX_TOKEN }, stdio: 'inherit',
   });
   tui.on('error', fatal);
   tui.on('exit', code => { if (!closing) { process.exitCode = code ?? 1; stop(); } });
