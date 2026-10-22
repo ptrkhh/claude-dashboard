@@ -8,6 +8,8 @@ Each running session card has a **Terminal** button that opens that session's re
 
 The launcher has a touch-friendly folder picker (the folder button in the directory field) that browses the server's filesystem from `/`, with server-backed **Recents** (auto-recorded on launch) and **Favorites**. Since it can enumerate any directory, keep the "trusted LAN / behind Cloudflare Access" caveat above in mind. Recents and favorites persist to `$CLAUDE_DIR/cdash-places.json`.
 
+External sessions without a Claude link show instructions instead of a waiting spinner. Run `/remote-control` in that session's original terminal to enable Remote Control; the card shows **Open in Claude** once the CLI publishes its link.
+
 The dashboard polls `/api/sessions` on a graduated ladder — 4s, 8s, 15s, capped
 at 30s — resetting on any successful poll, tab refocus, or button press. A 401
 or 403 halts the poll until you act; throttling never does. The service worker
