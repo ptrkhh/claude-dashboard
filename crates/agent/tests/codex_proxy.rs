@@ -82,6 +82,7 @@ async fn proxy_authenticates_to_a_loopback_backend() {
         .expect("proxy did not connect to the loopback backend")
         .unwrap();
     let mut auth = None;
+    #[allow(clippy::result_large_err)] // Tungstenite requires this callback's unboxed error type.
     let capture = |req: &Request, res: Response| -> Result<Response, ErrorResponse> {
         auth = req.headers().get("authorization").cloned();
         Ok(res)
