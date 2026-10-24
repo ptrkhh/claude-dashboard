@@ -381,7 +381,7 @@ async function worker() {
       await reportError(`Codex request failed: ${e.message}`);
     }
   };
-  await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', title: 'Claude Dashboard Codex Bridge', version: '0.5.1' }, ...(state.native_terminal ? { capabilities: { experimentalApi: true } } : {}) });
+  await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', title: 'RC Dashboard Codex Bridge', version: '0.5.1' }, ...(state.native_terminal ? { capabilities: { experimentalApi: true } } : {}) });
   codex.send({ method: 'initialized' });
   if (!await codex.ready()) throw Error('Codex is signed out; run codex login on the agent host.');
   const savedModel = state.model, savedLabel = state.model_label, resuming = !!state.sid;

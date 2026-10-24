@@ -1,6 +1,8 @@
-# claude-dashboard
+# RC Dashboard
 
-A small local web dashboard for launching, monitoring, resuming, and killing Claude Code sessions running in tmux, with basic system stats (CPU/mem/disk), your Claude subscription usage limits, and a live log panel. The agent is a single Rust binary; the UI is vanilla HTML/CSS/JS with no build step. There is no authentication yet — sessions are launched with `--dangerously-skip-permissions`, so run it only on a trusted LAN or behind Cloudflare Access.
+Remote control for Claude Code and Codex.
+
+A small local web dashboard for launching, monitoring, resuming, and killing Claude Code and Codex sessions running in tmux, with basic system stats (CPU/mem/disk), subscription usage limits, and a live log panel. The agent is a single Rust binary; the UI is vanilla HTML/CSS/JS with no build step. There is no authentication yet — sessions are launched with `--dangerously-skip-permissions`, so run it only on a trusted LAN or behind Cloudflare Access.
 
 The stats strip mirrors the `claude /usage` limit bars: session and weekly usage percentages, each with its reset time beneath the meter. These read the same OAuth-only `/api/oauth/usage` endpoint the CLI uses, so they appear only when you're signed in with a Claude subscription — API-key users see just CPU/RAM/disk. The lookup is refreshed in the background on a 5-minute TTL, so the 4s poll never waits on the network, and a transient failure keeps the last good numbers for up to 20 minutes rather than blanking the tiles (after that they disappear, so a dead token never leaves stale percentages up). Failed requests back off exponentially, to 20 minutes, because the endpoint rate-limits hard — polling it every minute drew a `429` every few minutes. A failure the last good numbers still cover is not written to the log panel; only an outage that has cost the tiles is, once. It is an undocumented endpoint the Claude CLI happens to use, so it may change or stop working without notice.
 
@@ -364,3 +366,11 @@ The terminal's Origin check compares the browser's `Origin` with the `Host` the 
 The JWKS fetch is gated on `cf-access` being in the chain, not on the two
 `CDASH_CF_*` variables being set, so leaving them in a unit file after switching
 to `none` does not couple boot to Cloudflare's availability.
+
+## Branding and icons
+
+RC Dashboard uses the pixel Clawd mascot with the S2 broadcast signal. Launcher/install icons use the fixed Ink + apricot palette (P1). The header and favicon follow the app theme: Paper + rust (P6) in light mode and P1 in dark mode, including a manual theme override. Application identifiers, commands, settings paths and release artifact names retain their existing `cdash` names for compatibility.
+
+The editable web sources are `public/icon.svg` (P1) and `public/icon-light.svg` (P6). The Tauri icon manifest is `crates/tauri-app/icons/source.json`; run `cargo tauri icon icons/source.json` from `crates/tauri-app` with the pinned Tauri CLI to regenerate native assets. `scripts/release.sh` uses the same manifest after Android initialization. The Android foreground keeps the artwork inside its safe region, with a full-bleed ink background. Its 75% foreground setting controls the older, flattened launcher icons.
+
+The PWA provides 192/512 px PNGs plus a separate maskable icon derived from `crates/tauri-app/icons/maskable.svg`. The inset preserves the signal under launcher masks. To regenerate web PNGs, use `cargo tauri icon <source.svg> --output <temporary-directory> --png <sizes>`: `32,192,512` for P1, `32` for P6, and `512` for the maskable source. Copy the generated PNGs to their corresponding `public/icon-*.png` paths. Keep the derived Android foreground and maskable SVG artwork in sync with the P1 source.

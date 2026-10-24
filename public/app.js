@@ -57,12 +57,17 @@ const store = {
 };
 const MODES = ['system', 'light', 'dark'];
 const systemDark = () => matchMedia('(prefers-color-scheme: dark)').matches;
-const themeMode = () => { const s = store.get(THEME_KEY); return s === 'light' || s === 'dark' ? s : 'system'; };
+// Keep the current choice even when the WebView cannot persist it.
+let activeMode = store.get(THEME_KEY);
+const themeMode = () => activeMode === 'light' || activeMode === 'dark' ? activeMode : 'system';
 const resolved = mode => mode === 'system' ? (systemDark() ? 'dark' : 'light') : mode;
 
 function applyMode(mode) {
   const dark = resolved(mode) === 'dark';
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  // Explicit URLs also follow a manual override and avoid SVG media-query bugs.
+  $('#favicon')?.setAttribute('href', dark ? 'icon.svg' : 'icon-light.svg');
+  $('#favicon-png')?.setAttribute('href', dark ? 'icon-32.png' : 'icon-light-32.png');
   const tt = $('#theme-toggle');
   tt.innerHTML = mode === 'system' ? ICONS.system : dark ? ICONS.moon : ICONS.sun;
   const label = mode === 'system' ? 'Theme: system — click to override' : `Theme: ${mode} — click to change`;
@@ -76,6 +81,7 @@ function applyMode(mode) {
 }
 $('#theme-toggle').onclick = () => {
   const next = MODES[(MODES.indexOf(themeMode()) + 1) % MODES.length];
+  activeMode = next;
   if (next === 'system') store.remove(THEME_KEY);
   else store.set(THEME_KEY, next);
   applyMode(next);
