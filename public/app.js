@@ -63,6 +63,9 @@ const resolved = mode => mode === 'system' ? (systemDark() ? 'dark' : 'light') :
 function applyMode(mode) {
   const dark = resolved(mode) === 'dark';
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  // Explicit URLs also follow a manual override and avoid SVG media-query bugs.
+  $('#favicon')?.setAttribute('href', dark ? 'icon.svg' : 'icon-light.svg');
+  $('#favicon-png')?.setAttribute('href', dark ? 'icon-32.png' : 'icon-light-32.png');
   const tt = $('#theme-toggle');
   tt.innerHTML = mode === 'system' ? ICONS.system : dark ? ICONS.moon : ICONS.sun;
   const label = mode === 'system' ? 'Theme: system — click to override' : `Theme: ${mode} — click to change`;

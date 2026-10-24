@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="theme-color" content="#f2f0e9" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#1a1917" media="(prefers-color-scheme: dark)">
-<title>Claude Dashboard</title>
+<title>RC Dashboard</title>
+<meta name="description" content="Remote control for Claude Code and Codex.">
 <!-- Resolve theme before first paint to avoid a flash of the wrong mode. -->
 <script>
   (function () {
@@ -19,7 +20,8 @@
 </script>
 <link rel="stylesheet" href="style.css">
 <link rel="stylesheet" href="vendor/xterm.css">
-<link rel="icon" href="icon.svg">
+<link id="favicon-png" rel="icon" href="icon-32.png" sizes="32x32" type="image/png">
+<link id="favicon" rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="manifest" href="manifest.json" crossorigin="use-credentials">
 </head>
 <body>
@@ -27,26 +29,12 @@
   <header class="topbar">
     <div class="brand">
       <span class="brand-mark" aria-hidden="true">
-        <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-          <g fill="var(--accent)">
-            <rect x="47" y="10" width="6" height="34" rx="3"/>
-            <rect x="47" y="10" width="6" height="34" rx="3" transform="rotate(30 50 50)"/>
-            <rect x="47" y="10" width="6" height="34" rx="3" transform="rotate(60 50 50)"/>
-            <rect x="47" y="10" width="6" height="34" rx="3" transform="rotate(90 50 50)"/>
-            <rect x="47" y="10" width="6" height="34" rx="3" transform="rotate(120 50 50)"/>
-            <rect x="47" y="10" width="6" height="34" rx="3" transform="rotate(150 50 50)"/>
-            <rect x="47" y="10" width="6" height="34" rx="3" transform="rotate(180 50 50)"/>
-            <rect x="47" y="10" width="6" height="34" rx="3" transform="rotate(210 50 50)"/>
-            <rect x="47" y="10" width="6" height="34" rx="3" transform="rotate(240 50 50)"/>
-            <rect x="47" y="10" width="6" height="34" rx="3" transform="rotate(270 50 50)"/>
-            <rect x="47" y="10" width="6" height="34" rx="3" transform="rotate(300 50 50)"/>
-            <rect x="47" y="10" width="6" height="34" rx="3" transform="rotate(330 50 50)"/>
-          </g>
-        </svg>
+        <img class="brand-light" src="icon-light.svg" width="34" height="34" alt="">
+        <img class="brand-dark" src="icon.svg" width="34" height="34" alt="">
       </span>
       <span class="brand-text">
-        <span class="brand-name">Claude Dashboard</span>
-        <span class="brand-sub">Code sessions</span>
+        <span class="brand-name">RC Dashboard</span>
+        <span class="brand-sub">Remote control for Claude Code and Codex</span>
       </span>
     </div>
     <div class="topbar-actions">
