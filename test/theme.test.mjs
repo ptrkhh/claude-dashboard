@@ -90,3 +90,20 @@ test('denied local storage still resolves the system theme and updates favicon',
   expectAppearance(ui, 'light', 'icon-light.svg', 'icon-light-32.png');
   assert.doesNotThrow(() => ui.click());
 });
+
+test('manual overrides survive system changes when storage is denied', () => {
+  const ui = page({ deniedStorage: true, systemDark: true });
+  ui.click();
+  expectAppearance(ui, 'light', 'icon-light.svg', 'icon-light-32.png');
+  ui.system(false);
+  ui.system(true);
+  expectAppearance(ui, 'light', 'icon-light.svg', 'icon-light-32.png');
+  ui.click();
+  expectAppearance(ui, 'dark', 'icon.svg', 'icon-32.png');
+  ui.system(false);
+  expectAppearance(ui, 'dark', 'icon.svg', 'icon-32.png');
+  ui.click();
+  expectAppearance(ui, 'light', 'icon-light.svg', 'icon-light-32.png');
+  ui.system(true);
+  expectAppearance(ui, 'dark', 'icon.svg', 'icon-32.png');
+});
