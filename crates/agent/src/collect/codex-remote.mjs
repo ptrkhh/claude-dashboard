@@ -126,8 +126,8 @@ class Remote {
     this.epoch = epoch;
     this.sid = sid;
   }
-  async request(path, method, body, stream = false) {
-    const signal = stream ? this.stopped.signal : AbortSignal.any([this.stopped.signal, AbortSignal.timeout(15_000)]);
+  async request(path, method, body, streamSignal) {
+    const signal = AbortSignal.any([this.stopped.signal, streamSignal || AbortSignal.timeout(15_000)]);
     const response = await fetch(`${this.url}${path}`, {
       method, signal,
       redirect: 'error',
@@ -136,7 +136,7 @@ class Remote {
     });
     // Do not quote response bodies: a transport failure must not leak tokens.
     if (!response.ok) { await response.body?.cancel(); throw Object.assign(Error(`Claude worker ${path.split('?')[0]}: HTTP ${response.status}`), { status: response.status }); }
-    if (stream) return response;
+    if (streamSignal) return response;
     await response.body?.cancel();
   }
   async retry(path, method, body) {
@@ -160,10 +160,14 @@ class Remote {
   async listen(onEvent, onSequence) {
     let delay = 1000;
     while (!this.stopped.signal.aborted) {
+      const connection = new AbortController();
+      // Network handovers can leave an open stream that never delivers again.
+      const idle = setTimeout(() => connection.abort(Error('Claude worker event stream stalled')), 60_000);
       try {
-        const response = await this.request(`/worker/events/stream?from_sequence_num=${this.sequence}`, 'GET', undefined, true);
+        const response = await this.request(`/worker/events/stream?from_sequence_num=${this.sequence}`, 'GET', undefined, connection.signal);
         let frame = '', kind = '', data = [];
         for await (const chunk of response.body.pipeThrough(new TextDecoderStream())) {
+          idle.refresh();
           frame += chunk;
           if (frame.length > 16 * 1024 * 1024) throw Error('Claude SSE frame too large');
           let pos;
@@ -191,6 +195,9 @@ class Remote {
         if (this.stopped.signal.aborted) break;
         if ([401, 403, 404, 409, 410].includes(e.status)) throw e;
         console.error(`${e.message}; reconnecting`);
+      } finally {
+        clearTimeout(idle);
+        connection.abort();
       }
       await sleep(delay);
       delay = Math.min(delay * 2, 30_000);
