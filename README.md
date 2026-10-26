@@ -20,6 +20,26 @@ A coding task can keep moving while you switch projects, leave your desk, or tak
 - **Pick up where you left off.** Resume a previous Claude Code or Codex session, then carry on with its provider and project.
 - **Use the screen that suits the moment.** Open the web dashboard, desktop app, or Android app.
 
+## A look inside
+
+<table>
+  <tr><th align="center">Desktop</th><th align="center">Phone</th></tr>
+  <tr>
+    <td width="68%" valign="top"><img src="docs/screenshots/dashboard-desktop.png" alt="RC Dashboard desktop view with active and resumable Claude Code and Codex sessions" width="680" /></td>
+    <td width="32%" valign="top"><img src="docs/screenshots/dashboard-mobile.png" alt="RC Dashboard running sessions on a phone" width="280" /></td>
+  </tr>
+</table>
+
+<table>
+  <tr><th align="center">Choose a project folder</th><th align="center">Step into a session</th></tr>
+  <tr>
+    <td valign="top"><img src="docs/screenshots/folder-picker.png" alt="Folder picker with Browse, Recents, and Favorites" width="100%" /></td>
+    <td valign="top"><img src="docs/screenshots/terminal-demo.png" alt="Terminal view with keyboard controls" width="100%" /></td>
+  </tr>
+</table>
+
+<p align="center"><sub>The dashboard UI is real; session names, stats, and terminal text are sample data.</sub></p>
+
 ## Quick start
 
 1. [Download the app for your platform](https://github.com/ptrkhh/claude-dashboard/releases/latest).
