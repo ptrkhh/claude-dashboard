@@ -49,6 +49,7 @@ globalThis.fetch = async (url, options) => {
   log({url,method:options.method,token:options.headers.Authorization,body:options.body && JSON.parse(options.body)});
   if (!url.includes('/stream')) {
     if(process.env.CDASH_CHECK_FAIL_HISTORY && JSON.parse(options.body || '{}').events?.some(e=>e.payload.message?.id==='old-reply-1')) return new Response('',{status:400});
+    if(JSON.parse(options.body || '{}').events?.some(e=>process.env.CDASH_CHECK_RACE==='init' ? e.payload.subtype==='init' : process.env.CDASH_CHECK_RACE==='replay' && e.payload.message?.id==='offline-user')) await new Promise(r=>setTimeout(r,150));
     const payload=options.body && JSON.parse(options.body).events?.find(e=>e.payload.type==='user')?.payload;
     if(payload && inbound) inbound.enqueue(new TextEncoder().encode('event: client_event\\ndata: '+JSON.stringify({sequence_num:'12',event_id:'local-echo',payload})+'\\n\\n'));
     else if(payload) echoes.push(payload);
@@ -84,11 +85,16 @@ createInterface({input:process.stdin}).on('line',line=>{
    thread:{id:'01234567-1234-1234-1234-0123456789ab',status:{type:process.env.CDASH_CHECK_NATIVE ? 'active' : 'idle'}},model:'gpt-check',reasoningEffort:'low',
    ...(process.env.CDASH_CHECK_NATIVE && m.params.initialTurnsPage ? {initialTurnsPage:{data:[{id:'native-active',status:'inProgress',items:[]}],nextCursor:null}} : {}),
  }});
- if(m.method==='thread/turns/list' && process.env.CDASH_CHECK_NATIVE){send({id:m.id,result:{data:[{id:'offline-turn',status:'completed',items:[{type:'userMessage',id:'offline-user',clientId:'native-offline',content:[{type:'text',text:'While bridge offline'}]},{type:'userMessage',id:'own-user',clientId:'own-remote-uuid',content:[{type:'text',text:'Own remote question'}]},{type:'agentMessage',id:'offline-reply',text:'Offline answer'}]}],nextCursor:null}});return;}
+ if(m.method==='thread/resume' && process.env.CDASH_CHECK_RACE==='init')setTimeout(()=>send({method:'turn/completed',params:{turn:{id:'native-active',status:'completed'}}}),20);
+ if(m.method==='thread/turns/list' && process.env.CDASH_CHECK_NATIVE){
+   send({id:m.id,result:{data:[{id:'offline-turn',status:'completed',items:[{type:'userMessage',id:'offline-user',clientId:'native-offline',content:[{type:'text',text:'While bridge offline'}]},{type:'userMessage',id:'own-user',clientId:'own-remote-uuid',content:[{type:'text',text:'Own remote question'}]},{type:'agentMessage',id:'offline-reply',text:'Offline answer'}]}],nextCursor:null}});
+   if(process.env.CDASH_CHECK_RACE==='replay')setTimeout(()=>send({method:'turn/completed',params:{turn:{id:'native-active',status:'completed'}}}),20);
+   return;
+ }
  if(m.method==='thread/turns/list')send({id:m.id,result:m.params.cursor ? {
    data:[{id:'old-turn-2',status:'completed',items:[
      {type:'reasoning',id:'private-reasoning',summary:['private reasoning'],content:[]},
-     {type:'commandExecution',id:'private-tool',command:'echo secret',aggregatedOutput:'private tool output'},
+     {type:'commandExecution',id:'old-command',command:'echo history',cwd:'/work',status:'completed',aggregatedOutput:'history output',exitCode:0},
      {type:'agentMessage',id:'old-reply-2',text:'Earlier final answer',phase:'final_answer'},
    ]}],nextCursor:null,
  } : {
@@ -107,9 +113,31 @@ createInterface({input:process.stdin}).on('line',line=>{
      send({id:501,method:'item/commandExecution/requestApproval',params:{itemId:'approval-third',command:'true'}});
      send({method:'serverRequest/resolved',params:{requestId:501}});
    }
-   send({method:'item/completed',params:{item:{type:'agentMessage',id:text,text:'Reply '+text}}});
-   send({id:500,method:'mcpServer/elicitation/request',params:{}});
-   send({method:'turn/completed',params:{turn:{id:text,status:'completed'}}});
+   const finish=()=>{
+     send({method:'item/completed',params:{turnId:text,item:{type:'agentMessage',id:text,text:'Reply '+text,phase:'final_answer'}}});
+     send({id:500,method:'mcpServer/elicitation/request',params:{}});
+     send({method:'turn/completed',params:{turn:{id:text,status:'completed'}}});
+   };
+   if(text==='third'){
+     send({method:'item/completed',params:{turnId:text,item:{type:'agentMessage',id:'third-progress',text:'Checking Finku',phase:'commentary'}}});
+     const tools=[
+       {type:'mcpToolCall',id:'beeper-search',server:'beeper',tool:'search_chats',arguments:{query:'Finku'},status:'inProgress',result:null,error:null},
+       {type:'commandExecution',id:'shell-check',command:'pwd',cwd:'/work',status:'inProgress',aggregatedOutput:null,exitCode:null},
+       {type:'dynamicToolCall',id:'dynamic-check',namespace:'functions',tool:'lookup',arguments:'lookup id 1',status:'inProgress',contentItems:null,success:null},
+       {type:'fileChange',id:'file-check',changes:[{path:'/work/check.txt',kind:{type:'add'},diff:'+check'}],status:'inProgress'},
+     ];
+     for(const item of tools)send({method:'item/started',params:{turnId:text,item}});
+     setTimeout(()=>{
+       appendFileSync(process.env.CDASH_CHECK_WIRE,JSON.stringify({toolsCompleted:true})+'\\n');
+       const results=[{result:{content:[{type:'text',text:'Found Finku'+'x'.repeat(70_000)}],structuredContent:null,_meta:{private:'do not forward'}}},
+         {aggregatedOutput:'/work',exitCode:0},{contentItems:[{type:'inputText',text:'Lookup failed'}],success:false},{}];
+       tools.forEach((item,i)=>send({method:'item/completed',params:{turnId:text,item:{...item,...results[i],status:i===2?'failed':'completed'}}}));
+       // A worker can first observe a tool at completion after reconnecting.
+       send({method:'item/completed',params:{turnId:text,item:{type:'mcpToolCall',id:'missed-start',server:'beeper',tool:'get_chat',arguments:{id:'chat'},status:'failed',result:null,error:{message:'Chat unavailable'}}}});
+       send({method:'item/completed',params:{turnId:text,item:{type:'reasoning',id:'private-thought',summary:['private reasoning'],content:[]}}});
+       finish();
+     },300);
+   }else finish();
  }
  if(m.method==='turn/steer'){
    send({id:m.id,result:{turnId:'native-active'}});
@@ -131,9 +159,9 @@ createInterface({input:process.stdin}).on('line',line=>{
     }
   };
   let child, output = '';
-  const start = (sid = 'cse_check', failHistory = false, native = false) => {
+  const start = (sid = 'cse_check', failHistory = false, native = false, race = '') => {
     child = spawn(process.execPath, [resolve('crates/agent/src/collect/codex-remote.mjs'), '--worker', 'claude', '--sdk-url', 'https://api.anthropic.com/v1/code/sessions/'+sid, '--session-id', sid], {
-      env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, NODE_OPTIONS: `--import=${pathToFileURL(preload)}`, CDASH_CHECK_WIRE: wire, CDASH_CHECK_NATIVE: native ? '1' : '', CDASH_CHECK_FAIL_HISTORY: failHistory ? '1' : '', CDASH_CODEX_STATE: state, CLAUDE_CODE_SESSION_ACCESS_TOKEN: 'test_ingress', CLAUDE_CODE_WORKER_EPOCH: '1' },
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, NODE_OPTIONS: `--import=${pathToFileURL(preload)}`, CDASH_CHECK_WIRE: wire, CDASH_CHECK_NATIVE: native ? '1' : '', CDASH_CHECK_FAIL_HISTORY: failHistory ? '1' : '', CDASH_CHECK_RACE: race, CDASH_CODEX_STATE: state, CLAUDE_CODE_SESSION_ACCESS_TOKEN: 'test_ingress', CLAUDE_CODE_WORKER_EPOCH: '1' },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     child.stdout.on('data', b => { output += b; });
@@ -163,8 +191,36 @@ createInterface({input:process.stdin}).on('line',line=>{
   await waitFor(async () => { const s=JSON.parse(await readFile(state, 'utf8')); return s.last_message === 'Reply third' && !s.working; });
   assert.equal((await messages()).filter(m => ['turn/start','turn/steer'].includes(m.rpc?.method)).length, 3, 'an echoed local prompt must execute once');
   const live = (await messages()).flatMap(m => m.body?.events || []).map(e => e.payload);
+  const toolUses = live.flatMap(p => p.type === 'assistant' ? p.message?.content || [] : []).filter(b => b.type === 'tool_use');
+  assert.deepEqual(toolUses.map(b => [b.id,b.name]), [
+    ['beeper-search','mcp__beeper__search_chats'],['shell-check','Bash'],
+    ['dynamic-check','functions.lookup'],['file-check','Edit'],['missed-start','mcp__beeper__get_chat'],
+  ], 'remote control must receive tool names at start, including tools first seen at completion');
+  assert.deepEqual(toolUses[0].input,{query:'Finku'});
+  assert.deepEqual(toolUses[2].input,{input:'lookup id 1'},'scalar tool arguments must remain valid Claude tool input');
+  const toolResults = live.flatMap(p => p.type === 'user' ? p.message?.content || [] : []).filter(b => b.type === 'tool_result');
+  assert.deepEqual(toolResults.map(b => [b.tool_use_id,b.is_error]), [
+    ['beeper-search',false],['shell-check',false],['dynamic-check',true],['file-check',false],['missed-start',true],
+  ]);
+  assert.ok(toolResults[0].content.startsWith('Found Finku'));
+  assert.equal(toolResults[0].content.length,65_536,'large tool output must not overwhelm the remote transport');
+  assert.equal(toolResults[1].content,'/work');
+  assert.equal(toolResults[2].content,'Lookup failed');
+  assert.match(toolResults[4].content,/Chat unavailable/);
+  assert.equal(JSON.stringify(live).includes('do not forward'),false,'MCP metadata must stay private');
+  assert.equal(JSON.stringify(live).includes('private reasoning'),false);
+  const toolStartIndex=(await messages()).findIndex(m=>m.body?.events?.some(e=>e.payload.message?.content?.some?.(b=>b.id==='beeper-search')));
+  assert.ok(toolStartIndex>=0 && toolStartIndex<(await messages()).findIndex(m=>m.toolsCompleted), 'tool starts must upload while execution is still pending');
+  const activity=live.filter(p=>p.type==='stream_event');
+  assert.equal(activity[0]?.event.type,'message_start','a turn needs a visible activity signal');
+  assert.equal(activity.at(-1)?.event.type,'message_stop','turn completion must stop activity');
+  const commentaryIndex=live.findIndex(p=>p.message?.id==='third-progress');
+  assert.equal(live[commentaryIndex].message.stop_reason,null,'commentary must not signal the end of a turn');
+  assert.equal(live[commentaryIndex+1]?.event?.type,'message_start','working must remain visible after commentary');
+  const resultIndex=live.findIndex(p=>p.message?.content?.some?.(b=>b.tool_use_id==='beeper-search'));
+  assert.equal(live[resultIndex+1]?.event?.type,'message_start','working must resume between tools');
   const users = live.filter(p => p.type === 'user');
-  assert.deepEqual(users.map(p => p.message.content), ['third', [{type:'text',text:'Native prompt'}]],
+  assert.deepEqual(users.filter(p=>!p.message.content?.some?.(b=>b.type==='tool_result')).map(p => p.message.content), ['third', [{type:'text',text:'Native prompt'}]],
     'native prompts are mirrored once; bridge submissions are not duplicated');
   const approval = live.find(p => p.type === 'control_request' && p.request.tool_use_id === 'approval-third');
   assert.ok(live.some(p => p.type === 'control_cancel_request' && p.request_id === approval.request_id),
@@ -198,6 +254,8 @@ createInterface({input:process.stdin}).on('line',line=>{
   assert.deepEqual(history.map(p => [p.type,p.message.content]), [
     ['user', [{type:'text',text:'Earlier question'},{type:'text',text:'More context'}]],
     ['assistant', [{type:'text',text:'Earlier progress'}]],
+    ['assistant', [{type:'tool_use',id:'old-command',name:'Bash',input:{command:'echo history',cwd:'/work'}}]],
+    ['user', [{type:'tool_result',tool_use_id:'old-command',content:'history output',is_error:false}]],
     ['assistant', [{type:'text',text:'Earlier final answer'}]],
   ], 'all pages of conversation text must reach the new remote in order');
   for (const prior of failedHistory.filter(p => ['user','assistant'].includes(p.type))) {
@@ -207,7 +265,7 @@ createInterface({input:process.stdin}).on('line',line=>{
     {threadId:'01234567-1234-1234-1234-0123456789ab',limit:50,sortDirection:'asc',itemsView:'full'},
     {threadId:'01234567-1234-1234-1234-0123456789ab',limit:50,sortDirection:'asc',itemsView:'full',cursor:'next-turn'},
   ]);
-  await waitFor(async () => JSON.parse(await readFile(state, 'utf8')).remote_sequence === 1);
+  await waitFor(async () => JSON.parse(await readFile(state, 'utf8')).remote_sequence === 2);
   assert.equal((await messages()).slice(historyStart).some(m => ['turn/start','turn/steer'].includes(m.rpc?.method)), false, 'uploaded user history must never become a new prompt');
   await stop();
   const historyRestart = (await messages()).length;
@@ -234,6 +292,8 @@ createInterface({input:process.stdin}).on('line',line=>{
   await waitFor(async()=> (await messages()).slice(nativeStart).some(m=>m.body?.events?.some(e=>e.payload.type==='result')));
   const nativeMessages=(await messages()).slice(nativeStart);
   assert.equal(nativeMessages.find(m=>m.body?.worker_status)?.body.worker_status,'running','RC reconnect must show the live turn');
+  assert.ok(nativeMessages.some(m=>m.body?.events?.some(e=>e.payload.type==='stream_event' && e.payload.event.type==='message_start')),
+    'reconnecting during a native turn must restore activity');
   const resume=nativeMessages.find(m=>m.rpc?.method==='thread/resume').rpc.params;
   assert.equal(resume.model,undefined,'worker reconnect must preserve native model choices');
   assert.equal(resume.config,undefined,'worker reconnect must preserve native effort choices');
@@ -246,6 +306,17 @@ createInterface({input:process.stdin}).on('line',line=>{
   assert.equal(nativeSubmissions[0].rpc.params.expectedTurnId,'native-active');
   assert.equal(nativeMessages.some(m=>m.rpc?.id===500 && m.rpc.error),false,
     'requests the native TUI can answer must not be rejected by the bridge');
+  for(const race of ['replay','init']){
+    await stop();
+    const raceStart=(await messages()).length;
+    output='';start('cse_race_'+race,false,true,race);
+    await waitFor(()=>output.includes(' ready'));
+    await waitFor(async()=>(await messages()).slice(raceStart).some(m=>m.body?.events?.some(e=>e.payload.type==='result')));
+    const raceEvents=(await messages()).slice(raceStart).flatMap(m=>m.body?.events||[]).map(e=>e.payload);
+    const started=raceEvents.findIndex(p=>p.event?.type==='message_start');
+    const stopped=raceEvents.findIndex(p=>p.event?.type==='message_stop');
+    assert.ok(started>=0 && started<stopped,`a turn finishing during ${race} must signal activity before stopping`);
+  }
 });
 
 

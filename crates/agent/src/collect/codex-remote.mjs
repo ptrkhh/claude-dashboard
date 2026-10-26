@@ -203,6 +203,45 @@ function messageUuid(remoteSid, threadId, turnId, itemId) {
   return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-8${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
 }
 
+function toolMessages(item, completed = true) {
+  let name, input, output;
+  let is_error = ['failed', 'declined'].includes(item.status);
+  switch (item.type) {
+    case 'mcpToolCall':
+      name = `mcp__${item.server}__${item.tool}`;
+      input = item.arguments;
+      output = item.error?.message ?? (item.result?.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
+      output ||= JSON.stringify(item.result?.structuredContent ?? '');
+      is_error ||= !!item.error;
+      break;
+    case 'commandExecution':
+      name = 'Bash'; input = { command: item.command, cwd: item.cwd };
+      output = item.aggregatedOutput ?? '';
+      is_error ||= item.exitCode != null && item.exitCode !== 0;
+      break;
+    case 'dynamicToolCall':
+      name = [item.namespace, item.tool].filter(Boolean).join('.'); input = item.arguments;
+      output = (item.contentItems || []).filter(b => b.type === 'inputText').map(b => b.text).join('\n');
+      is_error ||= item.success === false;
+      break;
+    case 'fileChange':
+      name = 'Edit'; input = { changes: item.changes }; output = item.status;
+      break;
+    default: return [];
+  }
+  if (!input || typeof input !== 'object' || Array.isArray(input)) input = { input: input ?? null };
+  const messages = [{ type: 'assistant', parent_tool_use_id: null, message: {
+    id: `${item.id}-tool-use`, role: 'assistant', stop_reason: 'tool_use',
+    content: [{ type: 'tool_use', id: item.id, name, input }],
+  } }];
+  // shortcut: remote tool text is capped at 65,536 characters; use the native terminal for larger output.
+  if (completed) messages.push({ type: 'user', parent_tool_use_id: null, message: {
+    id: `${item.id}-tool-result`, role: 'user',
+    content: [{ type: 'tool_result', tool_use_id: item.id, content: output.slice(0, 65_536), is_error }],
+  } });
+  return messages;
+}
+
 async function replayHistory(codex, threadId, remoteSid, emit, submitted = new Set()) {
   let cursor;
   const seen = new Set();
@@ -211,6 +250,9 @@ async function replayHistory(codex, threadId, remoteSid, emit, submitted = new S
       threadId, limit: 50, sortDirection: 'asc', itemsView: 'full', ...(cursor ? { cursor } : {}),
     });
     for (const turn of page.data) for (const item of turn.items) {
+      for (const payload of toolMessages(item, item.status !== 'inProgress')) {
+        await emit({ ...payload, uuid: messageUuid(remoteSid, threadId, turn.id, payload.message.id) });
+      }
       const role = item.type === 'userMessage' ? 'user' : item.type === 'agentMessage' ? 'assistant' : null;
       if (!role || (role === 'user' && submitted.has(item.clientId))) continue;
       const content = role === 'user'
@@ -219,7 +261,7 @@ async function replayHistory(codex, threadId, remoteSid, emit, submitted = new S
       if (!content.length) continue;
       // Stable UUIDs let the remote deduplicate a replay interrupted by a crash.
       const uuid = messageUuid(remoteSid, threadId, turn.id, item.id);
-      await emit({ uuid, type: role, message: { id: item.id, role, content, ...(role === 'assistant' ? { stop_reason: 'end_turn' } : {}) } });
+      await emit({ uuid, type: role, message: { id: item.id, role, content, ...(role === 'assistant' ? { stop_reason: item.phase === 'commentary' ? null : 'end_turn' } : {}) } });
     }
     cursor = page.nextCursor;
     if (cursor && seen.has(cursor)) throw Error('Repeated Codex history cursor');
@@ -245,6 +287,10 @@ async function worker() {
   let models = [];
   let outgoing = Promise.resolve(), saved = Promise.resolve(), queue = Promise.resolve(), savedNamePath;
   const emit = payload => { outgoing = outgoing.then(() => remote.event(payload)); outgoing.catch(fatal); return outgoing; };
+  const activity = turnId => emit({ type: 'stream_event', parent_tool_use_id: null, event: turnId ? {
+    type: 'message_start', message: { id: `codex-${turnId}`, type: 'message', role: 'assistant', model: state.model,
+      content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } },
+  } : { type: 'message_stop' } });
   const approvalState = () => {
     const details = [...delegated.values(), ...[...approvals.values()].map(a => a.details)].at(-1);
     return remote.state(details ? 'requires_action' : state.working ? 'running' : 'idle', details);
@@ -294,7 +340,12 @@ async function worker() {
       }
       await approvalState();
     }
-    if (m.method === 'item/started') items.set(p.item.id, p.item);
+    if (m.method === 'item/started') {
+      items.set(p.item.id, p.item);
+      for (const payload of toolMessages(p.item, false)) {
+        await emit({ ...payload, uuid: messageUuid(sid, state.sid, p.turnId, payload.message.id) });
+      }
+    }
     if (m.method === 'thread/settings/updated') {
       state.model = p.threadSettings.model;
       state.effort = p.threadSettings.effort;
@@ -302,10 +353,15 @@ async function worker() {
       remote.model = state.model;
       await save();
     }
-    if (m.method === 'turn/started') { state.working = true; await save(); await remote.state('running'); }
+    if (m.method === 'turn/started') { state.working = true; await save(); await remote.state('running'); await activity(p.turn.id); }
     if (m.method === 'item/completed') {
       const item = p.item;
+      const started = items.has(item.id);
       items.delete(item.id);
+      const tools = toolMessages(item);
+      for (const payload of tools.slice(started ? 1 : 0)) {
+        await emit({ ...payload, uuid: messageUuid(sid, state.sid, p.turnId, payload.message.id) });
+      }
       if (item.type === 'userMessage') {
         if (!(state.native_terminal ? submitted.has(item.clientId) : submitted.delete(item.clientId))) {
           const content = item.content.filter(b => b.type === 'text').map(b => ({ type: 'text', text: b.text }));
@@ -314,16 +370,18 @@ async function worker() {
       }
       if (item.type === 'agentMessage') {
         state.last_message = item.text;
-        await emit({ uuid: messageUuid(sid, state.sid, p.turnId, item.id), type: 'assistant', message: { id: item.id, role: 'assistant', model: state.model, content: [{ type: 'text', text: item.text }], stop_reason: 'end_turn' } });
+        await emit({ uuid: messageUuid(sid, state.sid, p.turnId, item.id), type: 'assistant', message: { id: item.id, role: 'assistant', model: state.model, content: [{ type: 'text', text: item.text }], stop_reason: item.phase === 'commentary' ? null : 'end_turn' } });
         if (!state.native_terminal) console.log(item.text);
         await save();
       }
+      if (state.working && p.turnId && (tools.length || item.phase === 'commentary')) await activity(p.turnId);
     }
     if (m.method === 'turn/completed') {
       state.working = false; state.ts = Date.now();
       for (const request_id of approvals.keys()) await emit({ type: 'control_cancel_request', request_id });
       approvals.clear(); delegated.clear();
       await save();
+      await activity();
       const failed = p.turn.status !== 'completed';
       await emit({ type: 'result', subtype: failed ? 'error_during_execution' : 'success', is_error: failed, result: state.last_message || '', errors: failed ? [p.turn.error?.message || `Codex turn ${p.turn.status}`] : [], num_turns: 1, total_cost_usd: 0, duration_ms: 0, duration_api_ms: 0 });
       await remote.state('idle');
@@ -393,15 +451,17 @@ async function worker() {
   state.sid = result.thread.id; state.working = Boolean(codex.turnId);
   state.model = result.model;
   state.effort = result.reasoningEffort;
+  remote.model = state.model;
+  // Queue activity before awaiting init; the resumed turn can finish during its upload.
+  const init = emit({ type: 'system', subtype: 'init', cwd: state.dir, model: state.model, tools: [], mcp_servers: [], permissionMode: 'default', slash_commands: [] });
+  await (codex.turnId ? activity(codex.turnId) : init);
   try { models = await codex.models(); }
   catch { console.error('Model catalog unavailable; using model ID.'); }
   state.model_label = models.find(m => m.model === state.model)?.label || (state.model === savedModel && savedLabel) || state.model;
-  remote.model = state.model;
   await save();
   if (state.remote_sid === sid) remote.sequence = state.remote_sequence || 0;
   await approvalState();
   heartbeat = setInterval(() => remote.retry('/worker/heartbeat', 'POST', { session_id: sid, worker_epoch: remote.epoch }).catch(fatal), 30_000);
-  await emit({ type: 'system', subtype: 'init', cwd: state.dir, model: state.model, tools: [], mcp_servers: [], permissionMode: 'default', slash_commands: [] });
   if (resuming && (state.native_terminal || state.remote_sid !== sid)) await replayHistory(codex, state.sid, sid, emit, submitted);
   state.remote_user_ids = [...submitted];
   // Commit the remote identity only after every history upload succeeds.
