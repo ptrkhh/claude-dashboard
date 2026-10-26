@@ -4,48 +4,51 @@
   <img src="public/icon.svg" alt="RC Dashboard pixel mascot and signal" width="112" />
 </p>
 
-<p align="center"><strong>Leave the terminal. Keep the thread.</strong></p>
-<p align="center">Remote control for Claude Code.</p>
+<p align="center"><strong>Start a session. Resume a project. Code from your phone.</strong></p>
+<p align="center">The missing link for Claude Code Remote Control.</p>
 
-Start a coding session on the machine where your project lives. Check its progress from another connected screen. Open the live terminal when it needs you. Close the dashboard when you’re ready; the session keeps running.
+[Claude Remote Control](https://code.claude.com/docs/en/remote-control) brings a running Claude Code session to the Claude app and website. **RC Dashboard handles the start and resume step:** choose a project, create a session or return to an earlier one, then tap **Open in Claude**.
+
+After one-time setup, your everyday coding loop can happen entirely from RC Dashboard and Claude, without opening a terminal.
 
 [Download RC Dashboard](https://github.com/ptrkhh/claude-dashboard/releases/latest) · [Quick start](#quick-start) · [Keep it private](#keep-it-private) · [Technical reference](#technical-reference)
 
-## Start at your desk. Pick up anywhere you can connect.
+## Get Claude going from the screen in your hand.
 
-A coding task can keep moving while you switch projects, leave your desk, or take a break. RC Dashboard keeps Claude Code sessions together in one clear view, so you can check in without babysitting a terminal.
+An idea arrives while you’re on the couch. Yesterday’s unfinished feature is waiting in another project. Open RC Dashboard, get the right session ready, and carry on in Claude.
 
-- **See what’s happening.** Scan active and resumable sessions, recent replies, model, host health, and live logs. Usage meters and conversation summaries appear when available.
-- **Step in when it matters.** Open a session’s real terminal, send the next instruction, or interrupt it. Close the terminal view and the session stays alive.
-- **Pick up where you left off.** Resume a previous Claude Code session, then carry on with its project.
-- **Use the screen that suits the moment.** Open the web dashboard, desktop app, or Android app.
+- **Start something new.** Choose a project from your folders, recents, or favorites. Pick a model and effort level, then tap **Launch**.
+- **Return to unfinished work.** Find a previous session, check its conversation summary when available, and tap **Resume** to pick up its context.
+- **Keep coding in Claude.** Tap **Open in Claude** when the session is ready. Send instructions and follow the work in the Claude app or website through Remote Control.
+- **Leave it running.** Close the dashboard and keep coding in Claude. Your session keeps running on its host.
+
+Use the dashboard in your browser, on your desktop, or in the Android app. Running sessions, recent replies, usage meters, and host stats are there when you want a quick check.
 
 ## A look inside
 
 <table>
-  <tr><th align="center">Desktop</th><th align="center">Phone</th></tr>
+  <tr><th align="center">Launch and resume on desktop</th><th align="center">Start from your phone</th></tr>
   <tr>
-    <td width="68%" valign="top"><img src="docs/screenshots/dashboard-desktop.png" alt="RC Dashboard desktop view with active and resumable Claude Code sessions" width="680" /></td>
-    <td width="32%" valign="top"><img src="docs/screenshots/dashboard-mobile.png" alt="RC Dashboard running sessions on a phone" width="280" /></td>
+    <td width="68%" valign="top"><img src="docs/screenshots/dashboard-desktop.png" alt="Desktop dashboard with project launcher, resumable sessions, and Open in Claude buttons" width="680" /></td>
+    <td width="32%" valign="top"><img src="docs/screenshots/dashboard-mobile.png" alt="Project launcher and Open in Claude button on a phone" width="280" /></td>
   </tr>
 </table>
 
-<table>
-  <tr><th align="center">Choose a project folder</th><th align="center">Step into a session</th></tr>
-  <tr>
-    <td valign="top"><img src="docs/screenshots/folder-picker.png" alt="Folder picker with Browse, Recents, and Favorites" width="100%" /></td>
-    <td valign="top"><img src="docs/screenshots/terminal-demo.png" alt="Terminal view with keyboard controls" width="100%" /></td>
-  </tr>
-</table>
+**Choose your next project.** Browse folders, revisit a recent project, or keep your favorites close.
 
-<p align="center"><sub>The dashboard UI is real; session names, stats, and terminal text are sample data.</sub></p>
+<p align="center"><img src="docs/screenshots/folder-picker.png" alt="Folder picker with Browse, Recents, and Favorites" width="900" /></p>
+
+<p align="center"><sub>The dashboard UI is real; session names and stats are sample data.</sub></p>
 
 ## Quick start
 
 1. [Download the app for your platform](https://github.com/ptrkhh/claude-dashboard/releases/latest).
-2. On the machine where sessions will run, install tmux and Claude Code.
+2. On the machine where your projects live, install tmux and Claude Code, and [sign in for Remote Control](https://code.claude.com/docs/en/remote-control#requirements).
 3. Open RC Dashboard. Linux and macOS desktop apps start the agent with the app. On Windows and Android, follow the one-time setup prompt for WSL or F-Droid Termux.
-4. Choose a project, launch a session, and come back to it when you need to.
+4. Choose a project and tap **Launch**, or tap **Resume** on a previous session.
+5. When the session is ready, tap **Open in Claude** and continue coding in the Claude app or website.
+
+Installation and first-run setup may need a terminal. Once setup is complete, use the dashboard to launch and resume sessions.
 
 | Open RC Dashboard with | Sessions run on | First-run setup |
 |---|---|---|
@@ -62,11 +65,11 @@ RC Dashboard can control live coding sessions. The agent listens on your own mac
 
 See [access and security settings](#access-and-security-settings) before exposing an agent to other devices.
 
-## How it works
+## How it works with Claude
 
-Your coding CLI and project stay on their host. RC Dashboard gives you a live window into the tmux session, then detaches cleanly when you close it. The session keeps running in the background.
+RC Dashboard starts or resumes Claude Code on the machine where your project lives and gives you its Remote Control link. **Open in Claude** takes you to the coding conversation in Claude’s app or website.
 
-    Start a task  →  Check in  →  Step into the terminal  →  Leave it running
+Your code, tools, and environment stay on that host. Keep it on and reachable while you work remotely. Closing the dashboard leaves the session running.
 
 ## Technical reference
 
@@ -97,13 +100,15 @@ The host needs tmux and Claude Code. Node.js 22 or later is needed for conversat
 
 ### Session behavior
 
-Sessions run in tmux. The Terminal button attaches to the session’s live CLI interface; closing the view detaches without stopping the session. External sessions that are not in tmux do not have this control.
+Sessions run in tmux. Launching or resuming a session prepares its Remote Control link for **Open in Claude**. The dashboard also includes an optional **Terminal** button for direct access to the session’s live CLI interface; closing the view detaches without stopping the session. External sessions that are not in tmux do not have this control.
+
+<p align="center"><img src="docs/screenshots/terminal-demo.png" alt="Optional terminal view with keyboard controls and illustrative terminal text" width="900" /></p>
 
 The browser terminal sends input to the CLI, so anyone who can reach it can control that session. Terminal connections check the page origin, and session APIs use the configured authentication guards. The log records terminal open and close events, not typed input.
 
 ### Claude Code sessions
 
-Launch or resume Claude Code sessions from the dashboard. Model and effort choices come from the installed Claude Code CLI. When the Claude account supports usage lookup, meters use the same undocumented OAuth endpoint as the CLI; that endpoint may change. Missing credentials hide usage meters without blocking session controls.
+Choose a model and effort level when launching or resuming Claude Code sessions. When the Claude account supports usage lookup, meters use the same undocumented OAuth endpoint as the CLI; that endpoint may change. Missing credentials hide usage meters without blocking session controls.
 
 Resumable cards can show conversation summaries. The agent reuses a suitable existing summary or generates one with the available supported subscription login. Summaries can omit or misstate details; the original session remains the source of truth. The selected conversation text is sent to the provider for summary generation. Tool payloads and thinking are omitted.
 
