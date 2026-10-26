@@ -1,376 +1,154 @@
 # RC Dashboard
 
-Remote control for Claude Code and Codex.
+<p align="center">
+  <img src="public/icon.svg" alt="RC Dashboard pixel mascot and signal" width="112" />
+</p>
 
-A small local web dashboard for launching, monitoring, resuming, and killing Claude Code and Codex sessions running in tmux, with basic system stats (CPU/mem/disk), subscription usage limits, and a live log panel. The agent is a single Rust binary; the UI is vanilla HTML/CSS/JS with no build step. There is no authentication yet — sessions are launched with `--dangerously-skip-permissions`, so run it only on a trusted LAN or behind Cloudflare Access.
+<p align="center"><strong>Leave the terminal. Keep the thread.</strong></p>
+<p align="center">Remote control for Claude Code and Codex.</p>
 
-The stats strip mirrors the `claude /usage` limit bars: session and weekly usage percentages, each with its reset time beneath the meter. These read the same OAuth-only `/api/oauth/usage` endpoint the CLI uses, so they appear only when you're signed in with a Claude subscription — API-key users see just CPU/RAM/disk. The lookup is refreshed in the background on a 5-minute TTL, so the 4s poll never waits on the network, and a transient failure keeps the last good numbers for up to 20 minutes rather than blanking the tiles (after that they disappear, so a dead token never leaves stale percentages up). Failed requests back off exponentially, to 20 minutes, because the endpoint rate-limits hard — polling it every minute drew a `429` every few minutes. A failure the last good numbers still cover is not written to the log panel; only an outage that has cost the tiles is, once. It is an undocumented endpoint the Claude CLI happens to use, so it may change or stop working without notice.
+Start a coding session on the machine where your project lives. Check its progress from another connected screen. Open the live terminal when it needs you. Close the dashboard when you’re ready; the session keeps running.
 
-Each running session card has a **Terminal** button that opens that session's real Claude Code TUI, the way an SSH client would: arrow through `/mcp` menus, toggle modes with Shift+Tab, interrupt with Esc. The agent runs `tmux attach` in a PTY and streams it over a WebSocket (`GET /api/term`). Letters, digits and symbols come from the phone's own keyboard; a key bar adds Esc, Tab, Shift+Tab, a sticky Ctrl (tap Ctrl, then a letter), PgUp/PgDn, Ctrl+C, the arrows and Enter. Closing the terminal only detaches; the session keeps running. Sessions the dashboard launches or resumes start in Claude Code's fullscreen renderer so PgUp/PgDn scroll the conversation (a session already running keeps its old renderer until it is relaunched); `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN` or `CLAUDE_CODE_NO_FLICKER=0` in the agent's environment overrides that, and then PgUp/PgDn do not scroll (use Ctrl, then `o`, for transcript mode). The terminal is command execution for anyone who can reach the dashboard, so it sits behind the same `CDASH_AUTH` guards, and it refuses WebSocket upgrades from any page whose `Origin` is not the dashboard itself (or `CDASH_PUBLIC_URL`, or the desktop/Android app). The log panel records when a terminal opens and closes (`term open` / `term close`), never what is typed. External sessions aren't in tmux, so they don't get the button. A remote profile in the desktop/Android app cannot yet open the terminal against an agent that needs auth headers, because a browser WebSocket cannot carry them; profiles support only `auth: none` today.
+[Download RC Dashboard](https://github.com/ptrkhh/claude-dashboard/releases/latest) · [Quick start](#quick-start) · [Keep it private](#keep-it-private) · [Technical reference](#technical-reference)
 
-The launcher has a touch-friendly folder picker (the folder button in the directory field) that browses the server's filesystem from `/`, with server-backed **Recents** (auto-recorded on launch) and **Favorites**. Since it can enumerate any directory, keep the "trusted LAN / behind Cloudflare Access" caveat above in mind. Recents and favorites persist to `$CLAUDE_DIR/cdash-places.json`.
+## Start at your desk. Pick up anywhere you can connect.
 
-The dashboard polls `/api/sessions` on a graduated ladder — 4s, 8s, 15s, capped
-at 30s — resetting on any successful poll, tab refocus, or button press. A 401
-or 403 halts the poll until you act; throttling never does. The service worker
-caches at runtime (network-first navigations, stale-while-revalidate assets), so
-offline works from the second visit; there is no precache manifest to maintain.
+A coding task can keep moving while you switch projects, leave your desk, or take a break. RC Dashboard keeps Claude Code and Codex sessions together in one clear view, so you can check in without babysitting a terminal.
 
-## Desktop client (Linux, macOS, Windows)
+- **See what’s happening.** Scan active and resumable sessions, recent replies, model, host health, and live logs. Usage meters and conversation summaries appear when available.
+- **Step in when it matters.** Open a session’s real terminal, send the next instruction, or interrupt it. Close the terminal view and the session stays alive.
+- **Pick up where you left off.** Resume a previous Claude Code or Codex session, then carry on with its provider and project.
+- **Use the screen that suits the moment.** Open the web dashboard, desktop app, or Android app.
 
-```
-cargo run -p cdash-tauri
-```
+## Quick start
 
-A Tauri desktop wrapper around the same UI. On Linux and macOS, the agent runs in-process (no separate server, no port to remember) and starts when the app opens. The HTTP boundary is kept even in-process: the same `/api/*` calls still speak HTTP to loopback, tunnelled through the `api_request` Tauri command rather than webview `fetch`. Connection profiles are stored in the app's config directory via `tauri-plugin-store`. Secrets handling arrives in step 10.
+1. [Download the app for your platform](https://github.com/ptrkhh/claude-dashboard/releases/latest).
+2. On the machine where sessions will run, install tmux and Claude Code, Codex, or both.
+3. Open RC Dashboard. Linux and macOS desktop apps start the agent with the app. On Windows and Android, follow the one-time setup prompt for WSL or F-Droid Termux.
+4. Choose a project, launch a session, and come back to it when you need to.
 
-Linux and macOS therefore open directly into the dashboard; there is no separate-agent setup command to paste. The session card's **Terminal** button still gets copied prompts or commands into a running session: open it and paste or type them into the session's own TUI.
+| Open RC Dashboard with | Sessions run on | First-run setup |
+|---|---|---|
+| Linux or macOS desktop app | Your computer | The app starts its included agent. |
+| Windows desktop app | WSL 2 | The app guides you through starting the agent in your Linux distro. |
+| Android app | F-Droid Termux on your phone | The app gives you a setup command to paste once. |
+| Browser or installable web app | A computer running the agent | Open the local dashboard; configure protected network access before using another device. |
 
-**On Windows the client links no agent at all** — `cdash-agent` is a
-`cfg(not(windows))` dependency. tmux, `claude` and `/proc` live in a WSL distro,
-so the agent runs there and the client talks to it over WSL2's loopback relay.
-With no profile saved it defaults to `http://localhost:23274`; a profile
-overrides that. Launching the distro for you is step 6 — for now the distro is
-yours to start.
+For browser-only use, start the agent on your host and open its local address. From source, the command is in the [technical reference](#run-from-source).
 
-There are two Windows builds, x64 and ARM64, because Snapdragon machines run
-Windows natively and an x64 build only gets there under Prism emulation. Each
-bundles the agent for its own architecture — WSL is native to the host, so an
-ARM64 host means an ARM64 distro. Running the wrong one copies an agent the
-distro cannot exec; the reason lands in `~/cdash-agent.log`, not at copy time.
+## Keep it private
 
-When the agent is unreachable the client shows the same setup dialog the
-Android app does, with a command to paste into WSL. It hands the binary over
-**through the filesystem, not a socket**: the app writes the bundled agent into
-`%TEMP%\cdash` and the command copies it from `/mnt/c/…`, which WSL mounts by
-default. Temp rather than app data because the copy is staging — dead once the
-distro has it — and the dialog re-exports it every time it opens, so a cleaned
-temp heals itself. A loopback handoff would not work —
-under WSL2's default NAT networking the distro's `127.0.0.1` is its own, not
-the host's, and that only changes under `networkingMode=mirrored`. Binding a
-routable interface instead would serve the binary to the whole network.
+RC Dashboard can control live coding sessions. The agent listens on your own machine by default, and authentication is off by default too. Keep it local, or add an access guard before opening it to a network. Saved remote profiles in the desktop and Android apps currently support unauthenticated agents only, so use those profiles on a trusted private network.
 
-Note the asymmetry: Windows→WSL loopback *does* work by default, which is why
-the client reaches the agent on `localhost:23274` with no configuration. It is
-only the reverse direction that needs `/mnt/c`.
+See [access and security settings](#access-and-security-settings) before exposing an agent to other devices.
 
-## Android client
+## How it works
 
-An APK thin client for the phone. It links no agent either — Android cannot
-spawn the processes the agent drives, so the agent runs in **F-Droid Termux**
-(the Play-store build cannot `exec` from its own data directory; see the design
-doc's Android section) and the app talks to it on `localhost:23274`, which
-Android does not isolate between apps.
+Your coding CLI and project stay on their host. RC Dashboard gives you a live window into the tmux session, then detaches cleanly when you close it. The session keeps running in the background.
 
-The point of the app over "Add to home screen" is onboarding: the PWA is served
-*by* the agent, so it cannot tell anyone how to install one. The APK carries its
-own UI, so when the agent is unreachable it shows a setup screen with a
-copy-paste command for Termux. The command downloads the agent — bundled in the
-APK and served over loopback, since every route through shared storage needs
-MediaStore or a permission Termux cannot hold on Android 11+ — and appends a
-guard to `~/.bashrc` so the agent starts itself whenever Termux is opened. After
-one paste the only thing to remember is to open Termux.
+    Start a task  →  Check in  →  Step into the terminal  →  Leave it running
 
-Pasting again replaces the agent file: the download lands beside it and is
-renamed into place, which works while the old one runs (a direct write fails
-with "Text file busy") and never replaces a good agent with a failed or
-truncated download. It then stops the old agent, found by scanning `/proc` for
-its exact command line (so Termux needs no `procps`), and the shell guard starts
-the new one. Only the agent restarts; the tmux sessions it launched keep
-running. If you pasted an earlier version of this command, delete its
-`# claude-dashboard` block from `~/.bashrc` once: the guard is only appended
-when none exists, so an old one is never replaced. The guard lives in
-`~/.bashrc`, so a login shell that does not read it (zsh) never starts the
-agent.
+## Technical reference
 
-**Keeping the agent current.** Once an agent is installed the setup dialog never
-appears, so the app checks instead. After its first good poll it compares the
-SHA-256 of the agent it bundles with the `build` the running agent reports in
-`/api/hostinfo` — the crate version stays `0.1.0` across rebuilds, so it cannot
-say. If they differ, or the agent is too old to report one, the dialog opens in
-update mode with the command to paste. The download icon in the header opens the
-same dialog on demand, with the two builds side by side, to force a reinstall.
+<details>
+<summary>Platform details, session behavior, configuration, and build notes</summary>
 
-`test/install-script.test.mjs` runs that command in a scratch `$HOME` — it is
-pasted into a shell we never see, so it is tested as one, using the very
-functions `app.js` ships rather than a copy.
+### Run from source
 
-**Security.** Android does not isolate loopback between apps, and this client
-cannot yet authenticate (profiles accept only `auth: none` until the keyring
-step lands), so the agent in Termux is open to every app on the phone that holds
-the `INTERNET` permission — and the agent launches sessions with
-`--dangerously-skip-permissions`. Run it only on a phone where you trust every
-installed app. The binary the app hands to Termux is the public release
-artifact. Its loopback listener starts the first time the setup screen opens —
-not at launch — and then stays up until the app exits. It is not the sensitive
-part.
+The local agent serves the web dashboard at <strong>http://127.0.0.1:23274</strong>.
 
-**Coming from termux-claude-autoremote?** The Termux:Widget shortcut is replaced by the app icon, or by Add to home screen in a browser. Its share-sheet folder picker has no equivalent yet. Install `tmux` and `git` with `pkg install tmux git`, and Claude Code separately. The agent reports any of the three that are missing at startup.
+    cargo run -p cdash-agent
 
-## Run
+The desktop wrapper can be started with:
 
-```
-cargo run -p cdash-agent     # http://127.0.0.1:23274
-```
+    cargo run -p cdash-tauri
+
+The host needs tmux and the CLI you want to use. Codex discovery and summaries use Node.js 22 or later.
+
+### Platform details
+
+**Linux and macOS desktop.** The Tauri app starts the agent in-process. No separate server setup is needed.
+
+**Windows desktop.** The app connects to the agent in WSL 2 over localhost. Start the Linux distro, install tmux and your coding CLI there, then paste the setup command shown by the app. Choose the x64 or ARM64 build that matches the Windows machine; WSL uses the host architecture.
+
+**Android.** The app connects to an agent in F-Droid Termux. The Play Store Termux build cannot execute the agent from its private app directory. Install tmux and your coding CLI in Termux, then paste the setup command shown by RC Dashboard. The command installs or updates the agent and adds a shell guard so opening Termux starts it.
+
+**Browser and PWA.** The agent serves the web app. It caches visited pages and assets for later offline viewing. Network access still requires a reachable host and a suitable access setup.
+
+### Session behavior
+
+Sessions run in tmux. The Terminal button attaches to the session’s live CLI interface; closing the view detaches without stopping the session. External sessions that are not in tmux do not have this control.
+
+The browser terminal sends input to the CLI, so anyone who can reach it can control that session. Terminal connections check the page origin, and session APIs use the configured authentication guards. The log records terminal open and close events, not typed input.
+
+### Claude Code and Codex
+
+Both providers have separate launch and resume options. Codex model and effort choices come from the installed Codex CLI. Native Codex terminal support requires Codex CLI 0.162.1 or later. Codex model discovery and conversation summaries require Node.js 22 or later.
+
+Usage meters are shown when the provider account supports them. Claude usage comes from the same OAuth endpoint used by the CLI; it is undocumented and may change. Codex quota data comes from its account rate-limit endpoint. Missing credentials or unsupported providers hide the related meters without blocking session controls.
+
+Resumable cards can show conversation summaries. The agent reuses a suitable existing summary or generates one with the available supported subscription login. Summaries can omit or misstate details; the original session remains the source of truth. The selected conversation text is sent to the provider for summary generation. Tool payloads and thinking are omitted.
+
+Managed Codex sessions can also connect to Claude Remote Control. That bridge supports text prompts, completed replies, interruption, and command or file approval requests. Images, Codex interactive questions, and MCP elicitation are unsupported. See [CLAUDE_FINDINGS.md](CLAUDE_FINDINGS.md) for protocol notes.
+
+### Access and security settings
+
+The agent defaults to **127.0.0.1** and **CDASH_AUTH=none**. If you enable network access, configure a guard or put the origin behind a trusted access layer. Claude sessions launch with broad permissions; treat access to the agent as access to your coding session.
+
+The desktop and Android apps’ saved remote profiles currently support **auth: none**. Do not expose those connections to a public network. Android also does not isolate loopback between apps, so other apps with internet access on the phone may be able to reach a loopback agent.
+
+| Setting | Default | Purpose |
+|---|---|---|
+| **PORT** | 23274 | Listening port. Set to 0 to choose an available port. |
+| **CDASH_BIND** | 127.0.0.1 | Listen address. Network access requires an explicit bind address. |
+| **CLAUDE_DIR** | ~/.claude | Claude configuration and project directory. |
+| **DISK_EXTRA** | — | Optional second disk mount to report, such as /mnt/d. |
+| **ANTHROPIC_BASE_URL** | https://api.anthropic.com | HTTPS base URL for Claude usage lookup. |
+| **CDASH_AUTH** | none | Comma-separated guard chain: none, bearer, password, trusted-proxy, cf-access. Every configured guard must pass. |
+| **CDASH_TOKEN** | — | Token for the bearer guard. |
+| **CDASH_PASSWORD_HASH** | — | Password hash for the password guard; create it with cdash-agent set-password. |
+| **CDASH_PUBLIC_URL** | — | Required HTTPS public URL when password auth uses a non-loopback bind. |
+| **CDASH_ALLOW_INSECURE_COOKIE** | — | Set to 1 to allow password cookies over plain HTTP. |
+| **CDASH_PROXY_ALLOW** | — | Allowed source addresses for trusted-proxy. |
+| **CDASH_PROXY_HEADER** | X-Forwarded-Email | Identity header for trusted-proxy. The origin must only be reachable through that proxy. |
+| **CDASH_CF_TEAM_DOMAIN** | — | Cloudflare Access team URL, required for cf-access. |
+| **CDASH_CF_AUD** | — | Cloudflare Access application audience, required for cf-access. |
+| **CDASH_LOGIN_PENDING_MAX** | 1024 | Maximum pending password logins. |
+
+#### Cloudflare Access
+
+Set **CDASH_AUTH=cf-access**, **CDASH_CF_TEAM_DOMAIN**, and **CDASH_CF_AUD** to validate Cloudflare Access tokens. Keep the origin reachable only through Cloudflare, such as with a tunnel or a firewall rule. If the origin may be reached directly, combine Cloudflare Access with password auth.
+
+A tunnel that forwards only to loopback can use **CDASH_AUTH=none** because there is no inbound origin to bypass. Keep an auth guard if other local users or services share the host.
+
+#### Android security note
+
+Android apps share loopback access. The Android client cannot authenticate a saved remote profile yet, and the agent can control coding sessions. Use it only on a phone where you trust installed apps and keep remote access on a trusted private network.
 
 ### Release builds
 
-`scripts/release.sh` builds the five existing artifacts. The native desktop workflow builds three Tauri bundles on native Linux/macOS runners and uploads them as GitHub Actions artifacts:
+The main build script produces the agents, desktop clients, and Android APK:
 
-| Artifact | Target | Runs on |
-|---|---|---|
-| `cdash-agent` | `x86_64-unknown-linux-musl` | VPS, WSL |
-| `cdash-agent` | `aarch64-unknown-linux-musl` | VPS, Termux on Android (F-Droid Termux — see the design doc's Android section) |
-| `cdash-tauri-linux-x64.AppImage` | `x86_64-unknown-linux-gnu` | Linux desktop (x64), with in-process agent |
-| `cdash-tauri-linux-arm64.AppImage` | `aarch64-unknown-linux-gnu` | Linux desktop (ARM64), with in-process agent |
-| `cdash-tauri.exe` | `x86_64-pc-windows-msvc` | Windows desktop client (x64), bundling the x86_64 agent |
-| `cdash-tauri.exe` | `aarch64-pc-windows-msvc` | Windows desktop client (ARM64), bundling the aarch64 agent |
-| `cdash-tauri-macos-arm64.dmg` | `aarch64-apple-darwin` | macOS desktop (Apple Silicon), with in-process agent |
-| `cdash-dashboard-android-arm64.apk` | `aarch64-linux-android` | Android thin client |
+    scripts/toolchain.sh --accept-licenses
+    scripts/build-all.sh
 
-Linux AppImages and the unsigned macOS DMG are built by `.github/workflows/native-desktop.yml`. Linux ARM64 AppImages require a native ARM runner. The macOS DMG is unsigned for now, so Gatekeeper may block first launch until the user allows it in Privacy & Security. Download those three Actions artifacts and attach the files to a GitHub Release when publishing.
+The toolchain is pinned in **scripts/toolchain-env.sh**. Use **scripts/build-all.sh --no-apk** when Android tools are not installed. The native desktop workflow builds Linux AppImages and a macOS DMG.
 
-Both agents are **booted** as the release gate — the gate is the startup banner,
-since a binary that dies instantly would otherwise pass. The Windows client
-cannot run on a Linux builder, so its gate is that it links, which is also the
-gate on the `cfg(not(windows))` split that keeps the agent out of it.
+| Artifact | Target |
+|---|---|
+| cdash-agent | Linux x86_64 or ARM64 |
+| cdash-tauri-linux-x64.AppImage | Linux desktop, x64 |
+| cdash-tauri-linux-arm64.AppImage | Linux desktop, ARM64 |
+| cdash-tauri.exe | Windows desktop, x64 or ARM64 |
+| cdash-tauri-macos-arm64.dmg | macOS, Apple Silicon |
+| cdash-dashboard-android-arm64.apk | Android, ARM64 |
 
-The APK step is skipped unless `ANDROID_HOME` and `NDK_HOME` are set, and
-`gen/android/` is regenerated on every run rather than tracked. Two things about
-it are worth knowing:
+The macOS DMG is unsigned, so Gatekeeper may require allowing it in Privacy & Security. The Android build is release-compiled and signed with the local SDK debug key; it is suitable for testing, not store distribution.
 
-- It builds **release**, then signs with the SDK's debug key. Android refuses to
-  install an unsigned APK at all, so "unsigned" is not a shippable state — the
-  debug key is a local test signature, not a distribution one. The debug *build*
-  is not the answer: its unstripped `.so` makes a 138 MB APK, against 21 MB for
-  release.
-- Gradle enables cleartext HTTP for debug only, so the script patches the
-  release build type to allow it, as insurance for any WebView traffic to
-  `http://localhost:23274`. The client's own API calls go through native sockets,
-  which Android's cleartext policy is not expected to gate, so the patch may
-  prove unnecessary; it has not been tested either way on a device.
+### Branding and icons
 
-**Setting up and building, repeatably.** On a Linux x86_64 host (Ubuntu, Debian,
-WSL2) with `rustup`, two scripts do everything below without root:
+RC Dashboard uses the pixel Clawd mascot and S2 broadcast signal. Launcher icons use the fixed ink-and-apricot palette; the header and favicon follow the selected light or dark theme.
 
-```
-scripts/toolchain.sh --accept-licenses   # once: ~8 GB under ~/.cdash-toolchain
-scripts/build-all.sh                     # builds all five, into dist/ with SHA256SUMS.txt
-```
+The editable web sources are **public/icon.svg** and **public/icon-light.svg**. The Tauri icon manifest is **crates/tauri-app/icons/source.json**. Regenerate native assets with the pinned Tauri CLI 2.12.1. Keep the PWA maskable artwork and Android foreground inside their safe regions.
 
-`toolchain.sh` is idempotent (re-run it to resume or repair; `--check` only
-reports; `--skip-android` leaves out the JDK and Android SDK; `CDASH_TOOLCHAIN`
-moves the directory), pins every version in `scripts/toolchain-env.sh`, and
-requires `--accept-licenses` because it pulls in the Android SDK and Microsoft's
-CRT/SDK terms. `build-all.sh --no-apk` needs no Android toolchain, and it checks
-that each client really embeds the agent for its own architecture. To build by
-hand: `. scripts/toolchain-env.sh && sh scripts/release.sh`. The first APK build
-also downloads gradle and Android platform packages (a few hundred MB). What the
-scripts install, if you would rather do it yourself:
-
-Prereqs: `rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-msvc aarch64-pc-windows-msvc`,
-`pip install ziglang && cargo install cargo-zigbuild`,
-`cargo install cargo-xwin`, `sudo apt install clang lld qemu-user-static`, and
-for the APK `cargo install tauri-cli --version "^2"` plus an Android SDK, an
-NDK, the `aarch64-linux-android` Rust target and a JDK (`keytool` creates the
-debug keystore if you have none). Use the **Rust** Tauri CLI, not the npm one: the npm CLI templates
-`node tauri` into the generated gradle, which only resolves in an npm-layout
-project, and this is a Rust workspace.
-
-`cargo-zigbuild` supplies musl libc and a cross C compiler for `aws-lc-sys` from
-one download, replacing both `musl-tools` and the [musl.cc](https://musl.cc)
-toolchain that stopped responding and took every release build down with it. CI
-gates the two musl targets through `taiki-e/setup-cross-toolchain-action`
-instead, which serves the same purpose on a runner.
-
-The `aarch64` binary is confirmed working on-device under Termux (Android, 2026-08-29): UI, host stats and live session data all functional.
-
-Requires `tmux`, `claude` and `git` on `PATH`; the agent reports any that are missing at startup.
-
-### Managed Codex sessions
-
-Managed sessions use names such as `[Codex] claude-dashboard · elephant` or
-`[Claude] claude-dashboard · rabbit` in the dashboard and Claude Remote Control.
-Animals come from a pool of 32 familiar animals and stay the same on resume.
-Duplicate display names are allowed, with no numeric suffixes.
-Codex stores the animal label separately from its model and effort metadata.
-
-Choose a **GPT** model in the launcher, choose a supported effort, then launch.
-The agent discovers model names and efforts through Codex's `model/list` RPC,
-refreshing the catalog every minute. Labels use the returned display name
-(for example, **GPT-6.1-Sol**) without a Codex prefix. New catalog entries need
-no dashboard update; discovery still depends on the installed Codex CLI and
-its account/provider catalog. Codex and Node are optional: if either is absent,
-or Codex requires authentication and is signed out, only Claude launch options
-appear, without recurring discovery errors. Run `codex login` on the agent host
-to enable GPT options; the catalog refreshes within a minute. Providers that do
-not require OpenAI authentication remain usable without a ChatGPT login.
-Launch and resume recheck Codex credentials before creating a tmux pane, even
-when the picker has a cached catalog. Other discovery failures clear stale GPT
-options and show the error while keeping Claude launch options available.
-The usage strip includes **Claude Session/Week** and **Codex Session/Week**
-with reset times. Codex quotas come from `account/rateLimits/read`, refreshed
-in the background every five minutes, matching Claude's refresh interval.
-Failed Codex refreshes hide old numbers and back off before retrying; Claude
-retains its existing five-minute cache policy. Metadata queries allow 10 seconds
-per RPC and 12 seconds overall, inside a separate 15-second subprocess budget;
-they never block the session poll. Other returned quota buckets carry their own labels. Missing Codex/Node,
-signed-out Codex, and API-key-only providers quietly omit Codex quota tiles;
-Claude usage and session controls remain available. Model availability and
-subscription quota availability are independent.
-New and resumed Codex sessions run the native Codex TUI in tmux. **Terminal**
-opens that TUI with working navigation keys and scrolling; **Open in Claude**
-controls the same thread through Remote Control. Both clients share one local
-app-server over a private Unix socket. Codex CLI **0.162.1 or later** is required.
-Codex uses the selected model and effort with its existing permissions.
-Closing the terminal overlay only detaches. Quitting the TUI or killing its
-session stops the owned backend and bridge; a Remote Control process failure
-leaves the native TUI usable. Existing running sessions keep their old bridge
-until deliberately relaunched or resumed, and do not offer native terminal
-controls. No active session is restarted automatically.
-Running sessions show their effective model, display name, and effort.
-Resumable cards show the model each session last used and have model and
-effort pickers, preselected to it; **Resume** applies what is selected, for
-Claude and Codex sessions alike. A session only resumes with its own
-provider's models, because a Claude transcript and a Codex thread cannot stand
-in for each other. For Codex the model and effort come from Codex's own state
-database (`state_N.sqlite` under `$CODEX_HOME`, read-only through `node:sqlite`),
-so a thread you continued elsewhere shows what it actually ran with; the
-dashboard keeps no copy. If that database cannot be read, Codex sessions are
-left out of the resumable list.
-
-Resumable cards also show an expandable conversation summary (four sentences
-for generated summaries). Current readable Claude/Codex compaction summaries
-are reused when already suitable; otherwise the agent summarizes conversation
-text with **GPT-6 Luna Low**, falling back to **Claude Haiku 5.5 Low**. Both use
-the same prompt and output schema. Luna checks ChatGPT login, the same quota
-RPCs as the Session/Week meters, and model availability. Haiku requires a
-Claude subscription login. API-key credentials are excluded; summary calls
-consume the selected subscription's allowance.
-
-This requires Node.js 22+ on the agent host, plus either supported CLI login.
-Summary calls were verified with Codex CLI 0.162.1 and Claude Code 2.1.301;
-unsupported CLI versions retain the existing preview when generation fails.
-The summary process disables tools, project instructions, skills, hooks and
-MCP servers. Only text from the selected resumable conversations goes to the
-provider; thinking and tool payloads are omitted. Running-session peeks keep
-their existing last reply behavior.
-
-Summaries are cached privately in `~/.claude/cdash-summaries` (under the configured
-Claude directory when overridden). Restarting checks the cache without repeating
-unchanged inference; metadata-only updates also reuse it. Append-only updates
-send the previous summary and new turns, while rewritten histories reset context.
-Only listed cards are queued, newest first, with one generation at a time and
-a five-minute retry delay on failure. Existing previews remain usable while work
-is queued or unavailable. Very large first summaries retain the opening and newest
-text within a 180,000-character budget, so middle-history details can be missed.
-Generated summaries can omit or misstate details; the original session remains
-the source of truth. Delete the cache directory to clear stored summaries.
-
-The pane accepts text prompts; it is a bridge console rather than the native
-Codex TUI. `/quit` stops it. Only sessions created by this dashboard are added
-to its Codex resume list.
-
-Requires Node.js 22+, `codex`, and a `claude` login eligible for Remote Control,
-all on the agent's PATH. This also applies on Termux and inside WSL. Tested
-with Claude Code 2.1.296 and Codex CLI 0.162.1. Rebuild/restart the agent to use
-the new launcher option.
-
-Claude's authenticated Remote Control runner registers the session and launches
-the bridge through its process wrapper. The bridge drives
-[Codex app-server](https://learn.chatgpt.com/docs/app-server), sends replies to
-Claude's session transport, and preserves the Codex thread ID across resumes.
-Each pane has a separate runner directory under `$CLAUDE_DIR/cdash-codex/controls`
-so Claude cannot reuse another conversation's Remote Control link. Claude's
-remote directory label refers to that runner directory; Codex executes in the
-project directory you selected. Session metadata lives in
-`$CLAUDE_DIR/cdash-codex`, alongside an embedded bridge script materialized at
-launch; no npm install is needed.
-
-Native sessions retry a failed Claude Remote Control connection for as long as
-the session runs, without replacing the Codex thread or terminal. The delay
-doubles from 1 second up to 1 minute, and starts over after any connection that
-came up, so drops spread over days never exhaust a budget. Exit code 0 counts as
-a failure too: Remote Control exits 0 when its worker fails. An established
-Claude connection uses `--continue` when reconnecting. Every failure's
-timestamp, consecutive count, exit status, signal, and next delay are recorded
-in the runner's `native.log`; private diagnostics are in `remote-debug.log`.
-The card shows “Waiting for link…” during startup and the first three retries,
-then directs you to Terminal while retries continue in the background.
-
-The Claude worker protocol is undocumented and can change. Text prompts,
-completed replies, interruption, and command/file approval requests are mapped.
-Images, Codex interactive questions, and MCP elicitation are currently unsupported
-and fail closed. Replies appear when each Codex message completes. A worker
-restart skips previously accepted remote events; if it crashed while dispatching
-a prompt, resend that prompt explicitly. Claude ingress credentials stay out of
-Codex's subprocess environment and are never written to the session snapshots.
-
-Recovered protocol findings and live checks: [CLAUDE_FINDINGS.md](CLAUDE_FINDINGS.md).
-
-## Configuration
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `PORT` | `23274` | Port to listen on. `0` picks any free port. **Breaking change:** the default was `8080`, so a tunnel, unit file or bookmark that relied on it must set `PORT=8080` or move. The default is CDASH on a phone keypad, picked to collide with nothing: below the 32768 ephemeral range so the kernel never hands it out, and clear of 3000/5000/8000/8080/8888. |
-| `CDASH_BIND` | `127.0.0.1` | Address to bind. **Breaking change:** the Node agent bound every interface. LAN access now requires setting `CDASH_BIND=0.0.0.0` explicitly. |
-| `CLAUDE_DIR` | `~/.claude` | Path to the Claude config/projects directory. The subscription token for usage limits is read from `$CLAUDE_DIR/.credentials.json`. |
-| `DISK_EXTRA` | — | Optional second mount to report alongside `/`, e.g. `/mnt/d`. |
-| `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | API base for the usage-limits lookup. Only `https://` or a loopback `http://` URL is honoured — the subscription token is sent there, so anything else is ignored in favour of the default. |
-| `CDASH_AUTH` | `none` | Comma-composable guard chain, **AND** semantics: `none`, `bearer`, `password`, `trusted-proxy`, `cf-access`. An unknown value refuses to boot rather than falling back to `none`. |
-| `CDASH_TOKEN` | — | Required by `bearer`. |
-| `CDASH_PASSWORD_HASH` | — | Required by `password`. Produce it with `cdash-agent set-password`. |
-| `CDASH_PUBLIC_URL` | — | Required by `password` on a non-loopback bind, and must be `https://` — `__Host-` cookies are discarded by browsers over plain HTTP with no error. |
-| `CDASH_ALLOW_INSECURE_COOKIE` | — | `1` accepts session theft on a plain-HTTP origin; drops `Secure` and the `__Host-` prefix together. |
-| `CDASH_PROXY_ALLOW` / `CDASH_PROXY_HEADER` | — / `X-Forwarded-Email` | Required by `trusted-proxy`. Unsafe unless the origin is unreachable except through the proxy. |
-| `CDASH_CF_TEAM_DOMAIN` / `CDASH_CF_AUD` | — | Required by `cf-access`. |
-| `CDASH_LOGIN_PENDING_MAX` | `1024` | Bound on delayed logins pending at once. |
-
-### `cf-access`
-
-For a VPS behind Cloudflare Access. Cloudflare authenticates the user with your
-team's identity provider and injects a signed `Cf-Access-Jwt-Assertion` header;
-the agent verifies it against Cloudflare's public keys. There is no cdash
-password — one identity, managed in Cloudflare, and adding or revoking a person
-changes nothing on the box.
-
-```
-CDASH_AUTH=cf-access
-CDASH_CF_TEAM_DOMAIN=https://yourteam.cloudflareaccess.com
-CDASH_CF_AUD=<the Application Audience tag>
-```
-
-The key set is fetched at startup and refreshed hourly, so Cloudflare's key
-rotation is invisible. **If the keys cannot be fetched the agent refuses to
-start**, naming the reason on stderr — rather than starting and returning 401 to
-someone who just authenticated successfully. A failed *refresh* keeps the last
-good key set, so a brief Cloudflare outage does not lock anyone out.
-
-**Keep the origin unreachable except through Cloudflare** — a `cloudflared`
-tunnel, or a firewall allowing only Cloudflare's addresses. Anyone who can reach
-the origin directly skips Access entirely and lands on an agent that launches
-sessions with `--dangerously-skip-permissions`. If the origin might be
-reachable, use `CDASH_AUTH=password,cf-access`, which requires both.
-
-**Behind a `cloudflared` tunnel, `CDASH_AUTH=none` is enough.** The tunnel dials
-outward and proxies to loopback, so there is no inbound port to bypass and
-nothing for a guard to protect; Cloudflare's own documentation says a tunnelled
-origin need not validate the token. Keep `cf-access` on anyway if **other users
-or services share the box** — with `none`, any local user reaching
-`127.0.0.1:23274` gets code execution as *you*, which is a real escalation rather
-than a no-op. `bearer` does not substitute here: browsers do not send
-`Authorization` headers.
-
-The terminal's Origin check compares the browser's `Origin` with the `Host` the agent receives. Cloudflare's documentation does not say whether `cloudflared` passes the original `Host` through unchanged by default (it documents only `originRequest.httpHostHeader`, which sets the `Host` sent to the origin), so behind a tunnel set `CDASH_PUBLIC_URL` to the public `https://` address, which is always safe.
-
-The JWKS fetch is gated on `cf-access` being in the chain, not on the two
-`CDASH_CF_*` variables being set, so leaving them in a unit file after switching
-to `none` does not couple boot to Cloudflare's availability.
-
-## Branding and icons
-
-RC Dashboard uses the pixel Clawd mascot with the S2 broadcast signal. Launcher/install icons use the fixed Ink + apricot palette (P1). The header and favicon follow the app theme: Paper + rust (P6) in light mode and P1 in dark mode, including a manual theme override. Application identifiers, commands, settings paths and release artifact names retain their existing `cdash` names for compatibility.
-
-The editable web sources are `public/icon.svg` (P1) and `public/icon-light.svg` (P6). The Tauri icon manifest is `crates/tauri-app/icons/source.json`; run `cargo tauri icon icons/source.json` from `crates/tauri-app` with the pinned Tauri CLI to regenerate native assets. `scripts/release.sh` uses the same manifest after Android initialization. The Android foreground keeps the artwork inside its safe region, with a full-bleed ink background. Its 75% foreground setting controls the older, flattened launcher icons.
-
-The PWA provides 192/512 px PNGs plus a separate maskable icon derived from `crates/tauri-app/icons/maskable.svg`. The inset preserves the signal under launcher masks. To regenerate web PNGs, use `cargo tauri icon <source.svg> --output <temporary-directory> --png <sizes>`: `32,192,512` for P1, `32` for P6, and `512` for the maskable source. Copy the generated PNGs to their corresponding `public/icon-*.png` paths. Keep the derived Android foreground and maskable SVG artwork in sync with the P1 source.
+</details>
