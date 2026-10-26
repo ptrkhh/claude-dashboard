@@ -5,7 +5,7 @@
 </p>
 
 <p align="center"><strong>Leave the terminal. Keep the thread.</strong></p>
-<p align="center">Remote control for Claude Code and Codex.</p>
+<p align="center">Remote control for Claude Code.</p>
 
 Start a coding session on the machine where your project lives. Check its progress from another connected screen. Open the live terminal when it needs you. Close the dashboard when you’re ready; the session keeps running.
 
@@ -13,11 +13,11 @@ Start a coding session on the machine where your project lives. Check its progre
 
 ## Start at your desk. Pick up anywhere you can connect.
 
-A coding task can keep moving while you switch projects, leave your desk, or take a break. RC Dashboard keeps Claude Code and Codex sessions together in one clear view, so you can check in without babysitting a terminal.
+A coding task can keep moving while you switch projects, leave your desk, or take a break. RC Dashboard keeps Claude Code sessions together in one clear view, so you can check in without babysitting a terminal.
 
 - **See what’s happening.** Scan active and resumable sessions, recent replies, model, host health, and live logs. Usage meters and conversation summaries appear when available.
 - **Step in when it matters.** Open a session’s real terminal, send the next instruction, or interrupt it. Close the terminal view and the session stays alive.
-- **Pick up where you left off.** Resume a previous Claude Code or Codex session, then carry on with its provider and project.
+- **Pick up where you left off.** Resume a previous Claude Code session, then carry on with its project.
 - **Use the screen that suits the moment.** Open the web dashboard, desktop app, or Android app.
 
 ## A look inside
@@ -25,7 +25,7 @@ A coding task can keep moving while you switch projects, leave your desk, or tak
 <table>
   <tr><th align="center">Desktop</th><th align="center">Phone</th></tr>
   <tr>
-    <td width="68%" valign="top"><img src="docs/screenshots/dashboard-desktop.png" alt="RC Dashboard desktop view with active and resumable Claude Code and Codex sessions" width="680" /></td>
+    <td width="68%" valign="top"><img src="docs/screenshots/dashboard-desktop.png" alt="RC Dashboard desktop view with active and resumable Claude Code sessions" width="680" /></td>
     <td width="32%" valign="top"><img src="docs/screenshots/dashboard-mobile.png" alt="RC Dashboard running sessions on a phone" width="280" /></td>
   </tr>
 </table>
@@ -43,7 +43,7 @@ A coding task can keep moving while you switch projects, leave your desk, or tak
 ## Quick start
 
 1. [Download the app for your platform](https://github.com/ptrkhh/claude-dashboard/releases/latest).
-2. On the machine where sessions will run, install tmux and Claude Code, Codex, or both.
+2. On the machine where sessions will run, install tmux and Claude Code.
 3. Open RC Dashboard. Linux and macOS desktop apps start the agent with the app. On Windows and Android, follow the one-time setup prompt for WSL or F-Droid Termux.
 4. Choose a project, launch a session, and come back to it when you need to.
 
@@ -83,7 +83,7 @@ The desktop wrapper can be started with:
 
     cargo run -p cdash-tauri
 
-The host needs tmux and the CLI you want to use. Codex discovery and summaries use Node.js 22 or later.
+The host needs tmux and Claude Code. Node.js 22 or later is needed for conversation summaries.
 
 ### Platform details
 
@@ -101,15 +101,11 @@ Sessions run in tmux. The Terminal button attaches to the session’s live CLI i
 
 The browser terminal sends input to the CLI, so anyone who can reach it can control that session. Terminal connections check the page origin, and session APIs use the configured authentication guards. The log records terminal open and close events, not typed input.
 
-### Claude Code and Codex
+### Claude Code sessions
 
-Both providers have separate launch and resume options. Codex model and effort choices come from the installed Codex CLI. Native Codex terminal support requires Codex CLI 0.162.1 or later. Codex model discovery and conversation summaries require Node.js 22 or later.
-
-Usage meters are shown when the provider account supports them. Claude usage comes from the same OAuth endpoint used by the CLI; it is undocumented and may change. Codex quota data comes from its account rate-limit endpoint. Missing credentials or unsupported providers hide the related meters without blocking session controls.
+Launch or resume Claude Code sessions from the dashboard. Model and effort choices come from the installed Claude Code CLI. When the Claude account supports usage lookup, meters use the same undocumented OAuth endpoint as the CLI; that endpoint may change. Missing credentials hide usage meters without blocking session controls.
 
 Resumable cards can show conversation summaries. The agent reuses a suitable existing summary or generates one with the available supported subscription login. Summaries can omit or misstate details; the original session remains the source of truth. The selected conversation text is sent to the provider for summary generation. Tool payloads and thinking are omitted.
-
-Managed Codex sessions can also connect to Claude Remote Control. That bridge supports text prompts, completed replies, interruption, and command or file approval requests. Images, Codex interactive questions, and MCP elicitation are unsupported. See [CLAUDE_FINDINGS.md](CLAUDE_FINDINGS.md) for protocol notes.
 
 ### Access and security settings
 
