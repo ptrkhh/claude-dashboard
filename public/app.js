@@ -734,9 +734,9 @@ let timer = null;
 let gen = 0; // stale-tick guard: a superseded tick's result is dropped
 let polled = false; // has any tick actually run to completion?
 
-function arm() {
+function arm(delay = cdashBackoff.delay(bk)) {
   clearTimeout(timer);
-  timer = setTimeout(tick, cdashBackoff.delay(bk));
+  timer = setTimeout(tick, delay);
 }
 
 async function tick() {
@@ -747,7 +747,7 @@ async function tick() {
   // the listener below is attached — which left the app arming forever on
   // "Connecting…", with no request ever sent.
   if (document.hidden && polled) { arm(); return; }
-  let outcome;
+  let outcome, waitingForLink = false;
   try {
     const data = await api(`/api/sessions?resumable=${resLimit}`);
     if (g !== gen) return; // superseded mid-flight: never paint the old snapshot
@@ -758,6 +758,7 @@ async function tick() {
     refreshModels(g);
     checkAgent();
     outcome = 'ok';
+    waitingForLink = data.running.some(s => !s.external && !s.rcLink && !s.rcUnavailable);
   } catch (err) {
     if (g !== gen) return;
     // Only transport errors and 401/403 reach here as distinct things;
@@ -778,7 +779,7 @@ async function tick() {
   if (g !== gen) return;
   polled = true;
   bk = cdashBackoff.next(bk, outcome);
-  if (!bk.halted) arm();
+  if (!bk.halted) arm(waitingForLink ? 2000 : cdashBackoff.delay(bk));
 }
 
 // Any user-initiated action (launch, kill, resume, purge) calls poll():
