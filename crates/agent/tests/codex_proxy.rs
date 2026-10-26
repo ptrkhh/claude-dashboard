@@ -3,6 +3,7 @@ use futures_util::{SinkExt, StreamExt};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::test]
@@ -64,10 +65,49 @@ async fn proxy_preserves_jsonl_unicode_ping_and_eof() {
 }
 
 #[tokio::test]
+async fn proxy_authenticates_to_a_loopback_backend() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    #[allow(clippy::disallowed_types)] // Exercise the real CLI boundary.
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_cdash-agent"))
+        .args(["codex-proxy", &url])
+        .env("CDASH_CODEX_TOKEN", "test-token")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let (stream, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+        .await
+        .expect("proxy did not connect to the loopback backend")
+        .unwrap();
+    let mut auth = None;
+    #[allow(clippy::result_large_err)] // Tungstenite requires this callback's unboxed error type.
+    let capture = |req: &Request, res: Response| -> Result<Response, ErrorResponse> {
+        auth = req.headers().get("authorization").cloned();
+        Ok(res)
+    };
+    let mut ws = tokio_tungstenite::accept_hdr_async(stream, capture).await.unwrap();
+    assert_eq!(auth.unwrap().to_str().unwrap(), "Bearer test-token");
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(b"{\"id\":1}\n").await.unwrap();
+    assert_eq!(ws.next().await.unwrap().unwrap().into_text().unwrap(), r#"{"id":1}"#);
+    drop(input);
+    assert!(matches!(ws.next().await.unwrap().unwrap(), Message::Close(_)));
+    let _ = ws.close(None).await;
+    assert!(tokio::time::timeout(Duration::from_secs(3), child.wait())
+        .await
+        .unwrap()
+        .unwrap()
+        .success());
+}
+
+#[tokio::test]
 async fn proxy_errors_do_not_start_a_dashboard_server() {
     for args in [
         vec!["codex-proxy"],
         vec!["codex-proxy", "/no/such/cdash/socket"],
+        vec!["codex-proxy", "ws://127.0.0.1:9"],
     ] {
         #[allow(clippy::disallowed_types)] // CLI argument and connection error boundary.
         let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_cdash-agent"))
