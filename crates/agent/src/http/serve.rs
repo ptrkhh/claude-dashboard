@@ -131,6 +131,30 @@ async fn embedded_asset(uri: OriginalUri) -> Response {
             "image/svg+xml",
             include_bytes!("../../../../public/icon.svg"),
         ),
+        "icon-light.svg" => (
+            "image/svg+xml",
+            include_bytes!("../../../../public/icon-light.svg"),
+        ),
+        "icon-32.png" => (
+            "image/png",
+            include_bytes!("../../../../public/icon-32.png"),
+        ),
+        "icon-light-32.png" => (
+            "image/png",
+            include_bytes!("../../../../public/icon-light-32.png"),
+        ),
+        "icon-192.png" => (
+            "image/png",
+            include_bytes!("../../../../public/icon-192.png"),
+        ),
+        "icon-512.png" => (
+            "image/png",
+            include_bytes!("../../../../public/icon-512.png"),
+        ),
+        "icon-maskable.png" => (
+            "image/png",
+            include_bytes!("../../../../public/icon-maskable.png"),
+        ),
         "transport/backoff.js" => (
             "text/javascript; charset=utf-8",
             include_bytes!("../../../../public/transport/backoff.js"),

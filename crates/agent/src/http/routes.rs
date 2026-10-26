@@ -502,7 +502,37 @@ mod tests {
     async fn embedded_ui_is_served() {
         let b = serve(cfg_for(tempdir("embedded-ui"))).await.unwrap();
         let body = reqwest_get(&format!("http://{}/", b.addr)).await;
-        assert!(body.contains("<title>Claude Dashboard</title>"));
+        assert!(body.contains("<title>RC Dashboard</title>"));
+    }
+
+    #[tokio::test]
+    async fn branding_assets_and_manifest_icons_are_embedded() {
+        let b = serve(cfg_for(tempdir("branding-assets"))).await.unwrap();
+        let base = format!("http://{}", b.addr);
+        let client = reqwest::Client::new();
+        let manifest: serde_json::Value =
+            serde_json::from_str(&reqwest_get(&format!("{base}/manifest.json")).await).unwrap();
+        let mut paths = vec!["icon-light.svg", "icon-32.png", "icon-light-32.png"];
+        for icon in manifest["icons"].as_array().unwrap() {
+            paths.push(icon["src"].as_str().unwrap());
+        }
+        for path in paths {
+            let response = client.get(format!("{base}/{path}")).send().await.unwrap();
+            assert_eq!(response.status(), 200, "{path} is embedded");
+            let png = path.ends_with(".png");
+            assert_eq!(
+                response.headers()["content-type"],
+                if png { "image/png" } else { "image/svg+xml" },
+                "{path} has the right content type"
+            );
+            let bytes = response.bytes().await.unwrap();
+            if png {
+                assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "{path} is a PNG");
+            } else {
+                assert!(std::str::from_utf8(&bytes).unwrap().contains("<svg"));
+            }
+        }
+        b.stop().await;
     }
 
     #[tokio::test]
