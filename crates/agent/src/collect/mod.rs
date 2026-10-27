@@ -4,6 +4,7 @@ pub mod git;
 pub mod ctx;
 pub mod lookup;
 pub mod places;
+pub mod pins;
 pub mod browse;
 pub mod validate;
 pub mod term;

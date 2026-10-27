@@ -142,6 +142,12 @@ pub struct SidBody {
 }
 
 #[derive(Deserialize)]
+pub struct PinBody {
+    pub sid: String,
+    pub pinned: bool,
+}
+
+#[derive(Deserialize)]
 pub struct ResumeBody {
     #[serde(default)]
     pub sid: String,
@@ -166,6 +172,14 @@ pub async fn post_favorites(
         message: e.to_string(),
     })?;
     Ok(Json(places).into_response())
+}
+
+pub async fn post_pin(
+    State(ctx): State<Arc<Ctx>>,
+    Json(body): Json<PinBody>,
+) -> Result<Response, ApiError> {
+    crate::collect::pins::set_pin(&ctx, &body.sid, body.pinned).await?;
+    Ok(Json(serde_json::json!({ "ok": true })).into_response())
 }
 
 pub async fn post_launch(
@@ -294,11 +308,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sessions_returns_the_three_top_level_keys() {
+    async fn pins_are_persistent_idempotent_and_can_be_removed() {
+        let d = tempdir("pins");
+        let sid = "01234567-1234-1234-1234-0123456789ab";
+        let b = serve(cfg_for(d.clone())).await.unwrap();
+        let url = format!("http://{}/api/pin", b.addr);
+        let pin = serde_json::json!({"sid":sid,"pinned":true}).to_string();
+        for _ in 0..2 {
+            let (status, _) = http_post(&url, &pin).await;
+            assert_eq!(status, 200);
+        }
+        let saved: Vec<String> = serde_json::from_str(&std::fs::read_to_string(d.join("cdash-pins.json")).unwrap()).unwrap();
+        assert_eq!(saved, vec![sid]);
+        let (status, _) = http_post(&url, &serde_json::json!({"sid":sid,"pinned":false}).to_string()).await;
+        assert_eq!(status, 200);
+        assert_eq!(std::fs::read_to_string(d.join("cdash-pins.json")).unwrap(), "[]");
+    }
+
+    #[tokio::test]
+    async fn pin_rejects_invalid_input_and_preserves_corrupt_state() {
+        let d = tempdir("pins-invalid");
+        let b = serve(cfg_for(d.clone())).await.unwrap();
+        let url = format!("http://{}/api/pin", b.addr);
+        let (status, _) = http_post(&url, r#"{"sid":"../bad","pinned":true}"#).await;
+        assert_eq!(status, 400);
+        assert!(!d.join("cdash-pins.json").exists());
+        for body in [r#"{"sid":"01234567-1234-1234-1234-0123456789ab"}"#, r#"{"sid":"01234567-1234-1234-1234-0123456789ab","pinned":"yes"}"#] {
+            assert_eq!(http_post(&url, body).await.0, 422);
+        }
+        std::fs::write(d.join("cdash-pins.json"), "broken").unwrap();
+        let (status, _) = http_post(&url, r#"{"sid":"01234567-1234-1234-1234-0123456789ab","pinned":true}"#).await;
+        assert_eq!(status, 500);
+        assert_eq!(std::fs::read_to_string(d.join("cdash-pins.json")).unwrap(), "broken");
+        std::fs::remove_file(d.join("cdash-pins.json")).unwrap();
+        std::fs::create_dir(d.join("cdash-pins.json")).unwrap();
+        let (status, _) = http_post(&url, r#"{"sid":"01234567-1234-1234-1234-0123456789ab","pinned":true}"#).await;
+        assert_eq!(status, 500);
+    }
+
+    #[tokio::test]
+    async fn concurrent_pin_requests_keep_both_sessions() {
+        let d = tempdir("pins-concurrent");
+        let b = serve(cfg_for(d.clone())).await.unwrap();
+        let url = format!("http://{}/api/pin", b.addr);
+        let (a, b) = tokio::join!(
+            http_post(&url, r#"{"sid":"01234567-1234-1234-1234-0123456789ab","pinned":true}"#),
+            http_post(&url, r#"{"sid":"01234567-1234-1234-1234-0123456789ac","pinned":true}"#)
+        );
+        assert_eq!((a.0, b.0), (200, 200));
+        let saved: Vec<String> = serde_json::from_str(&std::fs::read_to_string(d.join("cdash-pins.json")).unwrap()).unwrap();
+        assert_eq!(saved.len(), 2);
+        assert!(saved.contains(&"01234567-1234-1234-1234-0123456789ab".into()));
+        assert!(saved.contains(&"01234567-1234-1234-1234-0123456789ac".into()));
+    }
+
+    #[tokio::test]
+    async fn sessions_returns_the_four_top_level_keys() {
         let b = serve(cfg_for(tempdir("sessions"))).await.unwrap();
         let body = reqwest_get(&format!("http://{}/api/sessions", b.addr)).await;
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(v["running"].is_array());
+        assert!(v["pinned"].is_array());
         assert!(v["resumable"].is_array());
         assert!(v["stats"]["ramTotalKb"].is_number());
     }

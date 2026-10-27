@@ -39,6 +39,7 @@ crate::guarded_routes! {
     get "/api/term" => routes::get_term,
     get "/api/models" => routes::get_models,
     post "/api/favorites" => routes::post_favorites,
+    post "/api/pin" => routes::post_pin,
     post "/api/launch" => routes::post_launch,
     post "/api/resume" => routes::post_resume,
     post "/api/kill" => routes::post_kill,

@@ -35,6 +35,7 @@ const ICONS = {
   folder: svg('<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>'),
   chevronRight: svg('<path d="M9 6l6 6-6 6"/>'),
   clock: svg('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'),
+  pin: svg('<path d="M16 3l5 5-4 1-3 5v3l-7-7h3l5-3zM3 21l6-6"/>'),
   star: svg('<path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.5 9.7l5.9-.9z"/>'),
   starFilled: `<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.5 9.7l5.9-.9z"/></svg>`,
 };
@@ -287,6 +288,7 @@ function runningCard(r) {
 }
 
 let lastRes = [];
+let lastPinned = [];
 // A session resumes only with its own provider's models: a Claude transcript and
 // a Codex thread cannot stand in for each other. Everything shown is concrete
 // (the model and effort the session last ran with); there is no "default" entry.
@@ -320,9 +322,9 @@ function pickHtml(s) {
     </div>`;
 }
 
-function resumableCard(s) {
+function resumableCard(s, pinned = false) {
   return `
-    <div class="session resumable">
+    <div class="session resumable${pinned ? ' pinned' : ''}">
       <div class="session-head">
         <div class="session-headline">
           <span class="session-title">${esc(s.displayName || s.dir?.split('/').pop() || '?')}</span>
@@ -335,25 +337,32 @@ function resumableCard(s) {
       ${pickHtml(s)}
       <div class="actions">
         <button class="action" type="button" data-resume="${esc(s.sid)}">${ICONS.refresh}<span>Resume</span></button>
+        <button class="action pin" type="button" data-pin="${esc(s.sid)}" aria-pressed="${pinned}">${ICONS.pin}<span>${pinned ? 'Unpin' : 'Pin'}</span></button>
         <button class="action ghost" type="button" data-purge="${esc(s.sid)}" aria-label="Purge from list">${ICONS.trash}</button>
       </div>
     </div>`;
 }
 
 function renderResumable() {
-  const expanded = new Set([...$('#resumable').querySelectorAll('details[open]')].map(el => el.dataset.summary));
   const focused = document.activeElement?.closest('details[data-summary]')?.dataset.summary;
-  // A full page means there may be more; a short one is the whole list (or the server's ceiling).
-  const more = lastRes.length >= resLimit ? '<button class="action more" type="button" data-more>Show more…</button>' : '';
-  $('#resumable').innerHTML = (lastRes.map(resumableCard).join('') || '<div class="empty">No resumable sessions</div>') + more;
-  for (const el of $('#resumable').querySelectorAll('details[data-summary]')) {
-    el.open = expanded.has(el.dataset.summary);
-    if (el.dataset.summary === focused) el.querySelector('summary').focus({ preventScroll: true });
+  const focusedPin = document.activeElement?.closest('[data-pin]')?.dataset.pin;
+  const expanded = new Set([...$('#pinned').querySelectorAll('details[open]'), ...$('#resumable').querySelectorAll('details[open]')].map(el => el.dataset.summary));
+  for (const [id, sessions, pinned] of [['#pinned', lastPinned, true], ['#resumable', lastRes, false]]) {
+    const container = $(id);
+    // Pinned conversations are returned in full; only ordinary history has pages.
+    const more = !pinned && sessions.length >= resLimit ? '<button class="action more" type="button" data-more>Show more…</button>' : '';
+    container.innerHTML = (sessions.map(s => resumableCard(s, pinned)).join('') || `<div class="empty">No ${pinned ? 'pinned' : 'resumable'} sessions</div>`) + more;
+    for (const el of container.querySelectorAll('details[data-summary]')) {
+      el.open = expanded.has(el.dataset.summary);
+      if (el.dataset.summary === focused) el.querySelector('summary').focus({ preventScroll: true });
+    }
   }
+  if (focusedPin) document.querySelector(`[data-pin="${CSS.escape(focusedPin)}"]`)?.focus({ preventScroll: true });
 }
 
 function render(d) {
   $('#nrun').textContent = d.running.length;
+  $('#npin').textContent = d.pinned?.length || 0;
   $('#nres').textContent = d.resumable.length;
 
   const st = d.stats;
@@ -382,18 +391,27 @@ function render(d) {
     .map(row => `<div class="stats-row">${row.map(statTile).join('')}</div>`).join('');
 
   $('#running').innerHTML = d.running.map(runningCard).join('') || '<div class="empty">No running sessions</div>';
+  const runningSids = new Set(d.running.map(s => s.sid).filter(Boolean));
+  // Remove stale cards even when an unrelated open picker defers the full render.
+  for (const button of document.querySelectorAll('#pinned [data-resume], #resumable [data-resume]')) {
+    if (!runningSids.has(button.dataset.resume)) continue;
+    const card = button.closest('.session'), container = card.parentElement;
+    card.remove();
+    if (!container.querySelector('.session')) container.innerHTML = `<div class="empty">No ${container.id === 'pinned' ? 'pinned' : 'resumable'} sessions</div>`;
+  }
   lastRes = d.resumable;
+  lastPinned = d.pinned || [];
   // Same rule for the pickers: re-rendering would snap an open menu shut.
-  if (!document.activeElement?.closest('.pick-dd') && !$('#resumable .cb-menu:not([hidden])')) renderResumable();
+  if (!document.activeElement?.closest('.pick-dd') && !$('.pick-dd .cb-menu:not([hidden])')) renderResumable();
 
-  const dirs = [...new Set(d.resumable.map(s => s.dir).filter(Boolean))];
+  const dirs = [...new Set([...lastPinned, ...lastRes].map(s => s.dir).filter(Boolean))];
   $('#dirs').innerHTML = dirs.map(x => `<option value="${esc(x)}">`).join('');
 }
 
 document.body.addEventListener('click', async e => {
   const t = e.target.closest('[data-term]');
   if (t) { openTerm(t.dataset.term, t.dataset.title); return; }
-  const el = e.target.closest('[data-kill],[data-resume],[data-purge],[data-more]');
+  const el = e.target.closest('[data-kill],[data-resume],[data-purge],[data-more],[data-pin]');
   if (!el) return;
   try {
     if (el.dataset.more !== undefined) { resLimit += 20; poll(); }
@@ -405,11 +423,22 @@ document.body.addEventListener('click', async e => {
       }
     } else if (el.dataset.resume) {
       el.disabled = true;
-      const { model, effort } = pickState(lastRes.find(s => s.sid === el.dataset.resume) || { sid: el.dataset.resume });
+      const { model, effort } = pickState([...lastPinned, ...lastRes].find(s => s.sid === el.dataset.resume) || { sid: el.dataset.resume });
       try { await api('/api/resume', { sid: el.dataset.resume, model, effort }); delete picks[el.dataset.resume]; poll(); }
       finally { el.disabled = false; }
     } else if (el.dataset.purge) {
+      if (lastPinned.some(s => s.sid === el.dataset.purge)) await api('/api/pin', { sid: el.dataset.purge, pinned: false });
       await api('/api/purge', { sid: el.dataset.purge }); poll();
+    } else if (el.dataset.pin) {
+      const focused = document.activeElement === el;
+      el.disabled = true;
+      try {
+        await api('/api/pin', { sid: el.dataset.pin, pinned: el.getAttribute('aria-pressed') !== 'true' });
+        el.disabled = false;
+        if (focused && document.activeElement === document.body) el.focus({ preventScroll: true });
+        poll();
+      }
+      finally { el.disabled = false; }
     }
   } catch (err) { toast(err.message); poll(); } // re-arm even when the action failed
 });

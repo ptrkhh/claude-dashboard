@@ -67,6 +67,7 @@ pub struct Stats {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SessionsResponse {
     pub running: Vec<Session>,
+    pub pinned: Vec<Resumable>,
     pub resumable: Vec<Resumable>,
     pub stats: Stats,
 }
@@ -195,13 +196,21 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
 
     let running_sids: HashSet<String> = running.iter().filter_map(|r| r.sid.clone()).collect();
     let hist = read_if(&ctx.claude_dir.join("history.jsonl")).await.unwrap_or_default();
+    let pins = super::pins::read_pins(ctx).await.unwrap_or_else(|e| {
+        ctx.host.log.push(format!("Could not read pinned conversations: {e}"));
+        Default::default()
+    });
 
     let mut resumable = Vec::new();
+    let mut ordinary = 0;
+    let mut candidates = 0;
     // Scan three candidates per entry wanted, so ghosts (history without a
     // transcript) and abandoned starts do not starve the list.
-    for g in group_history(&hist).into_iter().take(limit.saturating_mul(3)) {
-        if resumable.len() >= limit {
-            break;
+    for g in group_history(&hist) {
+        let pinned = pins.contains(&g.sid);
+        if !pinned {
+            if ordinary >= limit || candidates >= limit.saturating_mul(3) { continue; }
+            candidates += 1;
         }
         if running_sids.contains(&g.sid)
             || ctx.purged.lock().unwrap_or_else(|e| e.into_inner()).contains(&g.sid)
@@ -218,6 +227,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             continue;
         }
         let model = t.model.as_deref().and_then(model_alias).map(str::to_owned);
+        if !pinned { ordinary += 1; }
         resumable.push(Resumable {
             display_name: Some(super::names::session_name("Claude", g.cwd.as_deref().unwrap_or("?"), &g.sid)),
             sid: g.sid,
@@ -238,9 +248,11 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             && !ctx.purged.lock().unwrap_or_else(|e| e.into_inner()).contains(&s.sid)
     }));
     resumable.sort_by(|a, b| b.ts.total_cmp(&a.ts));
+    let (mut pinned, mut resumable): (Vec<_>, Vec<_>) = resumable.into_iter().partition(|s| pins.contains(&s.sid));
     resumable.truncate(limit);
+    super::summaries::SummaryCache::attach(ctx, &mut pinned).await;
     super::summaries::SummaryCache::attach(ctx, &mut resumable).await;
-    for session in &mut resumable {
+    for session in pinned.iter_mut().chain(resumable.iter_mut()) {
         if session.summary.is_none()
             && session.model_id.as_deref().is_some_and(|m| m.starts_with("codex"))
         {
@@ -268,6 +280,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
 
     SessionsResponse {
         running,
+        pinned,
         resumable,
         stats: Stats {
             cpu_pct: machine.cpu_pct,
@@ -322,6 +335,67 @@ mod tests {
             .collect();
         std::fs::write(proj.join(format!("{sid}.jsonl")), body).unwrap();
         format!("{{\"sessionId\":\"{sid}\",\"project\":\"{cwd}\",\"timestamp\":{ts},\"display\":\"do the thing\"}}\n")
+    }
+
+    #[tokio::test]
+    async fn pins_survive_restart_and_bypass_the_history_page_limit() {
+        let d = tempdir("pins-old");
+        let mut hist = String::new();
+        for (sid, ts) in [("aaa", 500), ("bbb", 400), ("ccc", 300), ("ddd", 200), ("eee", 100)] {
+            hist.push_str(&seed(&d, sid, "/p", ts, 3));
+        }
+        std::fs::write(d.join("history.jsonl"), hist).unwrap();
+        std::fs::write(d.join("cdash-pins.json"), r#"["eee"]"#).unwrap();
+        for _ in 0..2 {
+            let r = serde_json::to_value(collect_sessions(&ctx_for(d.clone()), 1).await).unwrap();
+            assert_eq!(r["pinned"][0]["sid"], "eee");
+            assert_eq!(r["pinned"].as_array().unwrap().len(), 1);
+            assert_eq!(r["resumable"][0]["sid"], "aaa");
+            assert_eq!(r["resumable"].as_array().unwrap().len(), 1);
+        }
+        std::fs::write(d.join("cdash-pins.json"), r#"["aaa","bbb","ccc","eee"]"#).unwrap();
+        let r = serde_json::to_value(collect_sessions(&ctx_for(d), 1).await).unwrap();
+        assert_eq!(r["pinned"].as_array().unwrap().len(), 4);
+        assert_eq!(r["resumable"][0]["sid"], "ddd", "pins must not exhaust the ordinary scan budget");
+    }
+
+    #[tokio::test]
+    async fn codex_pins_do_not_consume_resumable_slots() {
+        let d = tempdir("pins-codex");
+        std::fs::write(d.join("history.jsonl"), seed(&d, "aaa", "/p", 300, 3)).unwrap();
+        std::fs::write(d.join("cdash-pins.json"), r#"["codex-pinned"]"#).unwrap();
+        let ctx = ctx_for(d);
+        *ctx.codex_threads.lock().await = Some((std::time::Instant::now(),
+            serde_json::from_value(serde_json::json!([
+                {"sid":"codex-pinned", "dir":"/work", "title":"old", "ts":100,
+                 "model":null, "effort":null}
+            ])).unwrap()));
+        let r = serde_json::to_value(collect_sessions(&ctx, 1).await).unwrap();
+        assert_eq!(r["pinned"][0]["sid"], "codex-pinned");
+        assert_eq!(r["resumable"][0]["sid"], "aaa");
+        ctx.purged.lock().unwrap().insert("codex-pinned".into());
+        let r = serde_json::to_value(collect_sessions(&ctx, 1).await).unwrap();
+        assert_eq!(r["pinned"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn a_running_pin_returns_to_pinned_when_it_stops() {
+        let d = tempdir("pins-running");
+        std::fs::write(d.join("history.jsonl"), seed(&d, "aaa", "/proj", 300, 3)).unwrap();
+        std::fs::write(d.join("cdash-pins.json"), r#"["aaa"]"#).unwrap();
+        std::fs::write(d.join("sessions/4242.json"), r#"{"sessionId":"aaa","cwd":"/proj"}"#).unwrap();
+        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000|/proj");
+        let ctx = ctx_with_path(d.clone(), path);
+        *ctx.codex_threads.lock().await = Some((std::time::Instant::now(), vec![]));
+        let r = serde_json::to_value(collect_sessions(&ctx, 1).await).unwrap();
+        assert_eq!(r["running"][0]["sid"], "aaa");
+        assert_eq!(r["pinned"], serde_json::json!([]));
+        assert_eq!(r["resumable"], serde_json::json!([]));
+        fake_tmux(&d, "");
+        let r = serde_json::to_value(collect_sessions(&ctx, 1).await).unwrap();
+        assert_eq!(r["running"], serde_json::json!([]));
+        assert_eq!(r["pinned"][0]["sid"], "aaa");
+        assert_eq!(r["resumable"], serde_json::json!([]));
     }
 
     #[tokio::test]
