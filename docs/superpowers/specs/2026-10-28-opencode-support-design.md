@@ -1,6 +1,7 @@
 # OpenCode sessions with native Terminal and Claude Remote Control
 
-Status: proposed; awaiting design approval. No product code has changed.
+Status: design approved on 2026-10-29; implementation planning in progress.
+No product code has changed.
 
 ## Intent and agreed scope
 
@@ -61,7 +62,9 @@ it; the linked development branch is supporting evidence, not a pinned contract.
 
 - The existing model picker includes clearly prefixed OpenCode models. Preserve
   provider identity, for example `opencode:anthropic/claude-sonnet-5-5`, even when
-  Claude Code or Codex can use a model with the same underlying name.
+  Claude Code or Codex can use a model with the same underlying name. Split
+  the value at the first `/` only: model IDs may themselves contain `/`, as in
+  `nvidia/deepseek-ai/deepseek-v4.1-flash` from the installed catalog.
 - OpenCode model variants come from OpenCode's catalog. Label its secondary
   picker **Variant** rather than pretending every variant is a Claude/Codex
   effort. Hide that picker when no selectable variants exist. Preserve the saved
@@ -81,8 +84,8 @@ it; the linked development branch is supporting evidence, not a pinned contract.
 - Resumable cards retain the OpenCode session ID, directory, model, variant,
   preview, and generated summary through the existing summary workflow. Resume
   reuses the same OpenCode session rather than creating a fork or new thread.
-- Provider usage meters appear only for quota information OpenCode actually
-  reports. A provider with no quota data contributes no fabricated usage tile.
+- No OpenCode usage meters. The installed V2 API reports token totals but no
+  quota or rate-limit data. Add a meter when OpenCode exposes quota data.
 - Purge hides a card, as it does today. It never deletes the OpenCode session.
 
 ## Backend and process ownership
@@ -137,7 +140,10 @@ output policy. Treat transcript content as data rather than bridge instructions.
 Use stable outbound message UUIDs scoped to the Claude remote identity and native
 OpenCode message/tool IDs. Give each Claude-origin prompt a stable OpenCode input
 ID and save its association before submission. A reconnect must never execute
-an already accepted prompt again or create duplicate user bubbles.
+an already accepted prompt again or create duplicate user bubbles. A `steer` or
+`queue` prompt stays in the session inbox (`GET /api/session/{id}/inbox`) until
+OpenCode consumes it, so treat a saved ID found in either the inbox or message
+history as accepted before any resubmission.
 
 Match Codex's shared-turn behavior: a Claude prompt arriving during execution
 uses OpenCode's native `steer` delivery rather than interrupting the turn,
@@ -153,7 +159,9 @@ sequence cannot recover missed native events. Restore current execution and
 pending permission state as part of that reconciliation. Only checkpoint a
 completed history upload after delivery succeeds. Heartbeats run during replay.
 
-Map supported permission questions into Claude approval controls. Recheck that a
+Map supported permission questions into Claude approval controls. Claude allow
+maps to OpenCode `once` and deny to `reject`, as Codex maps to `accept` and
+`decline`; never send `always`, which saves a lasting rule. Recheck that a
 request is still pending before applying its answer. Resolution from Terminal
 cancels the matching Claude control; late replies must have no effect. Preserve
 OpenCode's configured policy and explicit denies. Do not globally enable
@@ -174,9 +182,11 @@ TTLs. No model inference runs during discovery or routine polling. A missing,
 signed-out, unsupported, or broken OpenCode installation must not break Claude
 or Codex model discovery, session collection, or launch.
 
-Materialize text-only normalized transcript snapshots for owned sessions in the
-private state directory and pass these through the existing `SummaryCache` and
-summary generator. Preserve original OpenCode data. Refresh snapshots only when
+Materialize text-only transcript snapshots for owned sessions in the private
+state directory, using the Claude transcript JSONL shape (`type` `user` or
+`assistant`, text `message.content`) that `summary.mjs` already parses. Pass
+these through the existing `SummaryCache` and summary generator unchanged.
+Preserve original OpenCode data. Refresh snapshots only when
 conversation content changes so metadata polling does not trigger inference.
 Use readable prompt previews while a summary is absent or generation fails.
 Retain the existing subscription-backed summary routing and failure backoff.
@@ -187,14 +197,14 @@ Retain the existing subscription-backed summary routing and failure backoff.
 - `collect/mod.rs` and `ctx.rs`: register the module and bounded caches.
 - `collect/spawn.rs` and `validate.rs`: launch/resume dispatch and separate ID/model
   validation, including purge without widening existing UUID acceptance.
-- `collect/sessions.rs`: managed running/resumable cards, previews, and optional
-  usage; `external.rs` only if the shared serialized shape needs an additive field.
+- `collect/sessions.rs`: managed running/resumable cards and previews;
+  `external.rs` only if the shared serialized shape needs an additive field.
 - `http/routes.rs`: combine optional model catalogs and accept validated OpenCode
   launch/resume requests while preserving existing routes and error shapes.
 - `codex-remote.mjs` and any extracted shared transport: preserve Codex behavior.
   Account for both embedded `node -e` metadata queries and materialized modules.
-- `summaries.rs` and `summary.mjs`: normalized text support and installation of
-  any newly shared module required by the copied Codex summary bridge.
+- `summaries.rs`: install any newly shared module that the copied Codex summary
+  bridge (`bridge.mjs`, written from `codex-remote.mjs`) now imports.
 - `public/app.js`: tool-specific picker filtering, variants, cards, and correct
   resume payloads; existing terminal components and authentication stay shared.
 - Relevant Rust, Node bridge/native/summary/frontend tests and README setup notes.
@@ -204,7 +214,8 @@ Retain the existing subscription-backed summary routing and failure backoff.
 
 First qualify the installed OpenCode server lease, authenticated API, explicit
 session creation, model/variant round-trip, native TUI attachment, event shapes,
-pagination, and interruption. Use isolated project/session fixtures. A failed
+pagination, interruption, and resubmission of an input ID already in the inbox
+or history. Use isolated project/session fixtures. A failed
 protocol assumption changes the adapter before wider implementation proceeds.
 
 Focused automated checks cover absent OpenCode, version rejection, catalog
@@ -233,5 +244,10 @@ and Stop behavior above resolve it by following the existing Codex model.
 OpenCode login/account management, native OpenCode web handoff, V1 compatibility,
 arbitrary external-session takeover, new model providers, and attachment/form
 translation are outside the selected Codex-equivalent slice. No original
-transcripts or credentials are rewritten. Rollback is removal of this isolated
-feature branch; live sessions are not migrated or restarted automatically.
+transcripts or credentials are rewritten. Accepted risk: the private pane server
+and the user's own OpenCode service share one store. Execution ownership is
+process-local, so opening the same session through both servers can cause
+concurrent execution. The dashboard does not detect or coordinate that case;
+simultaneous use of one session through separate servers is unsupported.
+Rollback is removal of this isolated feature branch; live sessions are not
+migrated or restarted automatically.
