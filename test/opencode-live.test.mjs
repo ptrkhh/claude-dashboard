@@ -42,10 +42,10 @@ test('OpenCode API qualification: stranded input retries execute once', { skip: 
     const stream = client.subscribe(event => events.push(event), connected, controller.signal);
     await Promise.race([connectedPromise, delay(5000).then(() => { throw Error('event stream did not connect'); })]);
     const session = (await client.request('/api/session', { method: 'POST', body: { title: 'Fixture', permissions: [{ action: 'bash', resource: 'fixture-restricted-command', effect: 'ask' }] } })).data;
-    for (let i = 0; i < 30 && !events.length; i++) await delay(100);
+    for (let i = 0; i < 30 && !events.some(event => event.type === 'session.created'); i++) await delay(100);
     controller.abort();
     await stream;
-    assert.ok(events.length > 0);
+    assert.ok(events.some(event => event.type === 'session.created'));
     const path = `/api/session/${session.id}`;
     const variantModel = catalog.data.find(model => model.variants?.length);
     assert.ok(variantModel);

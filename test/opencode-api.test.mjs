@@ -190,3 +190,21 @@ test('unexpected server exit notifies the owner without exposing credentials', {
 test('metadata discovery refuses an unparseable inline config before spawning', async () => {
   await assert.rejects(startServer({ cwd: tmpdir(), metadataOnly: true, env: { PATH: '/nonexistent', OPENCODE_CONFIG_CONTENT: '{invalid' } }), /inline configuration|requires.*JSON/i);
 });
+
+test('event frames parse CRLF boundaries split across network chunks', { timeout: 3000 }, async () => {
+  const server = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write('data: {"type":"split"}\r');
+    setTimeout(() => res.write('\n\r'), 20);
+    setTimeout(() => res.write('\n'), 40);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const client = new OpenCode({ url: `http://127.0.0.1:${server.address().port}`, password: 'fixture' });
+    const controller = new AbortController(), events = [];
+    const timeout = setTimeout(() => controller.abort(), 300);
+    await client.subscribe(event => { events.push(event.type); controller.abort(); }, () => {}, controller.signal);
+    clearTimeout(timeout);
+    assert.deepEqual(events, ['split']);
+  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
+});

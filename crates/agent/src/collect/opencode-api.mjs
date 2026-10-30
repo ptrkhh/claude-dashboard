@@ -59,7 +59,7 @@ export class OpenCode {
         onConnected();
         const decoder = new TextDecoder(); let buffer = '';
         for await (const chunk of response.body) {
-          buffer += decoder.decode(chunk, { stream: true }).replace(/\r\n/g, '\n');
+          buffer = (buffer + decoder.decode(chunk, { stream: true })).replace(/\r\n/g, '\n');
           if (buffer.length > 1024 * 1024) throw new Error('OpenCode event too large');
           let end;
           while ((end = buffer.indexOf('\n\n')) !== -1) {
