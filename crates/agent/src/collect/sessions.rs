@@ -36,6 +36,8 @@ pub struct Resumable {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
     /// What the model picker selects for this session; `model` is the display chip.
     #[serde(rename = "modelId", skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
@@ -95,6 +97,21 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
 
     let mut running: Vec<Session> = Vec::new();
     for p in &panes {
+        if let Some(s) = super::opencode::snapshot(ctx, &p.name, p.pid).await {
+            let cpu = ctx.host.sampler.lock().unwrap_or_else(|e| e.into_inner()).tree_usage(p.pid);
+            let git = Arc::clone(&ctx.git).status_for(Arc::clone(&ctx.runner), &p.path, now as u64);
+            running.push(Session {
+                display_name: s.display_name.or_else(|| s.sid.as_deref().map(|sid| super::names::session_name("OpenCode", &s.dir, sid))),
+                name: p.name.clone(), dir: s.dir, pid: p.pid,
+                uptime_sec: ((now / 1000.0 - p.created as f64).round() as i64).max(0),
+                model: s.model_label.or(s.model).or_else(|| Some("OpenCode".into())), effort: None, variant: s.variant,
+                provider: Some("opencode".into()), native_terminal: Some(s.native_terminal),
+                rc_link: super::opencode::link(ctx, &p.name).await, rc_unavailable: s.rc_unavailable,
+                git: git.as_deref().map(parse_git_status), working: s.working, last_message: s.last_message, sid: s.sid,
+                cpu: cpu.cpu, rss_kb: cpu.rss_kb, cpu_sample_age_ms: cpu.cpu_sample_age_ms, external: false,
+            });
+            continue;
+        }
         if let Some(s) = super::codex::snapshot(ctx, &p.name, p.pid).await {
             let cpu = ctx.host.sampler.lock().unwrap_or_else(|e| e.into_inner()).tree_usage(p.pid);
             let git = Arc::clone(&ctx.git).status_for(Arc::clone(&ctx.runner), &p.path, now as u64);
@@ -102,7 +119,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
                 display_name: s.display_name.or_else(|| s.sid.as_deref().map(|sid| super::names::session_name("Codex", &s.dir, sid))),
                 name: p.name.clone(), dir: s.dir, pid: p.pid,
                 uptime_sec: ((now / 1000.0 - p.created as f64).round() as i64).max(0),
-                model: s.model_label.or(s.model).or_else(|| Some("Codex".into())), effort: s.effort,
+                model: s.model_label.or(s.model).or_else(|| Some("Codex".into())), effort: s.effort, variant: None,
                 provider: Some("codex".into()),
                 native_terminal: Some(s.native_terminal),
                 rc_link: super::codex::link(ctx, &p.name).await,
@@ -175,6 +192,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             uptime_sec: ((now / 1000.0 - p.created as f64).round() as i64).max(0),
             model: meta.model.clone(),
             effort: meta.effort.clone(),
+            variant: None,
             provider: None,
             native_terminal: None,
             rc_unavailable: false,
@@ -228,12 +246,17 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             model: model.clone(),
             model_id: model,
             effort: t.effort.clone(),
+            variant: None,
             summary: None,
             source_file: Some(file),
         });
     }
 
     resumable.extend(super::codex::history(ctx).await.into_iter().filter(|s| {
+        !running_sids.contains(&s.sid)
+            && !ctx.purged.lock().unwrap_or_else(|e| e.into_inner()).contains(&s.sid)
+    }));
+    resumable.extend(super::opencode::history(ctx, RESUMABLE_CEILING).await.into_iter().filter(|s| {
         !running_sids.contains(&s.sid)
             && !ctx.purged.lock().unwrap_or_else(|e| e.into_inner()).contains(&s.sid)
     }));
@@ -509,6 +532,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn opencode_cards_show_running_status_and_only_nonrunning_history() {
+        let d = tempdir("opencode-cards");
+        let root = d.join("cdash-opencode");
+        std::fs::create_dir_all(&root).unwrap();
+        let state = serde_json::json!({"sid":"ses_live", "dir":"/proj", "pid":4242, "native_terminal":true, "working":true, "model":"fixture/model", "variant":"deep"});
+        std::fs::write(root.join("cdash-test-1200-abc.json"), state.to_string()).unwrap();
+        std::fs::write(root.join("cdash-test-1200-abc.native"), state.to_string()).unwrap();
+        std::fs::write(root.join("cdash-test-1200-abc.link"), "https://claude.ai/code/session_test").unwrap();
+        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000|/proj");
+        let ctx = ctx_with_path(d, path);
+        *ctx.opencode_threads.lock().await = Some((std::time::Instant::now(), serde_json::from_value(serde_json::json!([
+            {"sid":"ses_live","dir":"/proj","ts":1000,"display_name":"Live","model":"fixture/model","model_label":"Fixture","variant":"deep","prompts":[],"source_file":null},
+            {"sid":"ses_saved","dir":"/proj","ts":900,"display_name":"Saved","model":"fixture/model","model_label":"Fixture","variant":"deep","prompts":["Resume work"],"source_file":null}
+        ])).unwrap()));
+        let response = collect_sessions(&ctx, RESUMABLE_MAX).await;
+        assert_eq!(response.running[0].provider.as_deref(), Some("opencode"));
+        assert!(response.running[0].working);
+        assert_eq!(response.running[0].variant.as_deref(), Some("deep"));
+        assert_eq!(response.running[0].rc_link.as_deref(), Some("https://claude.ai/code/session_test"));
+        assert_eq!(response.resumable.len(), 1);
+        assert_eq!(response.resumable[0].sid, "ses_saved");
+        assert_eq!(response.resumable[0].variant.as_deref(), Some("deep"));
+        assert_eq!(response.resumable[0].prompts, ["Resume work"]);
+    }
+
+    #[tokio::test]
     async fn native_remote_failure_reaches_the_session_card() {
         let d = tempdir("native-remote-status");
         let root = d.join("cdash-codex");
@@ -560,7 +609,7 @@ mod tests {
         let s = Session {
             display_name: None,
             name: "x".into(), dir: "/x".into(), pid: 1, uptime_sec: 0,
-            model: None, effort: None, provider: None, native_terminal: None, rc_link: None, rc_unavailable: false, git: None, working: false,
+            model: None, effort: None, variant: None, provider: None, native_terminal: None, rc_link: None, rc_unavailable: false, git: None, working: false,
             last_message: None, sid: None, cpu: None, rss_kb: 0,
             cpu_sample_age_ms: 0, external: false,
         };

@@ -2,7 +2,7 @@ use super::ctx::{Ctx, Meta};
 use super::fsio::{read_if, write_atomic};
 use super::lookup::rc_link_for;
 use super::validate::{
-    assert_effort, assert_kill_name, assert_model, assert_valid_sid, is_codex_model, BadRequest, Refused,
+    assert_effort, assert_kill_name, assert_model, assert_valid_sid, assert_opencode_sid, is_codex_model, BadRequest, Refused,
 };
 use crate::parse::history::group_history;
 use std::path::{Path, PathBuf};
@@ -205,7 +205,11 @@ pub async fn launch_session(
     dir: &str,
     model: &str,
     effort: &str,
+    variant: Option<&str>,
 ) -> Result<String, Refused> {
+    if let Some(model) = model.strip_prefix("opencode:") {
+        return super::opencode::launch(ctx, dir, model, variant, None).await;
+    }
     if model == "codex" {
         return super::codex::launch(ctx, dir, None, effort, None).await;
     }
@@ -236,7 +240,9 @@ pub async fn resume_session(
     sid: &str,
     model: Option<&str>,
     effort: Option<&str>,
+    variant: Option<&str>,
 ) -> Result<String, Refused> {
+    if sid.starts_with("ses_") { return super::opencode::resume(ctx, sid, model, variant).await; }
     assert_valid_sid(sid)?;
     if let Some(name) = super::codex::resume(ctx, sid, model, effort).await? {
         return Ok(name);
@@ -293,7 +299,7 @@ pub async fn kill_session(ctx: &Arc<Ctx>, name: &str) -> Result<(), Refused> {
 /// Hide a resumable session from the list. Purely a note to ourselves — no
 /// file is touched and the transcript is not deleted.
 pub fn purge_session(ctx: &Arc<Ctx>, sid: &str) -> Result<(), BadRequest> {
-    assert_valid_sid(sid)?;
+    if sid.starts_with("ses_") { assert_opencode_sid(sid)?; } else { assert_valid_sid(sid)?; }
     ctx.purged.lock().unwrap_or_else(|e| e.into_inner()).insert(sid.to_string());
     Ok(())
 }
@@ -492,18 +498,18 @@ mod tests {
     async fn launch_rejects_a_bad_model_effort_or_directory_before_spawning() {
         let d = tempdir("launch-guard");
         let ctx = ctx_for(d.clone()).await;
-        assert!(launch_session(&ctx, "/tmp", "gpt-4", "medium").await.is_err());
-        assert!(launch_session(&ctx, "/tmp", "sonnet", "ludicrous").await.is_err());
+        assert!(launch_session(&ctx, "/tmp", "gpt-4", "medium", None).await.is_err());
+        assert!(launch_session(&ctx, "/tmp", "sonnet", "ludicrous", None).await.is_err());
         // A6: a path that is not a directory never reaches `tmux -c`.
-        assert!(launch_session(&ctx, "/no/such/dir/cdash", "sonnet", "medium").await.is_err());
+        assert!(launch_session(&ctx, "/no/such/dir/cdash", "sonnet", "medium", None).await.is_err());
     }
 
     #[tokio::test]
     async fn resume_rejects_a_bad_sid_before_touching_the_shell() {
         let d = tempdir("resume-guard");
         let ctx = ctx_for(d).await;
-        assert!(resume_session(&ctx, "not-a-uuid; rm -rf /", None, None).await.is_err());
-        assert!(resume_session(&ctx, "", None, None).await.is_err());
+        assert!(resume_session(&ctx, "not-a-uuid; rm -rf /", None, None, None).await.is_err());
+        assert!(resume_session(&ctx, "", None, None, None).await.is_err());
     }
 
     #[tokio::test]
@@ -511,7 +517,7 @@ mod tests {
         let d = tempdir("resume-unknown");
         let ctx = ctx_with_tmux(d.clone(), 0).await; // PATH without codex: never reads this machine's ~/.codex
         tokio::fs::write(d.join("history.jsonl"), "").await.unwrap();
-        let e = resume_session(&ctx, "2f8a1c94-3b7e-4d51-9a02-6c5f8e1b7d34", None, None).await.unwrap_err();
+        let e = resume_session(&ctx, "2f8a1c94-3b7e-4d51-9a02-6c5f8e1b7d34", None, None, None).await.unwrap_err();
         // An unknown sid is the caller's input, not our subprocess: 400, not 500.
         assert!(matches!(&e, Refused::BadRequest(m) if m.contains("unknown session")), "got {e:?}");
     }
@@ -536,7 +542,7 @@ mod tests {
         purge_session(&ctx, sid).unwrap();
         assert!(ctx.purged.lock().unwrap().contains(sid));
 
-        resume_session(&ctx, sid, None, None).await.unwrap();
+        resume_session(&ctx, sid, None, None, None).await.unwrap();
         let args = std::fs::read_to_string(d.join("tmux-args")).unwrap();
         assert!(args.lines().next().unwrap().ends_with(
             &format!("--remote-control {}", super::super::names::session_name("Claude", "/tmp", sid))
@@ -565,7 +571,7 @@ mod tests {
     #[tokio::test]
     async fn resume_passes_the_chosen_model_and_effort_to_claude() {
         let (d, ctx) = ctx_with_history("resume-pick").await;
-        let name = resume_session(&ctx, SID, Some("opus"), Some("high")).await.unwrap();
+        let name = resume_session(&ctx, SID, Some("opus"), Some("high"), None).await.unwrap();
         let args = std::fs::read_to_string(d.join("tmux-args")).unwrap();
         assert!(args.contains(&format!("--resume {SID} --model opus --effort high")), "{args}");
         let m = ctx.meta_get(&name).unwrap();
@@ -575,7 +581,7 @@ mod tests {
     #[tokio::test]
     async fn resume_without_a_choice_adds_no_model_flags() {
         let (d, ctx) = ctx_with_history("resume-plain").await;
-        resume_session(&ctx, SID, None, None).await.unwrap();
+        resume_session(&ctx, SID, None, None, None).await.unwrap();
         let args = std::fs::read_to_string(d.join("tmux-args")).unwrap();
         assert!(args.contains(&format!("--resume {SID} --dangerously-skip-permissions")), "{args}");
         assert!(!args.contains("--model") && !args.contains("--effort"), "{args}");
@@ -590,7 +596,7 @@ mod tests {
             (Some("codex:gpt-5"), None),
             (Some("codex"), None),
         ] {
-            let e = resume_session(&ctx, SID, model, effort).await.unwrap_err();
+            let e = resume_session(&ctx, SID, model, effort, None).await.unwrap_err();
             assert!(matches!(e, Refused::BadRequest(_)), "{model:?} {effort:?}: {e:?}");
         }
         assert!(!d.join("tmux-args").exists(), "a rejected pick must not reach tmux");
@@ -636,7 +642,7 @@ mod tests {
     async fn a_launch_whose_tmux_failed_leaves_no_phantom_session() {
         let d = tempdir("launch-fails");
         let ctx = ctx_with_tmux(d.clone(), 1).await;
-        let e = launch_session(&ctx, d.to_str().unwrap(), "sonnet", "medium").await.unwrap_err();
+        let e = launch_session(&ctx, d.to_str().unwrap(), "sonnet", "medium", None).await.unwrap_err();
         assert!(matches!(&e, Refused::Failed(m) if m.contains("new-session")), "got {e:?}");
         assert!(
             ctx.meta.lock().unwrap().is_empty(),
@@ -649,7 +655,7 @@ mod tests {
         let d = tempdir("rc-setting");
         let ctx = ctx_with_tmux(d.clone(), 0).await;
 
-        launch_session(&ctx, d.to_str().unwrap(), "sonnet", "medium").await.unwrap();
+        launch_session(&ctx, d.to_str().unwrap(), "sonnet", "medium", None).await.unwrap();
 
         let args = std::fs::read_to_string(d.join("tmux-args")).unwrap();
         let launch = args.lines().next().unwrap();
@@ -663,6 +669,15 @@ mod tests {
             ),
             "dashboard launches keep Remote Control enabled and start in the fullscreen renderer: {args}"
         );
+    }
+
+    #[tokio::test]
+    async fn opencode_purge_accepts_only_its_own_id_shape() {
+        let dir = tempdir("opencode-purge");
+        let ctx = ctx_for(dir).await;
+        assert!(purge_session(&ctx, "ses_saved").is_ok());
+        assert!(ctx.purged.lock().unwrap().contains("ses_saved"));
+        assert!(purge_session(&ctx, "ses_../bad").is_err());
     }
 
     #[tokio::test]

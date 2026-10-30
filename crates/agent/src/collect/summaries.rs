@@ -209,6 +209,7 @@ mod tests {
             prompts: vec![],
             model: None,
             effort: None,
+            variant: None,
             model_id: None,
             source_file: Some(source),
             summary: None,

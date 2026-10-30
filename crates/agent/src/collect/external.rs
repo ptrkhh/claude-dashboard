@@ -25,6 +25,8 @@ pub struct Session {
     pub model: Option<String>,
     pub effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(rename = "nativeTerminal", skip_serializing_if = "Option::is_none")]
     pub native_terminal: Option<bool>,
@@ -136,6 +138,7 @@ pub async fn external_sessions(
                 .unwrap_or(0),
             model: None,
             effort: None,
+            variant: None,
             provider: None,
             native_terminal: None,
             rc_unavailable: false,

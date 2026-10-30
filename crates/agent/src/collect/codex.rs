@@ -404,6 +404,7 @@ pub async fn history(ctx: &Ctx) -> Vec<Resumable> {
                 model_id: Some(t.model.as_ref().map_or("codex".into(), |m| format!("codex:{m}"))),
                 model: label.or(t.model).or_else(|| Some("Codex".into())),
                 effort: t.effort,
+                variant: None,
                 prompts: Vec::new(),
                 summary: None,
                 source_file: t.rollout_path,
@@ -677,7 +678,7 @@ mod tests {
                 assert!(resume(&ctx, SID, None, None).await.unwrap().is_none());
             }
             assert!(!dir.join("tmux-args").exists());
-            assert!(super::super::spawn::launch_session(&ctx, dir.to_str().unwrap(), "sonnet", "medium")
+            assert!(super::super::spawn::launch_session(&ctx, dir.to_str().unwrap(), "sonnet", "medium", None)
                 .await
                 .is_ok());
             std::fs::remove_dir_all(dir).unwrap();
