@@ -336,7 +336,9 @@ createInterface({input:process.stdin}).on('line',line=>{
 });
 `, { mode: 0o700 });
   const discover = (account, mode = '--models', delays = {}) => new Promise((done, reject) => {
-    const child = spawn(process.execPath, [resolve('crates/agent/src/collect/codex-remote.mjs'), mode], {
+    const source = readFileSync(resolve('crates/agent/src/collect/codex-remote.mjs'), 'utf8');
+    const child = spawn(process.execPath, ['--input-type=module', '-e', source, '--', mode], {
+      cwd: dir,
       env: { ...process.env, PATH: dir, CDASH_CHECK_ACCOUNT: JSON.stringify(account), CDASH_CHECK_DELAYS: JSON.stringify(delays) },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -416,4 +418,25 @@ test('Codex --threads lists only unarchived dashboard threads from the newest st
     { sid: 'b', dir: '/work/b', ts: 200, model: null, effort: null, rollout_path: '/work/history.jsonl' },
   ]);
   assert.deepEqual(await run(join(home, 'no-codex-here')), [], 'no Codex state is an empty list, not an error');
+});
+
+test('copied Codex worker reports missing Claude transport before connecting', { timeout: 10_000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'cdash-worker-package-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const bridge = join(dir, 'bridge.mjs'), state = join(dir, 'state.json');
+  await writeFile(bridge, await readFile(resolve('crates/agent/src/collect/codex-remote.mjs')));
+  await writeFile(state, '{}');
+  const result = await new Promise((done, reject) => {
+    const child = spawn(process.execPath, [bridge, '--worker', '--sdk-url', 'http://invalid', '--session-id', 'fixture'], {
+      env: { ...process.env, CDASH_CODEX_STATE: state, CLAUDE_CODE_SESSION_ACCESS_TOKEN: 'fixture', CLAUDE_CODE_WORKER_EPOCH: '1' },
+      stdio: ['pipe', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', data => stderr += data);
+    child.on('error', reject);
+    child.on('exit', code => done({ code, stderr }));
+    child.stdin.end();
+  });
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /claude-remote\.mjs/);
 });
