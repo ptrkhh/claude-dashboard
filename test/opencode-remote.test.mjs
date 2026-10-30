@@ -411,3 +411,68 @@ test('resolving one approval keeps the remaining approval visible', async () => 
     assert.equal(statuses.at(-1)[1].tool_name, 'per_a');
   } finally { await server.close(); }
 });
+
+test('reconnect recognizes a new active turn whose start event was missed', async () => {
+  const { RemoteBridge } = await import('../crates/agent/src/collect/opencode-remote.mjs');
+  let active = true;
+  const sent = [], statuses = [];
+  const server = await fixture(request => {
+    if (request.url.includes('/message')) return { body: { data: [], cursor: {} } };
+    if (request.url.endsWith('/permission') || request.url.endsWith('/form')) return { body: { data: [] } };
+    if (request.url.endsWith('/active')) return { body: { data: active ? { ses_test: { type: 'running' } } : {} } };
+    return { body: { data: { id: 'ses_test', model: { providerID: 'fixture', id: 'model' } } } };
+  });
+  try {
+    const state = { sid: 'ses_test', model: 'fixture/model' };
+    const bridge = new RemoteBridge(server.client, { sid: 'remote', event: async item => sent.push(item), state: async status => statuses.push(status) }, state, async () => {});
+    await bridge.nativeEvent({ type: 'session.execution.started', data: { sessionID: state.sid } });
+    active = false;
+    await bridge.nativeEvent({ type: 'session.execution.succeeded', data: { sessionID: state.sid } });
+    active = true;
+    await bridge.reconcile(); // the second start was lost while disconnected
+    active = false;
+    await bridge.nativeEvent({ type: 'session.execution.succeeded', data: { sessionID: state.sid } });
+    assert.equal(sent.filter(item => item.type === 'result').length, 2);
+    assert.equal(state.working, false);
+    assert.equal(statuses.at(-1), 'idle');
+  } finally { await server.close(); }
+});
+
+test('reconciliation drops a stale model label after a native model change', async () => {
+  const { RemoteBridge } = await import('../crates/agent/src/collect/opencode-remote.mjs');
+  const server = await fixture(request => {
+    if (request.url.includes('/message')) return { body: { data: [], cursor: {} } };
+    if (request.url.endsWith('/permission') || request.url.endsWith('/form')) return { body: { data: [] } };
+    if (request.url.endsWith('/active')) return { body: { data: {} } };
+    return { body: { data: { id: 'ses_test', model: { providerID: 'fixture', id: 'new-model' } } } };
+  });
+  try {
+    const state = { sid: 'ses_test', model: 'fixture/old-model', model_label: 'Old Model' };
+    const bridge = new RemoteBridge(server.client, { sid: 'remote', event: async () => {}, state: async () => {} }, state, async () => {});
+    await bridge.reconcile();
+    assert.equal(state.model, 'fixture/new-model');
+    assert.equal(state.model_label, null);
+  } finally { await server.close(); }
+});
+
+test('a transient permission reply failure can be retried', async () => {
+  const { RemoteBridge } = await import('../crates/agent/src/collect/opencode-remote.mjs');
+  let pending = [{ id: 'per_retry', sessionID: 'ses_test', action: 'bash', resources: ['pwd'] }], attempts = 0;
+  const sent = [];
+  const server = await fixture(request => {
+    if (request.url.endsWith('/permission')) return { body: { data: pending } };
+    attempts++;
+    if (attempts === 1) return { status: 503, body: {} };
+    pending = []; return { status: 204, body: null };
+  });
+  try {
+    const bridge = new RemoteBridge(server.client, { sid: 'remote', event: async event => sent.push(event), state: async () => {} }, { sid: 'ses_test' }, async () => {});
+    await bridge.syncPermissions();
+    const id = sent.find(item => item.type === 'control_request').request_id;
+    const reply = { type: 'control_response', response: { request_id: id, response: { behavior: 'allow' } } };
+    await assert.rejects(bridge.handle(reply));
+    await bridge.handle(reply);
+    assert.equal(attempts, 2);
+    assert.equal(pending.length, 0);
+  } finally { await server.close(); }
+});

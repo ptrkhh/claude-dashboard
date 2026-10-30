@@ -69,7 +69,7 @@ test('native supervisor attaches one TUI to its owned session and cleans up', { 
   const dir = await mkdtemp(join(tmpdir(), 'cdash-oc-supervisor-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const state = join(dir, 'pane.json'), log = join(dir, 'wire.jsonl');
-  await writeFile(state, JSON.stringify({ dir, display_name: 'Fixture Session', sid: null, model: 'fixture/model', variant: 'deep' }));
+  await writeFile(state, JSON.stringify({ dir, display_name: 'Fixture Session', sid: null, model: 'fixture/model', model_label: 'Old Model', variant: 'deep' }));
   await writeFile(join(dir, 'opencode'), `#!${process.execPath}
 const fs=require('node:fs'), http=require('node:http');
 const log=x=>fs.appendFileSync(process.env.CDASH_TEST_LOG,JSON.stringify(x)+'\\n');
@@ -78,7 +78,7 @@ else {
  log({kind:'server',pid:process.pid,leaked:!!process.env.CLAUDE_CODE_SESSION_ACCESS_TOKEN});
  let eventConnections=0;
  const server=http.createServer(async(req,res)=>{let raw='';for await(const c of req)raw+=c;log({kind:'api',method:req.method,path:req.url,body:raw?JSON.parse(raw):null});
- if(req.url==='/api/event'){res.writeHead(200,{'content-type':'text/event-stream'});res.write('data: {"type":"server.connected","data":{}}\\n\\n');if(++eventConnections===1)setTimeout(()=>res.end(),50);return;}
+ if(req.url==='/api/event'){res.writeHead(200,{'content-type':'text/event-stream'});res.write('data: {"type":"server.connected","data":{}}\\n\\n');if(++eventConnections===1)setTimeout(()=>res.end(),50);else setTimeout(()=>res.write('data: '+JSON.stringify({type:'session.model.selected',data:{sessionID:'ses_fixture',model:{providerID:'fixture',id:'new-model'}}})+'\\n\\n'),500);return;}
  if(req.url==='/api/session/active')return res.end(JSON.stringify({data:eventConnections>1?{ses_fixture:{type:'running'}}:{}}));
  if(req.url==='/api/session'&&req.method==='POST')return res.end(JSON.stringify({data:{id:'ses_fixture'}}));
  if(req.url==='/api/session/ses_fixture/model'){res.writeHead(204);return res.end();}
@@ -123,6 +123,12 @@ else {
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     assert.equal(nativeState.working, true, 'native status must recover after event stream disconnect');
+    for (let i = 0; i < 100 && nativeState.model !== 'fixture/new-model'; i++) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      nativeState = JSON.parse(await readFile(join(dir, 'pane.native'), 'utf8'));
+    }
+    assert.equal(nativeState.model, 'fixture/new-model');
+    assert.equal(nativeState.model_label, null, 'a native model switch must not keep the old label');
     const orphan = rows.find(row => row.kind === 'claude').descendant;
     try { assert.throws(() => process.kill(orphan, 0), { code: 'ESRCH' }, 'a failed runner must not leave children'); }
     finally { try { process.kill(orphan, 'SIGKILL'); } catch {} }

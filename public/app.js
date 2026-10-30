@@ -153,7 +153,7 @@ const modelDD = buildDropdown($('#model'), 'Model', MODELS, 'sonnet', updateEffo
 const effortDD = buildDropdown($('#effort'), 'Effort', EFFORTS.map(value => ({ value, label: effortLabel(value) })), 'medium');
 let effortModel = modelDD.value;
 function updateEfforts() {
-  const changed = effortModel !== modelDD.value;
+  const changed = effortModel !== modelDD.value && (effortModel.startsWith('opencode:') || modelDD.value.startsWith('opencode:'));
   effortModel = modelDD.value;
   const model = modelChoices.find(m => m.value === modelDD.value);
   const isOpenCode = modelDD.value.startsWith('opencode:');
@@ -180,7 +180,7 @@ async function refreshModels(g, dir = $('#dir').value.trim()) {
   };
   if (entry?.loading) return entry.loading;
   if (entry?.at && Date.now() - entry.at < 60_000) { if (entry.models) apply(entry.models); return; }
-  if (active()) apply(modelChoices.filter(model => model.value.startsWith('codex:')));
+  if (active()) apply(entry?.models || modelChoices.filter(model => model.value.startsWith('codex:')));
   if (!entry) {
     if (modelCatalogs.size >= 32) modelCatalogs.delete(modelCatalogs.keys().next().value);
     entry = { at: 0, models: null, loading: null }; modelCatalogs.set(key, entry);

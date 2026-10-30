@@ -189,6 +189,7 @@ createInterface({input:process.stdin}).on('line',line=>{
   await waitFor(async () => (await messages()).some(m => m.token === 'Bearer rotated' && m.body?.events?.some(e => e.payload.type === 'user')));
   await waitFor(async () => JSON.parse(await readFile(state, 'utf8')).remote_sequence === 12);
   await waitFor(async () => { const s=JSON.parse(await readFile(state, 'utf8')); return s.last_message === 'Reply third' && !s.working; });
+  await waitFor(async () => (await messages()).flatMap(m => m.body?.events || []).map(e => e.payload).filter(p => p.type === 'stream_event').at(-1)?.event.type === 'message_stop');
   assert.equal((await messages()).filter(m => ['turn/start','turn/steer'].includes(m.rpc?.method)).length, 3, 'an echoed local prompt must execute once');
   const live = (await messages()).flatMap(m => m.body?.events || []).map(e => e.payload);
   const toolUses = live.flatMap(p => p.type === 'assistant' ? p.message?.content || [] : []).filter(b => b.type === 'tool_use');

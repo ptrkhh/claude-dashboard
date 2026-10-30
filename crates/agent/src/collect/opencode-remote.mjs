@@ -61,6 +61,13 @@ export function historyMessages(row, nativeSid, remoteSid, submitted = new Set()
   return messages;
 }
 
+function updateModel(state, selected) {
+  const model = `${selected.providerID}/${selected.id}`;
+  if (state.model !== model) state.model_label = null;
+  state.model = model;
+  state.variant = selected.variant || null;
+}
+
 export class RemoteBridge {
   constructor(client, remote, state, save) {
     this.client = client; this.remote = remote; this.state = state; this.save = save;
@@ -102,12 +109,12 @@ export class RemoteBridge {
     }
     const session = (await this.client.request(this.path)).data;
     if (session?.model) {
-      this.state.model = `${session.model.providerID}/${session.model.id}`;
-      this.state.variant = session.model.variant || null;
+      updateModel(this.state, session.model);
       this.remote.model = this.state.model;
     }
     const active = (await this.client.request('/api/session/active')).data;
     this.state.working = Boolean(active?.[this.state.sid]);
+    if (this.state.working) this.completedSinceStart = false;
     await this.syncForms();
     await this.syncPermissions();
     if (this.state.remote_sid !== this.remote.sid) this.state.remote_sequence = 0;
@@ -192,8 +199,12 @@ export class RemoteBridge {
       const response = payload.response, request = this.approvals.get(response?.request_id);
       if (!request) return;
       const pending = (await this.client.request(`${this.path}/permission`)).data;
-      this.approvals.delete(response.request_id);
-      if (!Array.isArray(pending) || !pending.some(item => item.id === request.id && item.sessionID === this.state.sid)) return;
+      if (!Array.isArray(pending)) throw new Error('Invalid OpenCode permission list');
+      if (!pending.some(item => item.id === request.id && item.sessionID === this.state.sid)) {
+        this.approvals.delete(response.request_id);
+        await this.syncPermissions();
+        return;
+      }
       const decision = response.response?.behavior === 'allow' ? 'once' : 'reject';
       try { await this.client.request(`${this.path}/permission/${encodeURIComponent(request.id)}/reply`, { method: 'POST', body: { decision } }); }
       catch (error) { if (error.status !== 404 && error.status !== 409) throw error; }
@@ -383,14 +394,14 @@ async function supervise(statePath, name) {
       if (event.type === 'session.execution.started') state.working = true;
       else if (['session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted'].includes(event.type)) { state.working = false; state.ts = Date.now(); }
       else if (event.type === 'session.text.ended') state.last_message = data.text;
-      else if (event.type === 'session.model.selected') { state.model = `${data.model.providerID}/${data.model.id}`; state.variant = data.model.variant || null; }
+      else if (event.type === 'session.model.selected') updateModel(state, data.model);
       else return;
       await saveNative();
     }), () => enqueue(async () => {
       const active = (await client.request('/api/session/active')).data;
       const session = (await client.request(`/api/session/${encodeURIComponent(state.sid)}`)).data;
       state.working = Boolean(active?.[state.sid]);
-      if (session?.model) { state.model = `${session.model.providerID}/${session.model.id}`; state.variant = session.model.variant || null; }
+      if (session?.model) updateModel(state, session.model);
       await saveNative();
     }), events.signal);
     tui = spawn('opencode', ['--server', client.url, '--session', state.sid], { cwd: state.dir, env: { ...nativeEnv(), OPENCODE_PASSWORD: client.password }, stdio: 'inherit' });

@@ -307,3 +307,40 @@ test('opening an OpenCode card loads that card project', async () => {
   assert.deepEqual(calls[0], [1, '/saved']);
   assert.equal(menu.hidden, false);
 });
+
+test('refreshing a project catalog preserves its selected OpenCode model', async () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const code = source.slice(source.indexOf('let modelChoices = MODELS;'), source.indexOf('function toast('));
+  let now = 1000;
+  const pending = [], dropdowns = [], dir = { value: '/project' };
+  const context = {
+    MODELS: [{ value: 'sonnet', label: 'Claude' }], EFFORTS: ['medium'], effortLabel: String, gen: 1,
+    Date: { now: () => now }, $: selector => selector === '#dir' ? dir : {}, toast() {},
+    buildDropdown: (_el, _label, _items, initial) => {
+      const dd = { value: initial, setLabel() {}, setItems(items, fallback) { if (!items.some(item => item.value === this.value)) this.value = fallback; } };
+      dropdowns.push(dd); return dd;
+    },
+    api: () => new Promise(resolve => pending.push(resolve)),
+  };
+  runInNewContext(`${code}; this.refresh = refreshModels;`, context);
+  const first = context.refresh(1);
+  const catalog = [{ value: 'opencode:fixture/model', variants: [] }];
+  pending.shift()(catalog); await first;
+  dropdowns[0].value = catalog[0].value;
+  now += 61000;
+  const second = context.refresh(1);
+  assert.equal(dropdowns[0].value, catalog[0].value, 'a refresh must not silently change the model during loading');
+  pending.shift()(catalog); await second;
+  assert.equal(dropdowns[0].value, catalog[0].value);
+});
+
+test('changing between Claude models preserves a compatible effort', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const code = source.slice(source.indexOf('function updateEfforts() {'), source.indexOf('let modelsGeneration'));
+  let reset;
+  const context = { modelChoices: [{ value: 'opus', efforts: ['high'] }], modelDD: { value: 'opus' },
+    effortDD: { setLabel() {}, setItems(_items, _fallback, value) { reset = value; } },
+    EFFORTS: ['high'], effortLabel: String, effortModel: 'sonnet', $: () => ({}) };
+  runInNewContext(`${code}; updateEfforts();`, context);
+  assert.equal(reset, false);
+});
