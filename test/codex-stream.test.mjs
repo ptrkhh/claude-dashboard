@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 
-const source = readFileSync(new URL('../crates/agent/src/collect/codex-remote.mjs', import.meta.url), 'utf8');
-const transport = source.slice(source.indexOf('class Remote {'), source.indexOf('\nfunction messageUuid'));
+const source = readFileSync(new URL('../crates/agent/src/collect/claude-remote.mjs', import.meta.url), 'utf8');
+const transport = source.slice(source.indexOf('export class Remote {')).replace('export class Remote', 'class Remote');
 
 for (const stalled of ['headers', 'body']) test(`Codex reconnects after stalled SSE ${stalled}`, { timeout: 3000 }, async t => {
   const requests = [], received = [], saved = [], errors = [];

@@ -35,6 +35,8 @@ pub struct Ctx {
     pub usage: Arc<UsageCache>,
     pub codex_usage: Arc<UsageCache>,
     pub codex_models: tokio::sync::Mutex<Option<(std::time::Instant, Vec<super::codex::ModelChoice>)>>,
+    pub opencode_models: tokio::sync::Mutex<HashMap<String, (std::time::Instant, Vec<super::opencode::ModelChoice>)>>,
+    pub opencode_threads: tokio::sync::Mutex<Option<(std::time::Instant, Vec<super::opencode::Thread>)>>,
     /// Codex's thread list as of the last read; see `codex::history`.
     pub codex_threads: tokio::sync::Mutex<Option<(std::time::Instant, Vec<super::codex::Thread>)>>,
     /// Set once at boot when `CDASH_AUTH` includes `password`. A `OnceLock`
@@ -62,6 +64,8 @@ impl Ctx {
             usage: Arc::new(UsageCache::new()),
             codex_usage: Arc::new(UsageCache::new()),
             codex_models: tokio::sync::Mutex::new(None),
+            opencode_models: tokio::sync::Mutex::new(HashMap::new()),
+            opencode_threads: tokio::sync::Mutex::new(None),
             codex_threads: tokio::sync::Mutex::new(None),
             password: std::sync::OnceLock::new(),
         }

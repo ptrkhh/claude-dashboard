@@ -89,8 +89,18 @@ pub async fn get_logs(State(ctx): State<Arc<Ctx>>) -> Response {
     Json(serde_json::json!({ "lines": ctx.host.log.lines() })).into_response()
 }
 
-pub async fn get_models(State(ctx): State<Arc<Ctx>>) -> Result<Response, ApiError> {
-    Ok(Json(crate::collect::codex::models(&ctx).await?).into_response())
+pub async fn get_models(State(ctx): State<Arc<Ctx>>, Query(q): Query<HashMap<String, String>>) -> Result<Response, ApiError> {
+    let dir = q.get("dir").cloned().unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/".into()));
+    crate::collect::validate::assert_path(&dir)?;
+    if !tokio::fs::metadata(&dir).await.map(|m| m.is_dir()).unwrap_or(false) {
+        return Err(BadRequest(format!("not a directory: {dir}")).into());
+    }
+    let mut choices: Vec<serde_json::Value> = crate::collect::codex::models(&ctx).await?.into_iter().map(|m| serde_json::json!(m)).collect();
+    match crate::collect::opencode::models(&ctx, &dir).await {
+        Ok(models) => choices.extend(models.into_iter().map(|m| serde_json::json!(m))),
+        Err(error) => ctx.host.log.push(format!("OpenCode model discovery unavailable: {error:?}")),
+    }
+    Ok(Json(choices).into_response())
 }
 
 pub async fn get_places(State(ctx): State<Arc<Ctx>>) -> Response {
@@ -124,6 +134,7 @@ pub struct LaunchBody {
     pub model: String,
     #[serde(default = "default_effort")]
     pub effort: String,
+    pub variant: Option<String>,
 }
 
 // Node destructured `{ dir, model = 'sonnet', effort = 'medium' }`
@@ -148,6 +159,7 @@ pub struct ResumeBody {
     // The UI sends "" for "keep what the session used".
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub variant: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -172,7 +184,7 @@ pub async fn post_launch(
     State(ctx): State<Arc<Ctx>>,
     Json(body): Json<LaunchBody>,
 ) -> Result<Response, ApiError> {
-    let name = launch_session(&ctx, &body.dir, &body.model, &body.effort).await?;
+    let name = launch_session(&ctx, &body.dir, &body.model, &body.effort, body.variant.as_deref()).await?;
 
     // Fire-and-forget, exactly as `server.js:56`: a failed recents write logs
     // and does not fail the launch. The route resolves the directory before
@@ -197,7 +209,7 @@ pub async fn post_resume(
     Json(body): Json<ResumeBody>,
 ) -> Result<Response, ApiError> {
     let pick = |v: &Option<String>| v.clone().filter(|s| !s.is_empty());
-    let name = resume_session(&ctx, &body.sid, pick(&body.model).as_deref(), pick(&body.effort).as_deref()).await?;
+    let name = resume_session(&ctx, &body.sid, pick(&body.model).as_deref(), pick(&body.effort).as_deref(), body.variant.as_deref()).await?;
     Ok(Json(serde_json::json!({ "name": name })).into_response())
 }
 

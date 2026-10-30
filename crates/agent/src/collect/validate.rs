@@ -64,6 +64,15 @@ pub fn assert_valid_sid(sid: &str) -> Result<(), BadRequest> {
     }
 }
 
+/// OpenCode session IDs are distinct from Claude and Codex UUIDs.
+pub fn assert_opencode_sid(sid: &str) -> Result<(), BadRequest> {
+    let ok = sid.strip_prefix("ses_").is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.len() <= 128
+            && suffix.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    });
+    if ok { Ok(()) } else { Err(BadRequest(format!("bad OpenCode sid: {sid}"))) }
+}
+
 /// Codex model picks are `codex:<model>`; bare `codex` is the legacy default.
 pub fn is_codex_model(model: &str) -> bool {
     model == "codex" || model.starts_with("codex:")
@@ -132,6 +141,16 @@ mod tests {
         assert!(assert_valid_sid("not-a-uuid; rm -rf /").is_err());
         assert!(assert_valid_sid("../../etc/passwd").is_err());
         assert!(assert_valid_sid("").is_err());
+    }
+
+    #[test]
+    fn opencode_session_ids_are_bounded_and_do_not_widen_uuid_validation() {
+        assert!(assert_opencode_sid("ses_abc-123_A").is_ok());
+        for id in ["ses_", "ses_../x", "ses_a/b", "ses_a b", "ses_a;cmd", "ses_a\n", "ses_é"] {
+            assert!(assert_opencode_sid(id).is_err(), "{id:?}");
+        }
+        assert!(assert_opencode_sid(&format!("ses_{}", "a".repeat(129))).is_err());
+        assert!(assert_valid_sid("ses_abc123").is_err());
     }
 
     #[test]

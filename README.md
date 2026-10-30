@@ -112,6 +112,14 @@ Choose a model and effort level when launching or resuming Claude Code sessions.
 
 Resumable cards can show conversation summaries. The agent reuses a suitable existing summary or generates one with the available supported subscription login. Summaries can omit or misstate details; the original session remains the source of truth. The selected conversation text is sent to the provider for summary generation. Tool payloads and thinking are omitted.
 
+### OpenCode sessions
+
+To use OpenCode through the dashboard, install OpenCode V2.1.4 or later in the V2 series and Node.js 22 or later on the host. Configure and sign in to your OpenCode provider, and sign in to Claude Code with an account that supports Remote Control. Choose a project first, then select an OpenCode model and, when available, its variant. Model availability follows that project's OpenCode configuration. If `OPENCODE_CONFIG_CONTENT` is set, it must contain valid JSON for dashboard model discovery.
+
+The dashboard starts a private OpenCode server and native terminal for each managed session. **Terminal** gives access to OpenCode's full interface; **Open in Claude** connects the same session to Claude Remote Control. The bridge carries text, tool activity and supported permission approvals. Use Terminal for attachments, interactive forms, and tool output beyond the bridge's 65,536-character limit. Reasoning is not forwarded.
+
+Only OpenCode sessions created by this dashboard appear in its resumable history. Purging a card hides it from the dashboard; it does not delete the native OpenCode session. Do not run the same OpenCode session through another server at the same time. If Remote Control disconnects, the native terminal stays available while the link retries.
+
 ### Access and security settings
 
 The agent defaults to **127.0.0.1** and **CDASH_AUTH=none**. If you enable network access, configure a guard or put the origin behind a trusted access layer. Claude sessions launch with broad permissions; treat access to the agent as access to your coding session.
