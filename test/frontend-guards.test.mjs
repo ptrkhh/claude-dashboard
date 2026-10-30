@@ -107,7 +107,7 @@ test('the send bar is gone: the terminal replaced it', () => {
 
 test('legacy Codex sessions do not offer unsupported terminal controls', () => {
   const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
-  const code = app.slice(app.indexOf('function runningCard('), app.indexOf('let lastRes ='));
+  const code = app.slice(app.indexOf('const copyIdBtn ='), app.indexOf('let lastRes ='));
   const context = { esc: s => String(s || ''), ICONS: {}, gitBadge: () => '', fmtUp: () => '', armedKill: null };
   runInNewContext(`${code}; this.card = runningCard;`, context);
   const session = { name: 'cdash-test', dir: '/tmp/project', provider: 'codex' };
@@ -125,6 +125,17 @@ test('legacy Codex sessions do not offer unsupported terminal controls', () => {
   assert.match(context.card({ ...failed, rcLink: 'https://claude.ai/code/session_test' }), /Open in Claude/);
   assert.match(context.card({ ...session, provider: undefined }), /data-term=/);
   assert.doesNotMatch(context.card({ ...session, nativeTerminal: true, external: true }), /data-term=/);
+});
+
+test('cards offer the session ID for copying once one exists', () => {
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const code = app.slice(app.indexOf('const copyIdBtn ='), app.indexOf('let lastRes ='));
+  const context = { esc: s => String(s || ''), ICONS: {}, gitBadge: () => '', fmtUp: () => '', armedKill: null };
+  runInNewContext(`${code}; this.card = runningCard;`, context);
+  const session = { name: 'cdash-test', dir: '/tmp/project' };
+  assert.doesNotMatch(context.card(session), /data-copy=/, 'no sid yet, no button');
+  assert.match(context.card({ ...session, sid: '3c7254a1-54ff' }), /data-copy="3c7254a1-54ff"/);
+  assert.match(context.card({ ...session, sid: 'ext', external: true }), /data-copy="ext"/);
 });
 
 test('terminal scripts load before app.js', () => {
@@ -151,7 +162,7 @@ test('resumable summary uses escaped, keyboard-expandable peek and retains promp
   const context = {
     esc: s => String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;'),
     fmtTs: () => '', gitBadge: () => '', pickHtml: () => '', effortLabel: String,
-    ICONS: { refresh: '', trash: '' },
+    ICONS: { refresh: '', trash: '' }, copyIdBtn: sid => `data-copy="${sid}"`,
   };
   runInNewContext(`${card}; this.card = resumableCard;`, context);
   const session = { sid: 'one', title: 'Title', prompts: ['Earlier prompt'] };
@@ -169,6 +180,7 @@ test('resumable summary uses escaped, keyboard-expandable peek and retains promp
   assert.match(codex, /&lt;img src=x onerror=alert\(1\)&gt; · Add tests/);
   assert.doesNotMatch(codex, /<img/);
   assert.match(summary, /data-resume="one"/);
+  assert.match(summary, /data-copy="one"/);
 });
 
 test('polling preserves expanded summaries and keyboard focus by session ID', () => {

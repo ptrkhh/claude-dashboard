@@ -28,6 +28,7 @@ const ICONS = {
   download: svg('<path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/>'),
   refresh: svg('<path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/>'),
   trash: svg('<path d="M4 7h16"/><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/><path d="M18 7l-.8 12a2 2 0 0 1-2 1.9H8.8a2 2 0 0 1-2-1.9L6 7"/>'),
+  copy: svg('<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/>'),
   spinner: svg('<path d="M12 3a9 9 0 1 0 9 9"/>'),
   sun: svg('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>'),
   moon: svg('<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>'),
@@ -176,6 +177,18 @@ async function refreshModels(g) {
   }
 }
 
+// navigator.clipboard needs a secure context, which a phone on plain-HTTP LAN
+// lacks; execCommand still works there. Last resort: show it for a long-press.
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); toast('Session ID copied'); return; } catch {}
+  const ta = document.createElement('textarea');
+  ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+  document.body.append(ta); ta.select();
+  const ok = document.execCommand('copy');
+  ta.remove();
+  toast(ok ? 'Session ID copied' : `Session ID: ${text}`);
+}
+
 function toast(msg) {
   const t = $('#toast');
   t.textContent = msg; t.classList.add('show');
@@ -248,6 +261,11 @@ function statTile({ label, value, pct, sub, title }) {
   return `<div class="stat"${tip}><div class="stat-top"><span class="stat-label">${label}</span><span class="stat-value">${value}</span></div>${meter}${caption}</div>`;
 }
 
+// The bare session UUID, as `/status` shows it, for handing a session to another agent.
+// A just-launched session has no sid until its transcript appears, so no button yet.
+const copyIdBtn = sid => sid
+  ? `<button class="action ghost" type="button" data-copy="${esc(sid)}" title="Copy session ID ${esc(sid)}" aria-label="Copy session ID">${ICONS.copy}</button>` : '';
+
 function runningCard(r) {
   const status = r.working ? 'working' : 'idle';
   const chips = [r.model, r.effort && effortLabel(r.effort)].filter(Boolean);
@@ -282,7 +300,7 @@ function runningCard(r) {
         <span class="time">${fmtUp(r.uptimeSec)}</span>
       </div>
       ${peek}
-      <div class="actions">${rc}${termBtn}${kill}</div>
+      <div class="actions">${rc}${termBtn}${copyIdBtn(r.sid)}${kill}</div>
     </div>`;
 }
 
@@ -335,6 +353,7 @@ function resumableCard(s) {
       ${pickHtml(s)}
       <div class="actions">
         <button class="action" type="button" data-resume="${esc(s.sid)}">${ICONS.refresh}<span>Resume</span></button>
+        ${copyIdBtn(s.sid)}
         <button class="action ghost" type="button" data-purge="${esc(s.sid)}" aria-label="Purge from list">${ICONS.trash}</button>
       </div>
     </div>`;
@@ -393,6 +412,8 @@ function render(d) {
 document.body.addEventListener('click', async e => {
   const t = e.target.closest('[data-term]');
   if (t) { openTerm(t.dataset.term, t.dataset.title); return; }
+  const c = e.target.closest('[data-copy]');
+  if (c) { copyText(c.dataset.copy); return; }
   const el = e.target.closest('[data-kill],[data-resume],[data-purge],[data-more]');
   if (!el) return;
   try {
