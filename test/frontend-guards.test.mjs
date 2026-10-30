@@ -193,3 +193,117 @@ test('polling preserves expanded summaries and keyboard focus by session ID', ()
   assert.equal(after[1].open, false);
   assert.equal(focused, true);
 });
+
+function openCodePicker() {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const code = source.slice(source.indexOf('function pickState('), source.indexOf('function resumableCard('));
+  const context = {
+    MODELS: [{ value: 'sonnet', label: 'Claude Sonnet' }], EFFORTS: ['low', 'medium', 'high'],
+    modelChoices: [{ value: 'codex:gpt', label: 'Codex GPT', efforts: ['high'] }],
+    modelCatalogs: new Map(), picks: {}, esc: value => String(value ?? ''), effortLabel: String,
+    optionsHtml: (items, selected) => items.map(item => `<option value="${item.value}"${item.value === selected ? ' selected' : ''}>${item.label}</option>`).join(''),
+  };
+  runInNewContext(`${code}; this.state = pickState; this.html = pickHtml; this.payload = typeof resumePayload === 'function' ? resumePayload : undefined;`, context);
+  return context;
+}
+
+test('OpenCode resume controls preserve saved variants and send only applicable fields', () => {
+  const h = openCodePicker();
+  const model = { value: 'opencode:fixture/model', label: 'OpenCode Fixture', variants: ['fast', 'deep'] };
+  h.modelCatalogs.set('/project', { models: [model] });
+  const session = { sid: 'ses_saved', dir: '/project', modelId: model.value, model: model.label, variant: 'deep' };
+  assert.equal(h.state(session).isOpenCode, true);
+  assert.match(h.html(session), /Variant/);
+  assert.doesNotMatch(h.html(session), /Effort/);
+  assert.equal(h.payload(session).variant, undefined, 'unchanged resume preserves the native variant');
+  h.picks.ses_saved = { variant: 'fast' };
+  assert.equal(h.payload(session).variant, 'fast');
+  assert.equal('effort' in h.payload(session), false);
+  h.picks.ses_saved.variant = '';
+  assert.equal(h.payload(session).variant, '', 'the default is an explicit selection');
+  const claude = { sid: 'uuid', modelId: 'sonnet', effort: 'high' };
+  assert.equal(h.payload(claude).effort, 'high');
+  assert.equal('variant' in h.payload(claude), false);
+  h.modelCatalogs.set('/project', { models: [{ value: 'opencode:fixture/other', label: 'Other', variants: [] }] });
+  h.picks.ses_saved = { model: 'opencode:fixture/other' };
+  assert.doesNotMatch(h.html(session), /Effort|Variant/);
+  assert.equal(h.payload(session).variant, '', 'changing models clears an unsupported old variant');
+  h.picks.ses_saved = {};
+  assert.equal(h.state(session).model, model.value, 'a missing saved model remains selectable');
+  assert.equal(h.payload(session).variant, undefined, 'a missing saved variant remains unchanged');
+});
+
+test('project model loads do not let stale responses replace the active project or host', async () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const code = source.slice(source.indexOf('let modelChoices = MODELS;'), source.indexOf('function toast('));
+  const dir = { value: '/a' }, calls = [], pending = [];
+  const context = {
+    MODELS: [{ value: 'sonnet', label: 'Claude' }, { value: 'opus', label: 'Claude Opus' }], EFFORTS: ['medium'], effortLabel: String, gen: 1,
+    $: selector => selector === '#dir' ? dir : {},
+    buildDropdown: (_el, _label, _items, initial) => ({ value: initial, setItems() {}, setLabel() {} }),
+    api: path => { calls.push(path); return new Promise((resolve, reject) => pending.push({ resolve, reject })); },
+    toast() {}, renderResumable() {},
+  };
+  runInNewContext(`${code}; this.refresh = refreshModels; this.catalogs = modelCatalogs; this.values = () => modelChoices.map(model => model.value);`, context);
+  const first = context.refresh(1, '/a');
+  dir.value = '/b';
+  const second = context.refresh(1, '/b');
+  assert.equal(calls.length, 2, 'a different project starts its own request');
+  assert.match(calls[0], /dir=%2Fa/);
+  assert.match(calls[1], /dir=%2Fb/);
+  pending[1].resolve([{ value: 'codex:gpt', label: 'Codex', efforts: ['medium'] }, { value: 'opencode:b/model', label: 'B', variants: [] }]);
+  await second;
+  pending[0].resolve([{ value: 'opencode:a/model', label: 'A', variants: [] }]);
+  await first;
+  assert.ok(context.values().includes('opencode:b/model'));
+  assert.ok(!context.values().includes('opencode:a/model'));
+  dir.value = '/c';
+  const oldHost = context.refresh(1, '/c');
+  assert.equal(context.values().filter(value => value === 'opus').length, 1, 'project changes do not duplicate Claude models');
+  assert.ok(context.values().includes('codex:gpt'), 'Codex choices survive a project change');
+  context.gen = 2; dir.value = '/d';
+  const newHost = context.refresh(2, '/d');
+  pending[3].resolve([{ value: 'opencode:new/model', label: 'New', variants: [] }]);
+  await newHost;
+  pending[2].resolve([{ value: 'opencode:old/model', label: 'Old', variants: [] }]);
+  await oldHost;
+  assert.ok(context.values().includes('opencode:new/model'));
+  assert.ok(!context.values().includes('opencode:old/model'));
+  const cardCatalog = context.refresh(2, '/saved-project');
+  assert.match(calls.at(-1), /dir=%2Fsaved-project/, 'a card loads its own project catalog');
+  pending.at(-1).reject(new Error('discovery failed'));
+  await cardCatalog;
+  assert.ok(context.values().includes('opencode:new/model'), 'a different project failure does not replace launcher choices');
+  assert.equal(context.catalogs.get('/saved-project').models, null);
+});
+
+
+test('changing from effort to an OpenCode model resets the secondary picker', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const code = source.slice(source.indexOf('function updateEfforts() {'), source.indexOf('let modelsGeneration'));
+  const captured = [], control = { hidden: false }, modelDD = { value: 'opencode:fixture/model' };
+  const context = { modelChoices: [{ value: modelDD.value, variants: ['high', 'deep'] }], modelDD,
+    effortDD: { setLabel: label => captured.push({ label }), setItems: (items, fallback, reset) => captured.push({ items, fallback, reset }) },
+    EFFORTS: ['high'], effortLabel: String, effortModel: 'sonnet', $: () => control };
+  runInNewContext(`${code}; updateEfforts();`, context);
+  assert.equal(captured[0].label, 'Variant');
+  assert.equal(captured[1].reset, true, 'an old effort must not silently become an OpenCode variant');
+  assert.equal(captured[1].items[0].value, '');
+  assert.equal(control.hidden, false);
+});
+
+
+test('opening an OpenCode card loads that card project', async () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const code = source.slice(source.indexOf('function ddOpen('), source.indexOf('function ddPick('));
+  const calls = [], menu = { hidden: true, querySelector: () => null }, trigger = { setAttribute() {} };
+  const dd = { dataset: { sid: 'ses_saved', pick: 'model' }, isConnected: true };
+  const context = { lastRes: [{ sid: 'ses_saved', modelId: 'opencode:fixture/model', dir: '/saved' }], gen: 1,
+    refreshModels: async (...args) => calls.push(args), ddMenu: () => menu, ddTrigger: () => trigger,
+    ddActive() {}, document: { querySelectorAll: () => [] }, pickState: () => ({ models: [], model: '' }), optionsHtml: () => '' };
+  runInNewContext(`${code}; this.open = ddOpen;`, context);
+  context.open(dd);
+  await Promise.resolve();
+  assert.deepEqual(calls[0], [1, '/saved']);
+  assert.equal(menu.hidden, false);
+});
