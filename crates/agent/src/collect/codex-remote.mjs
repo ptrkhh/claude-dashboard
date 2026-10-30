@@ -688,6 +688,39 @@ const queryMode = ['--models', '--usage'].find(mode => process.argv.includes(mod
 if (args[0] === '--summary') {
   import('./summary.mjs').then(({ summarize }) => summarize(JSON.parse(args[1]), Codex, fn => { stop = fn; }))
     .then(value => console.log(JSON.stringify(value)), () => { console.log(JSON.stringify({ error: 'Session summary unavailable' })); });
+} else if (args[0] === '--claude-models') {
+  const child = spawn('claude', ['--print', '--verbose', '--input-format', 'stream-json', '--output-format', 'stream-json',
+    '--no-session-persistence', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'], {
+    env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== 'CLAUDECODE'
+      && !key.startsWith('CLAUDE_CODE_SESSION_') && !key.startsWith('CDASH_CODEX_'))),
+    cwd: homedir(), stdio: ['pipe', 'pipe', 'ignore'], detached: true,
+  });
+  let finished = false;
+  const finish = result => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(deadline);
+    console.log(JSON.stringify(result));
+    killGroup(child);
+  };
+  stop = () => finish({ error: 'Claude model discovery stopped' });
+  const deadline = setTimeout(() => finish({ error: 'Claude model discovery timed out' }), 10_000);
+  child.on('error', () => finish({ error: 'Claude model discovery unavailable' }));
+  child.stdin.on('error', () => finish({ error: 'Claude model discovery unavailable' }));
+  child.on('exit', () => finish({ error: 'Claude model discovery unavailable' }));
+  createInterface({ input: child.stdout }).on('line', line => {
+    let message;
+    try { message = JSON.parse(line); } catch { return; }
+    if (message.type !== 'control_response' || message.response?.request_id !== 'models') return;
+    const models = message.response?.response?.models;
+    if (!Array.isArray(models)) return finish({ error: 'Claude model discovery unavailable' });
+    finish(models.filter(m => ['sonnet', 'opus', 'haiku', 'fable'].includes(m.value)
+      && typeof m.displayName === 'string').map(m => ({
+      value: m.value, model: m.resolvedModel || m.value, label: `Claude ${m.displayName}`,
+      efforts: m.supportedEffortLevels || ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium',
+    })));
+  });
+  child.stdin.write(`${JSON.stringify({ type: 'control_request', request_id: 'models', request: { subtype: 'initialize' } })}\n`);
 } else if (process.argv.includes('--threads')) {
   // Resumable dashboard threads, read from Codex's own state database: it is
   // what Codex itself records per thread, so a thread continued elsewhere

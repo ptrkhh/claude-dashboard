@@ -146,6 +146,17 @@ function buildDropdown(el, label, items, initial, onChange = () => {}) {
   setItems(items, initial);
   return { get value() { return value; }, setItems };
 }
+function latestModels(models) {
+  const families = new Map();
+  for (const model of models) {
+    const match = /^gpt-(\d+(?:\.\d+)*)(?:-(.+))?$/.exec(model.model || '');
+    const family = match ? `gpt:${match[2] || ''}` : model.value;
+    const previous = families.get(family);
+    if (!previous || (match && match[1].localeCompare(previous.version, 'en', { numeric: true }) > 0))
+      families.set(family, { version: match?.[1], model });
+  }
+  return [...families.values()].map(entry => entry.model);
+}
 let modelChoices = MODELS;
 const modelDD = buildDropdown($('#model'), 'Model', MODELS, 'sonnet', updateEfforts);
 const effortDD = buildDropdown($('#effort'), 'Effort', EFFORTS.map(value => ({ value, label: effortLabel(value) })), 'medium');
@@ -160,7 +171,8 @@ async function refreshModels(g) {
   try {
     const models = await api('/api/models');
     if (g !== gen) return;
-    modelChoices = [...MODELS, ...models];
+    modelChoices = [...MODELS.map(m => models.find(c => c.value === m.value) || m),
+      ...latestModels(models.filter(m => m.value.startsWith('codex:')))];
     modelDD.setItems(modelChoices, 'sonnet');
     updateEfforts();
   } catch (err) {
@@ -292,7 +304,8 @@ let lastRes = [];
 // (the model and effort the session last ran with); there is no "default" entry.
 function pickState(s) {
   const codex = s.modelId?.startsWith('codex');
-  const base = codex ? modelChoices.filter(m => m.value.startsWith('codex:')) : MODELS;
+  const base = codex ? latestModels(modelChoices.filter(m => m.value.startsWith('codex:')))
+    : modelChoices.filter(m => !m.value.startsWith('codex:'));
   // The session's own model stays selectable even if the catalog no longer lists it.
   const models = !s.modelId || base.some(m => m.value === s.modelId)
     ? base : [{ value: s.modelId, label: s.model || s.modelId }, ...base];

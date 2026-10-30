@@ -417,3 +417,46 @@ test('Codex --threads lists only unarchived dashboard threads from the newest st
   ]);
   assert.deepEqual(await run(join(home, 'no-codex-here')), [], 'no Codex state is an empty list, not an error');
 });
+
+test('Claude catalog reads versioned aliases without a user turn and stops the metadata child', { timeout: 10_000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'cdash-claude-models-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const wire = join(dir, 'wire.json');
+  await writeFile(join(dir, 'claude'), `#!${process.execPath}
+const {createInterface}=require('node:readline');
+const {writeFileSync}=require('node:fs');
+createInterface({input:process.stdin}).on('line', line => {
+ const m=JSON.parse(line);
+ writeFileSync(process.env.CDASH_CHECK_WIRE,JSON.stringify({args:process.argv.slice(2),request:m,config:process.env.CLAUDE_CONFIG_DIR,bedrock:process.env.CLAUDE_CODE_USE_BEDROCK,nested:process.env.CLAUDECODE,token:process.env.CLAUDE_CODE_SESSION_ACCESS_TOKEN}));
+ if(m.type!=='control_request'||m.request.subtype!=='initialize')process.exit(2);
+ process.stdout.write(JSON.stringify({type:'control_response',response:{subtype:'success',request_id:m.request_id,response:{models:[
+  {value:'default',displayName:'Default (recommended)'},
+  {value:'opus',resolvedModel:'claude-opus-5-5',displayName:'Opus 5.5'},
+  {value:'sonnet',resolvedModel:'claude-sonnet-5-5',displayName:'Sonnet 5.5'},
+  {value:'claude-opus-5',displayName:'Opus 5'}
+ ]}}})+'\\n');
+});
+`, { mode: 0o700 });
+  const output = await new Promise((done, reject) => {
+    const child = spawn(process.execPath, [resolve('crates/agent/src/collect/codex-remote.mjs'), '--claude-models'], {
+      env: { ...process.env, PATH: dir, CDASH_CHECK_WIRE: wire, CLAUDE_CONFIG_DIR: dir, CLAUDE_CODE_USE_BEDROCK: '1', CLAUDECODE: '1', CLAUDE_CODE_SESSION_ACCESS_TOKEN: 'test-only-token' }, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', b => { stdout += b; });
+    child.stderr.on('data', b => { stderr += b; });
+    child.on('error', reject);
+    child.on('exit', code => code ? reject(Error(stderr)) : done(JSON.parse(stdout)));
+  });
+  assert.deepEqual(output.map(m => [m.value, m.model, m.label]), [
+    ['opus', 'claude-opus-5-5', 'Claude Opus 5.5'],
+    ['sonnet', 'claude-sonnet-5-5', 'Claude Sonnet 5.5'],
+  ]);
+  const request = JSON.parse(await readFile(wire, 'utf8'));
+  assert.equal(request.request.type, 'control_request');
+  assert.ok(request.args.includes('--no-session-persistence'));
+  assert.ok(request.args.includes('--strict-mcp-config'));
+  assert.equal(request.config, dir);
+  assert.equal(request.bedrock, '1');
+  assert.equal(request.nested, undefined);
+  assert.equal(request.token, undefined);
+});

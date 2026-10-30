@@ -28,7 +28,14 @@ pub async fn models(ctx: &Ctx) -> Result<Vec<ModelChoice>, Refused> {
             return Ok(choices.clone());
         }
     }
-    let choices = discover_models(ctx).await?;
+    let (codex, claude) = tokio::join!(discover_models(ctx), query(ctx, "--claude-models"));
+    let mut choices = codex?;
+    // Older Claude CLIs keep the generic alias labels when discovery is unavailable.
+    if let Ok(value) = claude {
+        if let Ok(models) = serde_json::from_value::<Vec<ModelChoice>>(value) {
+            choices.extend(models);
+        }
+    }
     *cache = Some((Instant::now(), choices.clone()));
     Ok(choices)
 }
@@ -40,7 +47,8 @@ async fn discover_models(ctx: &Ctx) -> Result<Vec<ModelChoice>, Refused> {
 
 pub(super) async fn query(ctx: &Ctx, mode: &str) -> Result<serde_json::Value, String> {
     // Codex and Node are optional: a Claude-only installation is healthy.
-    if !has_binary(&ctx.host.path, "codex") || !has_binary(&ctx.host.path, "node") {
+    let program = if mode == "--claude-models" { "claude" } else { "codex" };
+    if !has_binary(&ctx.host.path, program) || !has_binary(&ctx.host.path, "node") {
         return Ok(serde_json::json!([]));
     }
     let json = ctx
@@ -429,14 +437,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("bin")).unwrap();
         std::fs::write(dir.join("threads.json"), row(&dir)).unwrap();
+        std::fs::write(dir.join("claude-models.json"), "[]").unwrap();
         let mut scripts = vec![
             ("tmux", format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}/tmux-args'\n", dir.display())),
             (
                 "node",
                 format!(
                     "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v22.1.0; exit; fi\nfor a; do last=$a; done\n\
-                     if [ \"$last\" = --threads ]; then read -r line < '{}/threads.json'; echo \"$line\"; else echo '{catalog}'; fi\n",
-                    dir.display()
+                     if [ \"$last\" = --claude-models ]; then /bin/cat '{}/claude-models.json'; elif [ \"$last\" = --threads ]; then read -r line < '{}/threads.json'; echo \"$line\"; else echo '{catalog}'; fi\n",
+                    dir.display(), dir.display()
                 ),
             ),
             ("claude", "#!/bin/sh\necho 1.0.0\n".to_string()),
@@ -616,6 +625,25 @@ mod tests {
             assert!(matches!(e, Refused::BadRequest(_)), "{model:?} {effort:?}: {e:?}");
         }
         assert!(!dir.join("tmux-args").exists());
+    }
+
+    #[tokio::test]
+    async fn picker_catalog_includes_claude_versions_without_requiring_codex() {
+        let (dir, ctx) = host_in("claude-model-labels", false, "[]");
+        let claude = serde_json::json!([{
+            "value": "opus", "model": "claude-opus-5-5", "label": "Claude Opus 5.5",
+            "efforts": ["low", "medium", "high"], "defaultEffort": "medium"
+        }]);
+        std::fs::write(dir.join("claude-models.json"), claude.to_string()).unwrap();
+        let choices = models(&ctx).await.unwrap();
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].label, "Claude Opus 5.5");
+        assert_eq!(choices[0].value, "opus");
+        // A cached catalog survives a failed subsequent probe.
+        std::fs::write(dir.join("claude-models.json"), "invalid").unwrap();
+        assert_eq!(models(&ctx).await.unwrap()[0].label, "Claude Opus 5.5");
+        *ctx.codex_models.lock().await = None;
+        assert!(models(&ctx).await.unwrap().is_empty());
     }
 
     #[tokio::test]
