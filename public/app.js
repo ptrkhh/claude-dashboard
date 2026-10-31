@@ -826,9 +826,8 @@ async function hostPlatform() {
 /// differs in the dialog's wording.
 const SHELL = { android: 'Termux', windows: 'WSL' };
 
-/// Fetching the binary is the only part that differs; everything after it —
-/// the executable bit, the startup guard, sourcing it — is identical, so it
-/// lives here once.
+/// The executable bit, startup guard, and sourcing it are shared; Termux also
+/// needs its wake lock and CA bundle path.
 ///
 /// The binary lands beside its final name and is renamed into place. Writing
 /// straight over a running agent fails with "Text file busy", and re-pasting is
@@ -844,7 +843,7 @@ const SHELL = { android: 'Termux', windows: 'WSL' };
 /// path: Termux ships no pkill unless procps is installed, and matching on a bare
 /// name would also take out an editor or `tail` that merely has cdash-agent.log
 /// open. The subshell keeps the loop variable out of the user's own shell.
-const setupScript = (fetch, port, keepAwake) => `${fetch} &&
+const setupScript = (fetch, port, kind) => `${fetch} &&
 chmod +x "$HOME/cdash-agent.new" &&
 mv -f "$HOME/cdash-agent.new" "$HOME/cdash-agent" &&
 ( for p in /proc/[0-9]*; do
@@ -856,11 +855,13 @@ rm -f "$HOME/cdash-agent.new"
 grep -q cdash-agent "$HOME/.bashrc" 2>/dev/null || cat >> "$HOME/.bashrc" <<'CDASH'
 
 # claude-dashboard: start the agent whenever this shell opens, unless it is up
-if ! curl -fsS -m 1 http://127.0.0.1:${port}/api/health >/dev/null 2>&1; then${keepAwake}
+if ! curl -fsS -m 1 http://127.0.0.1:${port}/api/health >/dev/null 2>&1; then${keepAwakeLine(kind)}
   nohup "$HOME/cdash-agent" >"$HOME/cdash-agent.log" 2>&1 </dev/null &
 fi
 CDASH
-. "$HOME/.bashrc"`;
+${kind === 'copy' ? '' : `# Patch existing guards too, so re-pasting repairs Termux certificate lookup.
+sed -i --follow-symlinks 's|^  nohup "$HOME/cdash-agent" |  SSL_CERT_FILE="\${SSL_CERT_FILE:-$PREFIX/etc/tls/cert.pem}" nohup "$HOME/cdash-agent" |' "$HOME/.bashrc" &&
+`}. "$HOME/.bashrc"`;
 
 /// `curl` out of the app's own loopback server, or `cp` from the Windows
 /// filesystem that WSL already mounts. The source is quoted — a Windows path
@@ -891,7 +892,7 @@ async function showSetup(mode = 'down', status = '') {
     const { kind, source, port } = await invoke('agent_handoff');
     $('#setup-addr').textContent = `localhost:${port}`;
     $('#setup-script').textContent =
-      setupScript(fetchLine(kind, source), port, keepAwakeLine(kind));
+      setupScript(fetchLine(kind, source), port, kind);
   } catch (e) {
     // No bundled agent (a build without CDASH_AGENT_BIN): say so rather than
     // showing a command that fetches nothing.
