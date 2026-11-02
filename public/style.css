@@ -297,6 +297,7 @@ button, input, select { font: inherit; }
 .session:hover { transform: translateY(-1px); border-color: var(--border-strong); }
 .session.resumable { background: var(--surface-2); box-shadow: var(--shadow-sm); }
 .session.resumable::before { background: var(--border-strong); }
+.session.pinned::before { background: var(--accent); }
 
 .session-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 /* Title + branch + tag share one truncating group so the status pill always
@@ -376,6 +377,7 @@ button, input, select { font: inherit; }
     color var(--dur) var(--ease), opacity var(--dur) var(--ease);
 }
 .action:hover { background: var(--surface-hover); }
+.action.pin[aria-pressed="true"] { color: var(--accent); }
 .action svg { width: 15px; height: 15px; flex: none; }
 .action:disabled { opacity: 0.55; cursor: default; }
 .action.primary { background: var(--accent); border-color: transparent; color: var(--accent-contrast); }

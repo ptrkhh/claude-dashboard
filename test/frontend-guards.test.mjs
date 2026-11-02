@@ -14,10 +14,10 @@ function statsRenderer() {
   const nodes = {};
   const context = {
     $: id => nodes[id] ||= {},
-    document: { activeElement: null },
+    document: { activeElement: null, querySelectorAll: () => [] },
     esc: s => s, fmtKb: String, fmtReset: String,
     runningCard: () => '', resumableCard: () => '',
-    resLimit: 20,
+    resLimit: 20, lastRes: [], lastPinned: [],
   };
   runInNewContext(`${statTile}\n${render}; this.render = render;`, context);
   return stats => {
@@ -151,7 +151,7 @@ test('resumable summary uses escaped, keyboard-expandable peek and retains promp
   const context = {
     esc: s => String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;'),
     fmtTs: () => '', gitBadge: () => '', pickHtml: () => '', effortLabel: String,
-    ICONS: { refresh: '', trash: '' },
+    ICONS: { refresh: '', trash: '', pin: '' },
   };
   runInNewContext(`${card}; this.card = resumableCard;`, context);
   const session = { sid: 'one', title: 'Title', prompts: ['Earlier prompt'] };
@@ -185,11 +185,120 @@ test('polling preserves expanded summaries and keyboard focus by session ID', ()
     set innerHTML(_) { replaced = true; },
   };
   const context = {
-    $: () => container, lastRes: [{ sid: 'one' }, { sid: 'two' }], resLimit: 20,
+    $: id => id === '#pinned' ? { querySelectorAll: () => [] } : container,
+    lastRes: [{ sid: 'one' }, { sid: 'two' }], lastPinned: [], resLimit: 20,
     resumableCard: () => '', document: { activeElement: { closest: () => before[0] } },
   };
   runInNewContext(`${render}; renderResumable();`, context);
   assert.equal(after[0].open, true);
   assert.equal(after[1].open, false);
   assert.equal(focused, true);
+});
+
+test('inactive cards offer pin and unpin without changing Resume', () => {
+  const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const card = src.slice(src.indexOf('function resumableCard('), src.indexOf('function renderResumable('));
+  const context = { esc: String, fmtTs: () => '', gitBadge: () => '', pickHtml: () => '', ICONS: {} };
+  runInNewContext(`${card}; this.card = resumableCard;`, context);
+  const s = { sid: 'one', prompts: [] };
+  assert.match(context.card(s), /data-pin="one"[^>]*aria-pressed="false"[^>]*>.*Pin/s);
+  assert.match(context.card(s, true), /data-pin="one"[^>]*aria-pressed="true"[^>]*>.*Unpin/s);
+  assert.match(context.card(s, true), /data-resume="one"/);
+});
+
+test('pinned summaries retain expansion and keyboard focus during polling', () => {
+  const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const render = src.slice(src.indexOf('function renderResumable('), src.indexOf('function render(d) {'));
+  let replaced = false, focused = false;
+  const detail = { dataset: { summary: 'pinned' }, open: false,
+    querySelector: () => ({ focus: () => { focused = true; } }) };
+  const pinned = { querySelectorAll: () => replaced ? [detail] : [{ dataset: { summary: 'pinned' } }],
+    set innerHTML(value) { this.html = value; replaced = true; } };
+  const resumable = { querySelectorAll: () => [] };
+  const context = {
+    $: id => id === '#pinned' ? pinned : resumable,
+    lastPinned: [{ sid: 'pinned' }], lastRes: [{ sid: 'history' }], resLimit: 1,
+    resumableCard: (s, pin) => `${s.sid}:${pin}`,
+    document: { activeElement: { closest: () => detail } },
+  };
+  runInNewContext(`${render}; renderResumable();`, context);
+  assert.equal(detail.open, true);
+  assert.equal(focused, true);
+  assert.match(pinned.html, /pinned:true/);
+  assert.doesNotMatch(pinned.html, /data-more|history/);
+  assert.match(resumable.innerHTML, /history:false.*data-more/);
+});
+
+test('a newly running conversation leaves inactive sections without disturbing another picker', () => {
+  const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const code = src.slice(src.indexOf('function render(d) {'), src.indexOf("document.body.addEventListener('click'", src.indexOf('function render(d) {')));
+  let painted = false;
+  const nodes = {};
+  const context = {
+    $: id => nodes[id] ||= {},
+    document: { activeElement: { closest: () => ({ dataset: { sid: 'two' } }) },
+      querySelectorAll: () => [{ dataset: { resume: 'one' }, closest: () => card }] },
+    lastPinned: [{ sid: 'one' }], lastRes: [],
+    esc: String, fmtKb: String, runningCard: () => '',
+    statTile: () => '', renderResumable: () => { painted = true; },
+  };
+  let removed = false;
+  const card = { parentElement: { id: 'pinned', querySelector: () => null }, remove: () => { removed = true; } };
+  runInNewContext(`${code}; this.render = render;`, context);
+  context.render({ running: [{ sid: 'one' }], pinned: [], resumable: [],
+    stats: { cpuPct: 1, ramUsedKb: 1, ramTotalKb: 2, disks: [] } });
+  assert.equal(removed, true, 'a stale pinned card must not remain beside its running card');
+  assert.equal(painted, false, 'the unrelated open picker keeps its DOM and focus');
+});
+
+test('summary expansion follows a conversation when it moves between inactive sections', () => {
+  const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const render = src.slice(src.indexOf('function renderResumable('), src.indexOf('function render(d) {'));
+  for (const destination of ['#pinned', '#resumable']) {
+    const detail = { dataset: { summary: 'one' }, open: false };
+    const nodes = Object.fromEntries(['#pinned', '#resumable'].map(id => {
+      let replaced = false;
+      return [id, { querySelectorAll: () => replaced ? (id === destination ? [detail] : [])
+        : (id !== destination ? [{ dataset: { summary: 'one' } }] : []),
+        set innerHTML(_) { replaced = true; } }];
+    }));
+    runInNewContext(`${render}; renderResumable();`, {
+      $: id => nodes[id], document: { activeElement: null },
+      lastPinned: destination === '#pinned' ? [{ sid: 'one' }] : [],
+      lastRes: destination === '#resumable' ? [{ sid: 'one' }] : [],
+      resLimit: 20, resumableCard: () => '',
+    });
+    assert.equal(detail.open, true, `summary stays expanded after moving to ${destination}`);
+  }
+});
+
+test('pin keeps keyboard focus unless the user focuses something else while saving', async () => {
+  const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const start = src.indexOf("document.body.addEventListener('click'");
+  const handler = src.slice(start, src.indexOf('// Resume-card dropdowns:', start));
+  for (const moveFocus of [false, true]) {
+    const body = {};
+    const other = {};
+    const document = { body, activeElement: null };
+    const el = {
+      dataset: { pin: 'one' }, getAttribute: () => 'false',
+      set disabled(value) { if (value && document.activeElement === el) document.activeElement = body; },
+      focus: () => { document.activeElement = el; },
+    };
+    document.activeElement = el;
+    let click, polledFocus;
+    body.addEventListener = (_, callback) => { click = callback; };
+    runInNewContext(handler, { document,
+      api: async (path, request) => {
+        assert.equal(path, '/api/pin');
+        assert.equal(request.sid, 'one');
+        assert.equal(request.pinned, true);
+        if (moveFocus) document.activeElement = other;
+      },
+      poll: () => { polledFocus = document.activeElement; },
+      toast: message => { assert.fail(message); },
+    });
+    await click({ target: { closest: selector => selector === '[data-term]' ? null : el } });
+    assert.equal(polledFocus, moveFocus ? other : el);
+  }
 });
