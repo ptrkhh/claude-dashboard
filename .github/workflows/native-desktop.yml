@@ -75,3 +75,89 @@ jobs:
           name: cdash-tauri-macos-arm64
           path: dist/cdash-tauri-macos-arm64.dmg
           if-no-files-found: error
+
+  windows-clients:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.1
+      - name: Install pinned Windows cross-build toolchain
+        run: scripts/toolchain.sh --accept-licenses --skip-android
+      - name: Build and check Windows clients
+        run: scripts/build-all.sh --no-apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cdash-tauri-windows
+          path: |
+            dist/cdash-tauri-windows-x64.exe
+            dist/cdash-tauri-windows-arm64.exe
+          if-no-files-found: error
+
+  android-test-apk:
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.1
+        with:
+          targets: aarch64-linux-android
+      - uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: aarch64-unknown-linux-musl
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install pinned Android SDK packages
+        run: |
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          { yes || true; } | "$sdkmanager" --sdk_root="$ANDROID_HOME" --licenses >/dev/null
+          "$sdkmanager" --sdk_root="$ANDROID_HOME" --install \
+            'platforms;android-37.0' 'build-tools;37.0.0' 'ndk;29.0.14206865'
+          echo "NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+      - name: Install Tauri CLI
+        run: cargo install --locked tauri-cli --version =2.12.1
+      - name: Build the Termux agent
+        run: cargo build --release --locked -p cdash-agent --target aarch64-unknown-linux-musl
+      - name: Build Android APK
+        working-directory: crates/tauri-app
+        run: |
+          cargo tauri android init
+          cargo tauri icon "$PWD/icons/source.json"
+          sed -i '/getByName("release")/a\        manifestPlaceholders["usesCleartextTraffic"] = "true"' \
+            gen/android/app/build.gradle.kts
+          grep -A1 'getByName("release")' gen/android/app/build.gradle.kts | grep -q usesCleartextTraffic
+          CDASH_AGENT_BIN="$GITHUB_WORKSPACE/target/aarch64-unknown-linux-musl/release/cdash-agent" \
+            cargo tauri android build --apk --target aarch64
+      - name: Sign and verify installable test APK
+        run: |
+          out=crates/tauri-app/gen/android/app/build/outputs/apk/universal/release
+          build_tools="$ANDROID_HOME/build-tools/37.0.0"
+          key="$RUNNER_TEMP/android-test.keystore"
+          keytool -genkeypair -noprompt -dname 'CN=Android Debug,O=Android,C=US' \
+            -alias androiddebugkey -keypass android -keystore "$key" -storepass android \
+            -validity 10000 -keyalg RSA -keysize 2048
+          "$build_tools/zipalign" -p -f 4 "$out/app-universal-release-unsigned.apk" \
+            "$out/cdash-dashboard-android-arm64.apk"
+          "$build_tools/apksigner" sign --ks "$key" --ks-pass pass:android \
+            --ks-key-alias androiddebugkey --key-pass pass:android \
+            "$out/cdash-dashboard-android-arm64.apk"
+          "$build_tools/apksigner" verify --verbose "$out/cdash-dashboard-android-arm64.apk"
+      - name: Check the APK embeds the ARM64 agent
+        run: |
+          python3 - <<'PY'
+          import zipfile
+          from pathlib import Path
+
+          agent = Path('target/aarch64-unknown-linux-musl/release/cdash-agent').read_bytes()
+          apk = 'crates/tauri-app/gen/android/app/build/outputs/apk/universal/release/cdash-dashboard-android-arm64.apk'
+          with zipfile.ZipFile(apk) as archive:
+              assert agent in archive.read('lib/arm64-v8a/libcdash_tauri_lib.so')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cdash-dashboard-android-arm64-test
+          path: crates/tauri-app/gen/android/app/build/outputs/apk/universal/release/cdash-dashboard-android-arm64.apk
+          if-no-files-found: error
