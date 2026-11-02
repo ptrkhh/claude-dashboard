@@ -540,6 +540,14 @@ function openTerm(name, title) {
   const fit = new FitAddon.FitAddon();
   xterm.loadAddon(fit);
   xterm.open($('#term-screen'));
+  // Let native copy/paste events reach xterm; Ctrl+C without a selection still interrupts.
+  xterm.attachCustomKeyEventHandler(e => {
+    if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+      const key = e.key.toLowerCase();
+      if (key === 'v' || (key === 'c' && xterm.hasSelection())) return false;
+    }
+    return true;
+  });
   // The hidden textarea is what the phone keyboard types into.
   for (const [k, v] of [['autocapitalize', 'off'], ['autocorrect', 'off'], ['autocomplete', 'off'], ['spellcheck', 'false']])
     xterm.textarea.setAttribute(k, v);
