@@ -39,6 +39,7 @@ crate::guarded_routes! {
     get "/api/term" => routes::get_term,
     get "/api/models" => routes::get_models,
     post "/api/favorites" => routes::post_favorites,
+    post "/api/pin" => routes::post_pin,
     post "/api/launch" => routes::post_launch,
     post "/api/resume" => routes::post_resume,
     post "/api/kill" => routes::post_kill,
@@ -130,6 +131,30 @@ async fn embedded_asset(uri: OriginalUri) -> Response {
         "icon.svg" => (
             "image/svg+xml",
             include_bytes!("../../../../public/icon.svg"),
+        ),
+        "icon-light.svg" => (
+            "image/svg+xml",
+            include_bytes!("../../../../public/icon-light.svg"),
+        ),
+        "icon-32.png" => (
+            "image/png",
+            include_bytes!("../../../../public/icon-32.png"),
+        ),
+        "icon-light-32.png" => (
+            "image/png",
+            include_bytes!("../../../../public/icon-light-32.png"),
+        ),
+        "icon-192.png" => (
+            "image/png",
+            include_bytes!("../../../../public/icon-192.png"),
+        ),
+        "icon-512.png" => (
+            "image/png",
+            include_bytes!("../../../../public/icon-512.png"),
+        ),
+        "icon-maskable.png" => (
+            "image/png",
+            include_bytes!("../../../../public/icon-maskable.png"),
         ),
         "transport/backoff.js" => (
             "text/javascript; charset=utf-8",
