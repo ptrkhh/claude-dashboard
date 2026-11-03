@@ -5,7 +5,7 @@ import { runInNewContext } from 'node:vm';
 
 const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
 function picker(catalog = []) {
-  const context = { picks: {}, EFFORTS: ['low', 'medium', 'high'] };
+  const context = { picks: {}, EFFORTS: ['low', 'medium', 'high'], modelCatalogs: new Map() };
   const models = src.slice(src.indexOf('const MODELS ='), src.indexOf('const EFFORTS ='));
   const filter = src.includes('function latestModels(')
     ? src.slice(src.indexOf('function latestModels('), src.indexOf('let modelChoices =')) : '';
@@ -50,10 +50,11 @@ test('launch refresh merges discovered Claude labels and latest GPT families wit
   const catalog = [{ value: 'opus', model: 'claude-opus-5-5', label: 'Claude Opus 5.5' },
     ...['gpt-6-sol', 'gpt-6.1-sol', 'gpt-6-luna'].map(choice)];
   const context = { gen: 1, api: async () => catalog, updateEfforts() {},
+    $: () => ({ value: '' }),
     modelDD: { setItems(items) { context.items = plain(items); } } };
   const definitions = src.slice(src.indexOf('const MODELS ='), src.indexOf('const EFFORTS ='));
   const filter = src.slice(src.indexOf('function latestModels('), src.indexOf('const modelDD ='));
-  const refresh = src.slice(src.indexOf('let modelsAt ='), src.indexOf('function toast('));
+  const refresh = src.slice(src.indexOf('let modelsGeneration = -1;'), src.indexOf('function toast('));
   runInNewContext(`${definitions}\n${filter}\n${refresh}\nthis.refresh = refreshModels;`, context);
   await context.refresh(1);
   assert.deepEqual(context.items.map(m => m.value), ['sonnet', 'opus', 'haiku', 'fable', 'codex:gpt-6.1-sol', 'codex:gpt-6-luna']);

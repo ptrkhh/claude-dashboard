@@ -103,8 +103,8 @@ else {
 `, { mode: 0o700 });
   const source = join(dir, 'session.jsonl'), cache = join(dir, 'summary.json');
   await writeFile(source, [user('Fix resumable sessions'), assistant('Local parser checks passed; device tests pending.')].map(line).join('\n'));
-  const run = (extra = {}) => new Promise((done, reject) => {
-    const child = spawn(process.execPath, [resolve('crates/agent/src/collect/codex-remote.mjs'), '--summary', JSON.stringify({ source, cache })], {
+  const run = (extra = {}, bridge = resolve('crates/agent/src/collect/codex-remote.mjs')) => new Promise((done, reject) => {
+    const child = spawn(process.execPath, [bridge, '--summary', JSON.stringify({ source, cache })], {
       env: { ...process.env, PATH: dir, CDASH_CHECK_WIRE: wire, CDASH_CHECK_OUTPUT: JSON.stringify(output),
         OPENAI_API_KEY: 'must-not-leak', ANTHROPIC_API_KEY: 'must-not-leak', ...extra }, stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -181,4 +181,13 @@ test('native summaries bypass CLIs and new turns update incrementally; failed re
   await writeFile(f.source, (await readFile(f.source, 'utf8')) + '\n' + line(user('One more request')));
   assert.ok((await f.run({ CDASH_CHECK_OUTPUT: '{}' })).error);
   assert.equal(await readFile(f.cache, 'utf8'), before);
+});
+
+
+test('copied summary bridge works without a Claude worker transport', { timeout: 15_000 }, async t => {
+  const f = await fixture(t);
+  const bridge = join(f.dir, 'bridge.mjs');
+  await writeFile(bridge, await readFile(resolve('crates/agent/src/collect/codex-remote.mjs')));
+  await writeFile(join(f.dir, 'summary.mjs'), await readFile(resolve('crates/agent/src/collect/summary.mjs')));
+  assert.equal((await f.run({}, bridge)).summary, native);
 });

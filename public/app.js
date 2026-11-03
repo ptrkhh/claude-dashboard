@@ -136,16 +136,17 @@ function buildDropdown(el, label, items, initial, onChange = () => {}) {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!isOpen()) open(); else if (opts[active]) pick(opts[active]); }
   });
   document.addEventListener('click', e => { if (isOpen() && !el.contains(e.target)) close(); });
-  const setItems = (items, fallback) => {
+  const setItems = (items, fallback, reset = false) => {
     entries = choices(items);
-    if (!entries.some(i => i.value === value)) value = fallback || entries[0]?.value || '';
+    if (reset || !entries.some(i => i.value === value)) value = fallback ?? entries[0]?.value ?? '';
     current.textContent = text();
     menu.innerHTML = optionsHtml(entries, value);
     opts = [...menu.querySelectorAll('li')];
     close();
   };
   setItems(items, initial);
-  return { get value() { return value; }, setItems };
+  const setLabel = label => { trigger.setAttribute('aria-label', label); el.querySelector('.cb-lead').textContent = label; };
+  return { get value() { return value; }, setItems, setLabel };
 }
 function latestModels(models) {
   const families = new Map();
@@ -159,34 +160,65 @@ function latestModels(models) {
   return [...families.values()].map(entry => entry.model);
 }
 let modelChoices = MODELS;
+const modelCatalogs = new Map();
 const modelDD = buildDropdown($('#model'), 'Model', MODELS, 'sonnet', updateEfforts);
 const effortDD = buildDropdown($('#effort'), 'Effort', EFFORTS.map(value => ({ value, label: effortLabel(value) })), 'medium');
+let effortModel = modelDD.value;
 function updateEfforts() {
+  const changed = effortModel !== modelDD.value && (effortModel.startsWith('opencode:') || modelDD.value.startsWith('opencode:'));
+  effortModel = modelDD.value;
   const model = modelChoices.find(m => m.value === modelDD.value);
-  effortDD.setItems((model?.efforts || EFFORTS).map(value => ({ value, label: effortLabel(value) })), model?.defaultEffort || 'medium');
+  const isOpenCode = modelDD.value.startsWith('opencode:');
+  const variants = model?.variants || [];
+  $('#effort').hidden = isOpenCode && !variants.length;
+  effortDD.setLabel(isOpenCode ? 'Variant' : 'Effort');
+  const choices = isOpenCode ? [{ value: '', label: 'Default' }, ...variants.map(value => ({ value, label: value }))]
+    : (model?.efforts || EFFORTS).map(value => ({ value, label: effortLabel(value) }));
+  effortDD.setItems(choices, isOpenCode ? model?.defaultVariant || '' : model?.defaultEffort || 'medium', changed);
 }
-let modelsAt = 0, modelsLoading = false;
-async function refreshModels(g) {
-  if (modelsLoading || Date.now() - modelsAt < 60_000) return;
-  modelsLoading = true;
-  try {
-    const models = await api('/api/models');
-    if (g !== gen) return;
-    modelChoices = [...MODELS.map(m => models.find(c => c.value === m.value) || m),
-      ...latestModels(models.filter(m => m.value.startsWith('codex:')))];
-    modelDD.setItems(modelChoices, 'sonnet');
-    updateEfforts();
-  } catch (err) {
-    if (g === gen) {
-      modelChoices = MODELS;
-      modelDD.setItems(modelChoices, 'sonnet');
-      updateEfforts();
-      toast(`Model discovery failed: ${err.message}`);
-    }
-  } finally {
-    if (g === gen) modelsAt = Date.now();
-    modelsLoading = false;
+let modelsGeneration = -1;
+async function refreshModels(g, dir = $('#dir').value.trim()) {
+  if (g !== gen || (dir && !dir.startsWith('/'))) return;
+  if (modelsGeneration !== g) {
+    modelsGeneration = g; modelCatalogs.clear(); modelChoices = MODELS;
+    modelDD.setItems(modelChoices, 'sonnet'); updateEfforts();
   }
+  const key = dir || '';
+  let entry = modelCatalogs.get(key);
+  const active = () => g === gen && $('#dir').value.trim() === key;
+  const apply = models => {
+    if (!active()) return;
+    const catalog = new Map(models.map(model => [model.value, model]));
+    modelChoices = [
+      ...MODELS.map(model => catalog.get(model.value) || model),
+      ...latestModels(models.filter(model => model.value.startsWith('codex:'))),
+      ...models.filter(model => model.value.startsWith('opencode:')),
+    ];
+    modelDD.setItems(modelChoices, 'sonnet'); updateEfforts();
+  };
+  if (entry?.loading) return entry.loading;
+  if (entry?.at && Date.now() - entry.at < 60_000) { if (entry.models) apply(entry.models); return; }
+  if (active()) apply(entry?.models || modelChoices.filter(model => model.value.startsWith('codex:')));
+  if (!entry) {
+    if (modelCatalogs.size >= 32) modelCatalogs.delete(modelCatalogs.keys().next().value);
+    entry = { at: 0, models: null, loading: null }; modelCatalogs.set(key, entry);
+  }
+  entry.loading = (async () => {
+    try {
+      const models = await api(`/api/models${dir ? `?dir=${encodeURIComponent(dir)}` : ''}`);
+      if (g !== gen || modelCatalogs.get(key) !== entry) return;
+      entry.models = models; entry.at = Date.now(); apply(models);
+    } catch (err) {
+      if (g === gen && modelCatalogs.get(key) === entry) {
+        entry.at = Date.now();
+        if (entry.models) apply(entry.models);
+        else if (active()) toast(`Model discovery failed: ${err.message}`);
+      }
+    } finally {
+      if (modelCatalogs.get(key) === entry) entry.loading = null;
+    }
+  })();
+  return entry.loading;
 }
 
 function toast(msg) {
@@ -263,7 +295,7 @@ function statTile({ label, value, pct, sub, title }) {
 
 function runningCard(r) {
   const status = r.working ? 'working' : 'idle';
-  const chips = [r.model, r.effort && effortLabel(r.effort)].filter(Boolean);
+  const chips = [r.model, r.effort && effortLabel(r.effort), r.variant && `Variant: ${r.variant}`].filter(Boolean);
   const chipHtml = chips.length
     ? chips.map(x => `<span class="chip">${esc(x)}</span>`).join('')
     : `<span class="chip">${r.external ? 'external' : 'resumed'}</span>`;
@@ -306,8 +338,11 @@ let lastPinned = [];
 // (the model and effort the session last ran with); there is no "default" entry.
 function pickState(s) {
   const codex = s.modelId?.startsWith('codex');
-  const base = codex ? latestModels(modelChoices.filter(m => m.value.startsWith('codex:')))
-    : modelChoices.filter(m => !m.value.startsWith('codex:'));
+  const isOpenCode = s.modelId?.startsWith('opencode:') || s.sid?.startsWith('ses_');
+  const projectModels = modelCatalogs.get(s.dir || '')?.models || [];
+  const base = isOpenCode ? projectModels.filter(m => m.value.startsWith('opencode:'))
+    : codex ? latestModels(modelChoices.filter(m => m.value.startsWith('codex:')))
+    : modelChoices.filter(m => !m.value.startsWith('codex:') && !m.value.startsWith('opencode:'));
   // The session's own model stays selectable even if the catalog no longer lists it.
   const models = !s.modelId || base.some(m => m.value === s.modelId)
     ? base : [{ value: s.modelId, label: s.model || s.modelId }, ...base];
@@ -318,7 +353,17 @@ function pickState(s) {
   const wanted = p.effort ?? s.effort;
   const effort = efforts.includes(wanted) ? wanted
     : current?.defaultEffort || (efforts.includes('medium') ? 'medium' : efforts[0]);
-  return { models, model, efforts, effort };
+  const variants = current?.variants || [];
+  const variant = p.variant ?? (model !== s.modelId ? '' : s.variant || '');
+  return { models, model, efforts, effort, variant, variants, isOpenCode };
+}
+function resumePayload(s) {
+  const { model, effort, variant, isOpenCode } = pickState(s);
+  const payload = { sid: s.sid, model };
+  if (isOpenCode) {
+    if (Object.hasOwn(picks[s.sid] || {}, 'variant') || model !== s.modelId) payload.variant = variant;
+  } else payload.effort = effort;
+  return payload;
 }
 const pickDropdown = (s, kind, label, items, value) => `
   <div class="cb-select pick-dd" data-sid="${esc(s.sid)}" data-pick="${kind}">
@@ -328,10 +373,13 @@ const pickDropdown = (s, kind, label, items, value) => `
     <ul class="cb-menu" role="listbox" hidden>${optionsHtml(items, value)}</ul>
   </div>`;
 function pickHtml(s) {
-  const { models, model, efforts, effort } = pickState(s);
+  const { models, model, efforts, effort, variants, variant, isOpenCode } = pickState(s);
+  const options = [{ value: '', label: 'Default' }, ...variants.map(value => ({ value, label: value }))];
+  if (variant && !options.some(item => item.value === variant)) options.push({ value: variant, label: variant });
   return `<div class="pick">
       ${pickDropdown(s, 'model', 'Model', models, model)}
-      ${pickDropdown(s, 'effort', 'Effort', efforts.map(value => ({ value, label: effortLabel(value) })), effort)}
+      ${isOpenCode ? (variants.length ? pickDropdown(s, 'variant', 'Variant', options, variant) : '')
+        : pickDropdown(s, 'effort', 'Effort', efforts.map(value => ({ value, label: effortLabel(value) })), effort)}
     </div>`;
 }
 
@@ -345,7 +393,7 @@ function resumableCard(s, pinned = false) {
         </div>
         <span class="time">${fmtTs(s.ts)}</span>
       </div>
-      ${s.model ? `<div class="session-meta"><span class="chip">${esc(s.model)}</span>${s.effort ? `<span class="chip">${esc(effortLabel(s.effort))}</span>` : ''}</div>` : ''}
+      ${s.model ? `<div class="session-meta"><span class="chip">${esc(s.model)}</span>${s.effort ? `<span class="chip">${esc(effortLabel(s.effort))}</span>` : ''}${s.variant ? `<span class="chip">${esc(`Variant: ${s.variant}`)}</span>` : ''}</div>` : ''}
       ${s.summary ? `<details class="peek summary" data-summary="${esc(s.sid)}"><summary class="peek-text">${esc(s.summary)}</summary></details>` : `<div class="prompts">↳ ${esc(s.prompts.length ? s.prompts.join(' · ') : 'No conversation preview available')}</div>`}
       ${pickHtml(s)}
       <div class="actions">
@@ -436,8 +484,8 @@ document.body.addEventListener('click', async e => {
       }
     } else if (el.dataset.resume) {
       el.disabled = true;
-      const { model, effort } = pickState([...lastPinned, ...lastRes].find(s => s.sid === el.dataset.resume) || { sid: el.dataset.resume });
-      try { await api('/api/resume', { sid: el.dataset.resume, model, effort }); delete picks[el.dataset.resume]; poll(); }
+      const selection = resumePayload([...lastPinned, ...lastRes].find(s => s.sid === el.dataset.resume) || { sid: el.dataset.resume });
+      try { await api('/api/resume', selection); delete picks[el.dataset.resume]; poll(); }
       finally { el.disabled = false; }
     } else if (el.dataset.purge) {
       if (lastPinned.some(s => s.sid === el.dataset.purge)) await api('/api/pin', { sid: el.dataset.purge, pinned: false });
@@ -469,13 +517,25 @@ function ddActive(dd, li) {
   if (li) { li.classList.add('active'); li.scrollIntoView({ block: 'nearest' }); }
 }
 function ddOpen(dd) {
+  const session = lastRes.find(item => item.sid === dd.dataset.sid);
+  if (dd.dataset.pick === 'model' && session?.modelId?.startsWith('opencode:') && session.dir) {
+    const g = gen;
+    refreshModels(g, session.dir).then(() => {
+      if (g !== gen || !dd.isConnected || ddMenu(dd).hidden) return;
+      const { models, model } = pickState(session);
+      ddMenu(dd).innerHTML = optionsHtml(models, model);
+      ddActive(dd, ddMenu(dd).querySelector('li.on'));
+    });
+  }
   document.querySelectorAll('.cb-menu:not([hidden])').forEach(m => { if (m.parentElement !== dd) { m.hidden = true; m.previousElementSibling.setAttribute('aria-expanded', 'false'); } });
   ddMenu(dd).hidden = false; ddTrigger(dd).setAttribute('aria-expanded', 'true');
   ddActive(dd, ddMenu(dd).querySelector('li.on'));
 }
 function ddPick(dd, li, refocus) {
   const { sid, pick } = dd.dataset;
-  (picks[sid] ||= {})[pick] = li.dataset.value;
+  const selected = picks[sid] ||= {};
+  if (pick === 'model' && selected.model !== li.dataset.value) delete selected.variant;
+  selected[pick] = li.dataset.value;
   renderResumable();
   // Keyboard users keep their place; a mouse click lets the list refresh again.
   if (refocus) document.querySelector(`.pick-dd[data-sid="${CSS.escape(sid)}"][data-pick="${pick}"] .cb-trigger`)?.focus();
@@ -644,15 +704,22 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden && term?.retry && !term.ws) termConnect();
 });
 
+let modelDirTimer;
+$('#dir').addEventListener('input', () => {
+  clearTimeout(modelDirTimer);
+  modelDirTimer = setTimeout(() => refreshModels(gen), 250);
+});
+
 // Launch: submitting the command bar (button or Enter in the directory field).
 $('#launcher').addEventListener('submit', async e => {
   e.preventDefault();
   const btn = $('#launch');
   const dir = $('#dir').value.trim();
   if (!dir) { toast('Enter a project directory first'); $('#dir').focus(); return; }
-  const model = modelDD.value, effort = effortDD.value;
+  const model = modelDD.value;
+  const selection = model.startsWith('opencode:') ? { model, variant: effortDD.value } : { model, effort: effortDD.value };
   btn.disabled = true; btn.innerHTML = `${ICONS.play}<span>Launching…</span>`;
-  try { await api('/api/launch', { dir, model, effort }); $('#dir').value = ''; poll(); }
+  try { await api('/api/launch', { dir, ...selection }); $('#dir').value = ''; poll(); }
   catch (err) { toast(err.message); poll(); } // re-arm even when the launch failed
   finally { btn.disabled = false; btn.innerHTML = `${ICONS.play}<span>Launch</span>`; }
 });
@@ -773,7 +840,7 @@ async function toggleFav(path) {
     if (pkTab === 'favorites') renderPlaces('favorites'); else refreshStars();
   } catch (err) { toast(err.message); }
 }
-function selectFolder(path) { $('#dir').value = path; closePicker(); $('#dir').focus(); }
+function selectFolder(path) { $('#dir').value = path; closePicker(); $('#dir').focus(); refreshModels(gen, path); }
 
 pkList.addEventListener('click', e => {
   const fav = e.target.closest('[data-fav]');
@@ -876,9 +943,8 @@ async function hostPlatform() {
 /// differs in the dialog's wording.
 const SHELL = { android: 'Termux', windows: 'WSL' };
 
-/// Fetching the binary is the only part that differs; everything after it —
-/// the executable bit, the startup guard, sourcing it — is identical, so it
-/// lives here once.
+/// The executable bit, startup guard, and sourcing it are shared; Termux also
+/// needs its wake lock and CA bundle path.
 ///
 /// The binary lands beside its final name and is renamed into place. Writing
 /// straight over a running agent fails with "Text file busy", and re-pasting is
@@ -894,7 +960,7 @@ const SHELL = { android: 'Termux', windows: 'WSL' };
 /// path: Termux ships no pkill unless procps is installed, and matching on a bare
 /// name would also take out an editor or `tail` that merely has cdash-agent.log
 /// open. The subshell keeps the loop variable out of the user's own shell.
-const setupScript = (fetch, port, keepAwake) => `${fetch} &&
+const setupScript = (fetch, port, kind) => `${fetch} &&
 chmod +x "$HOME/cdash-agent.new" &&
 mv -f "$HOME/cdash-agent.new" "$HOME/cdash-agent" &&
 ( for p in /proc/[0-9]*; do
@@ -906,11 +972,13 @@ rm -f "$HOME/cdash-agent.new"
 grep -q cdash-agent "$HOME/.bashrc" 2>/dev/null || cat >> "$HOME/.bashrc" <<'CDASH'
 
 # claude-dashboard: start the agent whenever this shell opens, unless it is up
-if ! curl -fsS -m 1 http://127.0.0.1:${port}/api/health >/dev/null 2>&1; then${keepAwake}
+if ! curl -fsS -m 1 http://127.0.0.1:${port}/api/health >/dev/null 2>&1; then${keepAwakeLine(kind)}
   nohup "$HOME/cdash-agent" >"$HOME/cdash-agent.log" 2>&1 </dev/null &
 fi
 CDASH
-. "$HOME/.bashrc"`;
+${kind === 'copy' ? '' : `# Patch existing guards too, so re-pasting repairs Termux certificate lookup.
+sed -i --follow-symlinks 's|^  nohup "$HOME/cdash-agent" |  SSL_CERT_FILE="\${SSL_CERT_FILE:-$PREFIX/etc/tls/cert.pem}" nohup "$HOME/cdash-agent" |' "$HOME/.bashrc" &&
+`}. "$HOME/.bashrc"`;
 
 /// `curl` out of the app's own loopback server, or `cp` from the Windows
 /// filesystem that WSL already mounts. The source is quoted — a Windows path
@@ -941,7 +1009,7 @@ async function showSetup(mode = 'down', status = '') {
     const { kind, source, port } = await invoke('agent_handoff');
     $('#setup-addr').textContent = `localhost:${port}`;
     $('#setup-script').textContent =
-      setupScript(fetchLine(kind, source), port, keepAwakeLine(kind));
+      setupScript(fetchLine(kind, source), port, kind);
   } catch (e) {
     // No bundled agent (a build without CDASH_AGENT_BIN): say so rather than
     // showing a command that fetches nothing.
