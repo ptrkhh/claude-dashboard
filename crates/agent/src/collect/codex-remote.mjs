@@ -688,7 +688,7 @@ const queryMode = ['--models', '--usage'].find(mode => process.argv.includes(mod
 if (args[0] === '--summary') {
   import('./summary.mjs').then(({ summarize }) => summarize(JSON.parse(args[1]), Codex, fn => { stop = fn; }))
     .then(value => console.log(JSON.stringify(value)), () => { console.log(JSON.stringify({ error: 'Session summary unavailable' })); });
-} else if (args[0] === '--claude-models') {
+} else if (process.argv.includes('--claude-models')) {
   const child = spawn('claude', ['--print', '--verbose', '--input-format', 'stream-json', '--output-format', 'stream-json',
     '--no-session-persistence', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'], {
     env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== 'CLAUDECODE'

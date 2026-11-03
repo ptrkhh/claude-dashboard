@@ -438,7 +438,10 @@ createInterface({input:process.stdin}).on('line', line => {
 });
 `, { mode: 0o700 });
   const output = await new Promise((done, reject) => {
-    const child = spawn(process.execPath, [resolve('crates/agent/src/collect/codex-remote.mjs'), '--claude-models'], {
+    // The agent passes the script through `node -e`, where the script path is
+    // absent from argv; spawn it that way so the mode branch matches production.
+    const source = readFileSync(resolve('crates/agent/src/collect/codex-remote.mjs'), 'utf8');
+    const child = spawn(process.execPath, ['--input-type=module', '-e', source, '--', '--claude-models'], {
       env: { ...process.env, PATH: dir, CDASH_CHECK_WIRE: wire, CLAUDE_CONFIG_DIR: dir, CLAUDE_CODE_USE_BEDROCK: '1', CLAUDECODE: '1', CLAUDE_CODE_SESSION_ACCESS_TOKEN: 'test-only-token' }, stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '', stderr = '';
