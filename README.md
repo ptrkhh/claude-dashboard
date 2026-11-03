@@ -71,6 +71,8 @@ RC Dashboard starts or resumes Claude Code on the machine where your project liv
 
 Your code, tools, and environment stay on that host. Keep it on and reachable while you work remotely. Closing the dashboard leaves the session running.
 
+External sessions without a Claude link show instructions instead of a waiting spinner. Run `/remote-control` in that session's original terminal to enable Remote Control; the card shows **Open in Claude** once the CLI publishes its link.
+
 ## Technical reference
 
 <details>

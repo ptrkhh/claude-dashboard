@@ -127,6 +127,27 @@ test('legacy Codex sessions do not offer unsupported terminal controls', () => {
   assert.doesNotMatch(context.card({ ...session, nativeTerminal: true, external: true }), /data-term=/);
 });
 
+test('external sessions without a link explain how to enable Remote Control instead of waiting forever', () => {
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const code = app.slice(app.indexOf('function runningCard('), app.indexOf('let lastRes ='));
+  const context = {
+    esc: s => String(s || ''), ICONS: { spinner: '<svg class="spinner"></svg>' },
+    gitBadge: () => '', fmtUp: () => '', armedKill: null,
+  };
+  runInNewContext(`${code}; this.card = runningCard;`, context);
+  const session = { name: 'external-test', dir: '/tmp/project', external: true, rcLink: null };
+  for (const uptimeSec of [0, 180, 8940]) {
+    const card = context.card({ ...session, uptimeSec });
+    assert.match(card, /\/remote-control/);
+    assert.match(card, /original terminal/);
+    assert.doesNotMatch(card, /Waiting for link|class="spinner"|data-term=|data-kill=/);
+  }
+  const linked = context.card({ ...session, rcLink: 'https://claude.ai/code/session_external' });
+  assert.match(linked, /href="https:\/\/claude.ai\/code\/session_external"[^>]*>.*Open in Claude/);
+  assert.doesNotMatch(linked, /\/remote-control|Waiting for link/);
+  assert.match(context.card({ ...session, external: false }), /Waiting for link/);
+});
+
 test('terminal scripts load before app.js', () => {
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
   const at = s => html.indexOf(`<script src="${s}"></script>`);
