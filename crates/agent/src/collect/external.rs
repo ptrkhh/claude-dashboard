@@ -125,7 +125,7 @@ pub async fn external_sessions(
             Arc::clone(&ctx.git).status_for(Arc::clone(&ctx.runner), &cwd, now_ms as u64);
 
         out.push(Session {
-            display_name: None,
+            display_name: super::lookup::custom_title(&ctx.claude_dir, &cwd, &sid).await,
             name: sess
                 .name
                 .filter(|n| !n.is_empty())
@@ -221,6 +221,22 @@ mod tests {
         let out = external_sessions(&ctx_for(d), &rows(&[501]), &HashSet::new(), 0.0).await;
         assert_eq!(out[0].name, "proj");
         assert_eq!(out[0].uptime_sec, 0, "no startedAt means zero, not a negative age");
+    }
+
+    #[tokio::test]
+    async fn a_custom_title_overrides_the_directory_fallback() {
+        let d = tempdir("custom-title");
+        write_session(&d, 508, CLI);
+        let titled = d.join("projects").join(project_dir_name("/proj")).join("s-1");
+        std::fs::create_dir_all(&titled).unwrap();
+        std::fs::write(
+            titled.join("custom-title.json"),
+            r#"{"customTitle":"[Claude] proj · renamed"}"#,
+        )
+        .unwrap();
+
+        let out = external_sessions(&ctx_for(d), &rows(&[508]), &HashSet::new(), 0.0).await;
+        assert_eq!(out[0].display_name.as_deref(), Some("[Claude] proj · renamed"));
     }
 
     #[tokio::test]
