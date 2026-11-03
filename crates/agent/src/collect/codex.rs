@@ -244,6 +244,13 @@ pub async fn launch(
         .await
         .map_err(|e| Refused::Failed(e.to_string()))?;
     let name = tmux_name(dir);
+    write_atomic(
+        &base.join("claude-remote.mjs"),
+        include_str!("claude-remote.mjs"),
+        &format!(".{name}.remote.tmp"),
+    )
+    .await
+    .map_err(|e| Refused::Failed(e.to_string()))?;
     let script = base.join("bridge.mjs");
     write_atomic(
         &script,
@@ -397,6 +404,7 @@ pub async fn history(ctx: &Ctx) -> Vec<Resumable> {
                 model_id: Some(t.model.as_ref().map_or("codex".into(), |m| format!("codex:{m}"))),
                 model: label.or(t.model).or_else(|| Some("Codex".into())),
                 effort: t.effort,
+                variant: None,
                 prompts: Vec::new(),
                 summary: None,
                 source_file: t.rollout_path,
@@ -556,6 +564,8 @@ mod tests {
         assert_eq!(history(&ctx).await[0].display_name.as_deref(), Some(display_name));
         resume(&ctx, SID, Some("codex:gpt-b"), Some("high")).await.unwrap();
         let s = saved_state(&dir);
+        assert_eq!(std::fs::read_to_string(root(&ctx).join("claude-remote.mjs")).unwrap(), include_str!("claude-remote.mjs"));
+        assert_eq!(std::fs::read_to_string(root(&ctx).join("bridge.mjs")).unwrap(), include_str!("codex-remote.mjs"));
         assert_eq!(s.display_name.as_deref(), Some(display_name));
         assert_eq!((s.model.as_deref(), s.effort.as_deref()), (Some("gpt-b"), Some("high")));
         assert_eq!(s.model_label.as_deref(), Some("GPT B"));
@@ -668,7 +678,7 @@ mod tests {
                 assert!(resume(&ctx, SID, None, None).await.unwrap().is_none());
             }
             assert!(!dir.join("tmux-args").exists());
-            assert!(super::super::spawn::launch_session(&ctx, dir.to_str().unwrap(), "sonnet", "medium")
+            assert!(super::super::spawn::launch_session(&ctx, dir.to_str().unwrap(), "sonnet", "medium", None)
                 .await
                 .is_ok());
             std::fs::remove_dir_all(dir).unwrap();
