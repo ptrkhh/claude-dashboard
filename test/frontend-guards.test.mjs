@@ -257,7 +257,7 @@ test('OpenCode resume controls preserve saved variants and send only applicable 
 
 test('project model loads do not let stale responses replace the active project or host', async () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
-  const code = source.slice(source.indexOf('let modelChoices = MODELS;'), source.indexOf('function toast('));
+  const code = source.slice(source.indexOf('function latestModels('), source.indexOf('function toast('));
   const dir = { value: '/a' }, calls = [], pending = [];
   const context = {
     MODELS: [{ value: 'sonnet', label: 'Claude' }, { value: 'opus', label: 'Claude Opus' }], EFFORTS: ['medium'], effortLabel: String, gen: 1,
@@ -332,7 +332,7 @@ test('opening an OpenCode card loads that card project', async () => {
 
 test('refreshing a project catalog preserves its selected OpenCode model', async () => {
   const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
-  const code = source.slice(source.indexOf('let modelChoices = MODELS;'), source.indexOf('function toast('));
+  const code = source.slice(source.indexOf('function latestModels('), source.indexOf('function toast('));
   let now = 1000;
   const pending = [], dropdowns = [], dir = { value: '/project' };
   const context = {
