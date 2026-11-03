@@ -148,6 +148,17 @@ function buildDropdown(el, label, items, initial, onChange = () => {}) {
   const setLabel = label => { trigger.setAttribute('aria-label', label); el.querySelector('.cb-lead').textContent = label; };
   return { get value() { return value; }, setItems, setLabel };
 }
+function latestModels(models) {
+  const families = new Map();
+  for (const model of models) {
+    const match = /^gpt-(\d+(?:\.\d+)*)(?:-(.+))?$/.exec(model.model || '');
+    const family = match ? `gpt:${match[2] || ''}` : model.value;
+    const previous = families.get(family);
+    if (!previous || (match && match[1].localeCompare(previous.version, 'en', { numeric: true }) > 0))
+      families.set(family, { version: match?.[1], model });
+  }
+  return [...families.values()].map(entry => entry.model);
+}
 let modelChoices = MODELS;
 const modelCatalogs = new Map();
 const modelDD = buildDropdown($('#model'), 'Model', MODELS, 'sonnet', updateEfforts);
@@ -177,7 +188,13 @@ async function refreshModels(g, dir = $('#dir').value.trim()) {
   const active = () => g === gen && $('#dir').value.trim() === key;
   const apply = models => {
     if (!active()) return;
-    modelChoices = [...MODELS, ...models]; modelDD.setItems(modelChoices, 'sonnet'); updateEfforts();
+    const catalog = new Map(models.map(model => [model.value, model]));
+    modelChoices = [
+      ...MODELS.map(model => catalog.get(model.value) || model),
+      ...latestModels(models.filter(model => model.value.startsWith('codex:'))),
+      ...models.filter(model => model.value.startsWith('opencode:')),
+    ];
+    modelDD.setItems(modelChoices, 'sonnet'); updateEfforts();
   };
   if (entry?.loading) return entry.loading;
   if (entry?.at && Date.now() - entry.at < 60_000) { if (entry.models) apply(entry.models); return; }
@@ -326,7 +343,9 @@ function pickState(s) {
   const isOpenCode = s.modelId?.startsWith('opencode:') || s.sid?.startsWith('ses_');
   const projectModels = modelCatalogs.get(s.dir || '')?.models || [];
   const base = isOpenCode ? projectModels.filter(m => m.value.startsWith('opencode:'))
-    : codex ? modelChoices.filter(m => m.value.startsWith('codex:')) : MODELS;
+    : codex ? latestModels(modelChoices.filter(m => m.value.startsWith('codex:')))
+    : modelChoices.filter(m => !m.value.startsWith('codex:') && !m.value.startsWith('opencode:'));
+  // The session's own model stays selectable even if the catalog no longer lists it.
   const models = !s.modelId || base.some(m => m.value === s.modelId)
     ? base : [{ value: s.modelId, label: s.model || s.modelId }, ...base];
   const p = picks[s.sid] || {};
