@@ -107,7 +107,7 @@ test('the send bar is gone: the terminal replaced it', () => {
 
 test('legacy Codex sessions do not offer unsupported terminal controls', () => {
   const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
-  const code = app.slice(app.indexOf('function runningCard('), app.indexOf('let lastRes ='));
+  const code = app.slice(app.indexOf('const copyIdBtn ='), app.indexOf('let lastRes ='));
   const context = { esc: s => String(s || ''), ICONS: {}, gitBadge: () => '', fmtUp: () => '', armedKill: null };
   runInNewContext(`${code}; this.card = runningCard;`, context);
   const session = { name: 'cdash-test', dir: '/tmp/project', provider: 'codex' };
@@ -127,9 +127,40 @@ test('legacy Codex sessions do not offer unsupported terminal controls', () => {
   assert.doesNotMatch(context.card({ ...session, nativeTerminal: true, external: true }), /data-term=/);
 });
 
+test('cards offer the session ID for copying once one exists', () => {
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const code = app.slice(app.indexOf('const copyIdBtn ='), app.indexOf('let lastRes ='));
+  const context = { esc: s => String(s || ''), ICONS: {}, gitBadge: () => '', fmtUp: () => '', armedKill: null };
+  runInNewContext(`${code}; this.card = runningCard;`, context);
+  const session = { name: 'cdash-test', dir: '/tmp/project' };
+  assert.doesNotMatch(context.card(session), /data-copy=/, 'no sid yet, no button');
+  assert.match(context.card({ ...session, sid: '3c7254a1-54ff' }), /data-copy="3c7254a1-54ff"/);
+  assert.match(context.card({ ...session, sid: 'ext', external: true }), /data-copy="ext"/);
+});
+
+test('copy reports success and shows the ID when the clipboard APIs fail', async () => {
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const code = app.slice(app.indexOf('async function copyText('), app.indexOf('function toast('));
+  const run = async (write, exec) => {
+    let toastMsg;
+    const field = { style: {}, select() {}, remove() {} };
+    const context = {
+      navigator: { clipboard: { writeText: write } },
+      document: { createElement: () => field, body: { append() {} }, execCommand: () => exec },
+      toast: msg => { toastMsg = msg; },
+    };
+    runInNewContext(`${code}; this.copy = copyText;`, context);
+    await context.copy('sid-123');
+    return toastMsg;
+  };
+  assert.equal(await run(async () => {}, false), 'Session ID copied');
+  assert.equal(await run(async () => { throw Error('denied'); }, true), 'Session ID copied');
+  assert.equal(await run(async () => { throw Error('denied'); }, false), 'Session ID: sid-123');
+});
+
 test('external sessions without a link explain how to enable Remote Control instead of waiting forever', () => {
   const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
-  const code = app.slice(app.indexOf('function runningCard('), app.indexOf('let lastRes ='));
+  const code = app.slice(app.indexOf('const copyIdBtn ='), app.indexOf('let lastRes ='));
   const context = {
     esc: s => String(s || ''), ICONS: { spinner: '<svg class="spinner"></svg>' },
     gitBadge: () => '', fmtUp: () => '', armedKill: null,
@@ -172,7 +203,7 @@ test('resumable summary uses escaped, keyboard-expandable peek and retains promp
   const context = {
     esc: s => String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;'),
     fmtTs: () => '', gitBadge: () => '', pickHtml: () => '', effortLabel: String,
-    ICONS: { refresh: '', trash: '', pin: '' },
+    ICONS: { refresh: '', trash: '', pin: '' }, copyIdBtn: sid => `data-copy="${sid}"`,
   };
   runInNewContext(`${card}; this.card = resumableCard;`, context);
   const session = { sid: 'one', title: 'Title', prompts: ['Earlier prompt'] };
@@ -190,6 +221,7 @@ test('resumable summary uses escaped, keyboard-expandable peek and retains promp
   assert.match(codex, /&lt;img src=x onerror=alert\(1\)&gt; · Add tests/);
   assert.doesNotMatch(codex, /<img/);
   assert.match(summary, /data-resume="one"/);
+  assert.match(summary, /data-copy="one"/);
 });
 
 test('polling preserves expanded summaries and keyboard focus by session ID', () => {
@@ -370,7 +402,7 @@ test('changing between Claude models preserves a compatible effort', () => {
 test('inactive cards offer pin and unpin without changing Resume', () => {
   const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
   const card = src.slice(src.indexOf('function resumableCard('), src.indexOf('function renderResumable('));
-  const context = { esc: String, fmtTs: () => '', gitBadge: () => '', pickHtml: () => '', ICONS: {} };
+  const context = { esc: String, fmtTs: () => '', gitBadge: () => '', pickHtml: () => '', ICONS: {}, copyIdBtn: () => '' };
   runInNewContext(`${card}; this.card = resumableCard;`, context);
   const s = { sid: 'one', prompts: [] };
   assert.match(context.card(s), /data-pin="one"[^>]*aria-pressed="false"[^>]*>.*Pin/s);
@@ -470,6 +502,6 @@ test('pin keeps keyboard focus unless the user focuses something else while savi
       poll: () => { polledFocus = document.activeElement; },
       toast: message => { assert.fail(message); },
     });
-    await click({ target: { closest: selector => selector === '[data-term]' ? null : el } });
+    await click({ target: { closest: selector => selector === '[data-term]' || selector === '[data-copy]' ? null : el } });
     assert.equal(polledFocus, moveFocus ? other : el);
   }});
