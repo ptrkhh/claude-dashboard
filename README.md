@@ -69,14 +69,7 @@ The image bundles the agent, Claude Code, Codex, OpenCode, and tmux. A second co
 
        docker compose up -d --build
 
-4. Sign in to each CLI once, inside the container:
-
-       docker compose exec tools bash
-       claude
-       codex
-       opencode
-
-   Claude Code must be signed in with an account that supports Remote Control.
+4. Sign in once. In the launcher, choose **Terminal** in the Model menu, pick a directory under `/projects`, and tap **Launch**. Open the new card's **Terminal** button and run `claude`, `codex`, or `opencode`. Claude Code must be signed in with an account that supports Remote Control.
 
 Sessions run in tmux inside the container, so `docker restart`, `docker compose down`, and image rebuilds end them. Project files stay on the host. Cloudflare Access is the only guard: do not publish port 23274.
 
