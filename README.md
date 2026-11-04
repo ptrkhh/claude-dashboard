@@ -48,7 +48,7 @@ Use the dashboard in your browser, on your desktop, or in the Android app. Runni
 4. Choose a project and tap **Launch**, or tap **Resume** on a previous session.
 5. When the session is ready, tap **Open in Claude** and continue coding in the Claude app or website.
 
-Installation and first-run setup may need a terminal. Once setup is complete, use the dashboard to launch and resume sessions.
+Installation and first-run setup may need a terminal. To sign in to Claude Code, Codex, or OpenCode on the host, choose **Terminal** in the Model menu and tap **Launch**: it opens a plain shell in tmux on the host, reachable from its card's **Terminal** button. Once setup is complete, use the dashboard to launch and resume sessions.
 
 | Open RC Dashboard with | Sessions run on | First-run setup |
 |---|---|---|

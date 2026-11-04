@@ -35,7 +35,7 @@ test('resume uses versioned Claude labels from discovery and stays within its pr
   const p = picker([{ value: 'opus', model: 'claude-opus-5-5', label: 'Claude Opus 5.5' }, choice('gpt-6-astra')]);
   const state = p.pick({ sid: 'claude', modelId: 'opus' });
   assert.equal(state.models.find(m => m.value === 'opus').label, 'Claude Opus 5.5');
-  assert.ok(state.models.every(m => !m.value.startsWith('codex:')));
+  assert.ok(state.models.every(m => !m.value.startsWith('codex:') && m.value !== 'terminal'));
 });
 
 test('resume preserves an older saved Codex model while offering only latest alternatives', () => {
@@ -57,7 +57,7 @@ test('launch refresh merges discovered Claude labels and latest GPT families wit
   const refresh = src.slice(src.indexOf('let modelsGeneration = -1;'), src.indexOf('function toast('));
   runInNewContext(`${definitions}\n${filter}\n${refresh}\nthis.refresh = refreshModels;`, context);
   await context.refresh(1);
-  assert.deepEqual(context.items.map(m => m.value), ['sonnet', 'opus', 'haiku', 'fable', 'codex:gpt-6.1-sol', 'codex:gpt-6-luna']);
+  assert.deepEqual(context.items.map(m => m.value), ['sonnet', 'opus', 'haiku', 'fable', 'codex:gpt-6.1-sol', 'codex:gpt-6-luna', 'terminal']);
   assert.equal(context.items[1].label, 'Claude Opus 5.5');
   assert.equal(context.items[0].label, 'Claude Sonnet', 'unavailable Claude metadata retains a usable alias');
 });

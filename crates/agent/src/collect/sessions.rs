@@ -98,6 +98,22 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
 
     let mut running: Vec<Session> = Vec::new();
     for p in &panes {
+        if p.terminal {
+            // A bare shell has no transcript, model, or Remote Control link;
+            // guessing a Claude transcript from its cwd would mislabel it.
+            let cpu = ctx.host.sampler.lock().unwrap_or_else(|e| e.into_inner()).tree_usage(p.pid);
+            let git = Arc::clone(&ctx.git).status_for(Arc::clone(&ctx.runner), &p.path, now as u64);
+            running.push(Session {
+                display_name: None, name: p.name.clone(), dir: p.path.clone(), pid: p.pid,
+                uptime_sec: ((now / 1000.0 - p.created as f64).round() as i64).max(0),
+                model: Some("Terminal".into()), effort: None, variant: None,
+                provider: Some("terminal".into()), native_terminal: None,
+                rc_link: None, rc_unavailable: true,
+                git: git.as_deref().map(parse_git_status), working: false, last_message: None, sid: None,
+                cpu: cpu.cpu, rss_kb: cpu.rss_kb, cpu_sample_age_ms: cpu.cpu_sample_age_ms, external: false,
+            });
+            continue;
+        }
         if let Some(s) = super::opencode::snapshot(ctx, &p.name, p.pid).await {
             let cpu = ctx.host.sampler.lock().unwrap_or_else(|e| e.into_inner()).tree_usage(p.pid);
             let git = Arc::clone(&ctx.git).status_for(Arc::clone(&ctx.runner), &p.path, now as u64);
@@ -407,7 +423,7 @@ mod tests {
         std::fs::write(d.join("history.jsonl"), seed(&d, "aaa", "/proj", 300, 3)).unwrap();
         std::fs::write(d.join("cdash-pins.json"), r#"["aaa"]"#).unwrap();
         std::fs::write(d.join("sessions/4242.json"), r#"{"sessionId":"aaa","cwd":"/proj"}"#).unwrap();
-        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000|/proj");
+        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000||/proj");
         let ctx = ctx_with_path(d.clone(), path);
         *ctx.codex_threads.lock().await = Some((std::time::Instant::now(), vec![]));
         let r = serde_json::to_value(collect_sessions(&ctx, 1).await).unwrap();
@@ -582,6 +598,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_terminal_pane_is_a_terminal_card_with_no_link_or_transcript() {
+        let d = tempdir("terminal");
+        std::fs::write(d.join("history.jsonl"), "").unwrap();
+        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000|terminal|/proj");
+        let ctx = ctx_with_path(d, path);
+        let r = collect_sessions(&ctx, RESUMABLE_MAX).await;
+        assert_eq!(r.running.len(), 1);
+        let t = &r.running[0];
+        assert_eq!((t.provider.as_deref(), t.model.as_deref()), (Some("terminal"), Some("Terminal")));
+        assert!(t.rc_link.is_none() && t.rc_unavailable && t.sid.is_none());
+    }
+
+    #[tokio::test]
     async fn a_pane_becomes_a_running_session_carrying_its_rc_link() {
         let d = tempdir("pane");
         std::fs::write(d.join("history.jsonl"), "").unwrap();
@@ -590,7 +619,7 @@ mod tests {
             r#"{"sessionId":"s-9","cwd":"/proj","bridgeSessionId":"session_pane"}"#,
         )
         .unwrap();
-        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000|/proj");
+        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000||/proj");
         let ctx = ctx_with_path(d, path);
 
         let r = collect_sessions(&ctx, RESUMABLE_MAX).await;
@@ -614,7 +643,7 @@ mod tests {
         std::fs::write(root.join("cdash-test-1200-abc.json"), state.to_string()).unwrap();
         std::fs::write(root.join("cdash-test-1200-abc.native"), state.to_string()).unwrap();
         std::fs::write(root.join("cdash-test-1200-abc.link"), "https://claude.ai/code/session_test").unwrap();
-        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000|/proj");
+        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000||/proj");
         let ctx = ctx_with_path(d, path);
         *ctx.opencode_threads.lock().await = Some((std::time::Instant::now(), serde_json::from_value(serde_json::json!([
             {"sid":"ses_live","dir":"/proj","ts":1000,"display_name":"Live","model":"fixture/model","model_label":"Fixture","variant":"deep","prompts":[],"source_file":null},
@@ -640,7 +669,7 @@ mod tests {
             "native_terminal": true, "pid": 4242, "sid": "native-thread", "dir": "/proj",
         });
         std::fs::write(root.join("cdash-test-1200-abc.json"), state.to_string()).unwrap();
-        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000|/proj");
+        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000||/proj");
         let ctx = ctx_with_path(d.clone(), path);
         for unavailable in [false, true] {
             state["rc_unavailable"] = unavailable.into();
@@ -664,7 +693,7 @@ mod tests {
             r#"{"sessionId":"s-7","cwd":"/proj","bridgeSessionId":"session_memo"}"#,
         )
         .unwrap();
-        let path = fake_tmux(&d, "cdash-memo-1200-xyz|777|1785050000|/proj");
+        let path = fake_tmux(&d, "cdash-memo-1200-xyz|777|1785050000||/proj");
         let ctx = ctx_with_path(d, path);
 
         assert!(ctx.meta_get("cdash-memo-1200-xyz").is_none());

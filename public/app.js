@@ -10,6 +10,9 @@ if (window.__cdashBooted) return;
 window.__cdashBooted = true;
 const $ = s => document.querySelector(s);
 const MODELS = ['sonnet', 'opus', 'haiku', 'fable'].map(value => ({ value, label: `Claude ${value.charAt(0).toUpperCase() + value.slice(1)}` }));
+// A bare tmux shell for first-time setup (signing in to Claude, Codex, OpenCode).
+// Launcher only: it is never a resume choice.
+const TERMINAL = { value: 'terminal', label: 'Terminal' };
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 let armedKill = null; // ponytail: survives render() replacing #running.innerHTML
 const picks = {}; // explicit model/effort choices on resumable cards by sid, kept across the poll's re-render
@@ -161,7 +164,7 @@ function latestModels(models) {
 }
 let modelChoices = MODELS;
 const modelCatalogs = new Map();
-const modelDD = buildDropdown($('#model'), 'Model', MODELS, 'sonnet', updateEfforts);
+const modelDD = buildDropdown($('#model'), 'Model', [...MODELS, TERMINAL], 'sonnet', updateEfforts);
 const effortDD = buildDropdown($('#effort'), 'Effort', EFFORTS.map(value => ({ value, label: effortLabel(value) })), 'medium');
 let effortModel = modelDD.value;
 function updateEfforts() {
@@ -170,7 +173,7 @@ function updateEfforts() {
   const model = modelChoices.find(m => m.value === modelDD.value);
   const isOpenCode = modelDD.value.startsWith('opencode:');
   const variants = model?.variants || [];
-  $('#effort').hidden = isOpenCode && !variants.length;
+  $('#effort').hidden = modelDD.value === TERMINAL.value || (isOpenCode && !variants.length);
   effortDD.setLabel(isOpenCode ? 'Variant' : 'Effort');
   const choices = isOpenCode ? [{ value: '', label: 'Default' }, ...variants.map(value => ({ value, label: value }))]
     : (model?.efforts || EFFORTS).map(value => ({ value, label: effortLabel(value) }));
@@ -181,7 +184,7 @@ async function refreshModels(g, dir = $('#dir').value.trim()) {
   if (g !== gen || (dir && !dir.startsWith('/'))) return;
   if (modelsGeneration !== g) {
     modelsGeneration = g; modelCatalogs.clear(); modelChoices = MODELS;
-    modelDD.setItems(modelChoices, 'sonnet'); updateEfforts();
+    modelDD.setItems([...modelChoices, TERMINAL], 'sonnet'); updateEfforts();
   }
   const key = dir || '';
   let entry = modelCatalogs.get(key);
@@ -194,7 +197,7 @@ async function refreshModels(g, dir = $('#dir').value.trim()) {
       ...latestModels(models.filter(model => model.value.startsWith('codex:'))),
       ...models.filter(model => model.value.startsWith('opencode:')),
     ];
-    modelDD.setItems(modelChoices, 'sonnet'); updateEfforts();
+    modelDD.setItems([...modelChoices, TERMINAL], 'sonnet'); updateEfforts();
   };
   if (entry?.loading) return entry.loading;
   if (entry?.at && Date.now() - entry.at < 60_000) { if (entry.models) apply(entry.models); return; }
@@ -301,7 +304,8 @@ function runningCard(r) {
     : `<span class="chip">${r.external ? 'external' : 'resumed'}</span>`;
   const peek = r.lastMessage
     ? `<div class="peek" onclick="this.classList.toggle('open')"><span class="peek-text">${esc(r.lastMessage)}</span></div>` : '';
-  const rc = r.rcLink
+  const rc = r.provider === 'terminal' ? ''
+    : r.rcLink
     ? `<a class="action primary" href="${esc(r.rcLink)}" target="_blank" rel="noopener">${ICONS.external}<span>Open in Claude</span></a>`
     : r.external
       ? '<span class="action pending">No Claude link · run /remote-control in original terminal</span>'
@@ -322,7 +326,7 @@ function runningCard(r) {
         <div class="session-headline">
           <span class="session-title">${esc(r.displayName || r.dir.split('/').pop())}</span>
         </div>
-        <span class="status ${r.working ? 'on' : 'off'}"><span class="dot"></span>${r.working ? 'Working' : 'Waiting'}</span>
+        ${r.provider === 'terminal' ? '' : `<span class="status ${r.working ? 'on' : 'off'}"><span class="dot"></span>${r.working ? 'Working' : 'Waiting'}</span>`}
       </div>
       <div class="session-meta">
         ${chipHtml}${gitBadge(r.git)}

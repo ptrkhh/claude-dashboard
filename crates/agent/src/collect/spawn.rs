@@ -200,6 +200,19 @@ async fn spawn_claude(
     Ok(name)
 }
 
+/// A bare shell for first-time setup such as signing in to a CLI. No command
+/// is passed, so tmux starts its `default-shell` as a login shell and honors
+/// the user's tmux.conf. The `@cdash_kind` session option is how the pane
+/// list tells it apart from an agent, across agent restarts too; it is set in
+/// the same tmux invocation so no poll sees the session unmarked.
+async fn spawn_terminal(ctx: &Arc<Ctx>, dir: &str) -> Result<String, Refused> {
+    let name = tmux_name(dir);
+    let args = ["new-session", "-d", "-s", &name, "-c", dir, ";", "set-option", "-t", &name, "@cdash_kind", "terminal"];
+    ctx.runner.run_checked("tmux", &args, "tmux new-session").await.map_err(Refused::Failed)?;
+    ctx.host.log.push(format!("launch terminal → {name}"));
+    Ok(name)
+}
+
 pub async fn launch_session(
     ctx: &Arc<Ctx>,
     dir: &str,
@@ -216,12 +229,18 @@ pub async fn launch_session(
     if let Some(model) = model.strip_prefix("codex:") {
         return super::codex::launch(ctx, dir, Some(model), effort, None).await;
     }
-    assert_model(model)?;
-    assert_effort(effort)?;
+    let terminal = model == "terminal";
+    if !terminal {
+        assert_model(model)?;
+        assert_effort(effort)?;
+    }
     // A6: the directory must exist and be a directory before it reaches `-c`.
     let is_dir = tokio::fs::metadata(dir).await.map(|m| m.is_dir()).unwrap_or(false);
     if !is_dir {
         return Err(Refused::BadRequest(format!("not a directory: {dir}")));
+    }
+    if terminal {
+        return spawn_terminal(ctx, dir).await;
     }
     spawn_claude(
         ctx,
@@ -502,6 +521,16 @@ mod tests {
         assert!(launch_session(&ctx, "/tmp", "sonnet", "ludicrous", None).await.is_err());
         // A6: a path that is not a directory never reaches `tmux -c`.
         assert!(launch_session(&ctx, "/no/such/dir/cdash", "sonnet", "medium", None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_terminal_launch_starts_a_marked_bare_shell_in_the_directory() {
+        let d = tempdir("launch-terminal");
+        let ctx = ctx_with_tmux(d.clone(), 0).await;
+        assert!(launch_session(&ctx, "/no/such/dir/cdash", "terminal", "", None).await.is_err());
+        let name = launch_session(&ctx, "/tmp", "terminal", "", None).await.unwrap();
+        let args = std::fs::read_to_string(d.join("tmux-args")).unwrap();
+        assert_eq!(args.trim(), format!("new-session -d -s {name} -c /tmp ; set-option -t {name} @cdash_kind terminal"));
     }
 
     #[tokio::test]
