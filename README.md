@@ -59,6 +59,27 @@ Installation and first-run setup may need a terminal. To sign in to Claude Code,
 
 For browser-only use, start the agent on your host and open its local address. From source, the command is in the [technical reference](#run-from-source).
 
+## Run in Docker
+
+The image bundles the agent, Claude Code, Codex, OpenCode, and tmux. A second container runs cloudflared, so the dashboard is reachable only through a Cloudflare Tunnel with Cloudflare Access in front.
+
+1. Copy `.env.example` to `.env` and fill it in.
+2. In Cloudflare Zero Trust, create a tunnel and a public hostname that points at `http://tools:23274`. Create an Access application for that hostname with a policy that allows you. Put the tunnel token, team domain, and application audience tag in `.env`.
+3. Create the directory named by `PROJECTS_DIR` and put your projects in it (create it yourself so it keeps your user's ownership), then start the stack:
+
+       docker compose up -d --build
+
+4. Sign in to each CLI once, inside the container:
+
+       docker compose exec tools bash
+       claude
+       codex
+       opencode
+
+   Claude Code must be signed in with an account that supports Remote Control.
+
+Sessions run in tmux inside the container, so `docker restart`, `docker compose down`, and image rebuilds end them. Project files stay on the host. Cloudflare Access is the only guard: do not publish port 23274.
+
 ## Keep it private
 
 RC Dashboard can control live coding sessions. The agent listens on your own machine by default, and authentication is off by default too. Keep it local, or add an access guard before opening it to a network. Saved remote profiles in the desktop and Android apps currently support unauthenticated agents only, so use those profiles on a trusted private network.
