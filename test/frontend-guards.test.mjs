@@ -292,7 +292,7 @@ test('project model loads do not let stale responses replace the active project 
   const code = source.slice(source.indexOf('function latestModels('), source.indexOf('function toast('));
   const dir = { value: '/a' }, calls = [], pending = [];
   const context = {
-    MODELS: [{ value: 'sonnet', label: 'Claude' }, { value: 'opus', label: 'Claude Opus' }], EFFORTS: ['medium'], effortLabel: String, gen: 1,
+    TERMINAL: { value: 'terminal', label: 'Terminal' }, MODELS: [{ value: 'sonnet', label: 'Claude' }, { value: 'opus', label: 'Claude Opus' }], EFFORTS: ['medium'], effortLabel: String, gen: 1,
     $: selector => selector === '#dir' ? dir : {},
     buildDropdown: (_el, _label, _items, initial) => ({ value: initial, setItems() {}, setLabel() {} }),
     api: path => { calls.push(path); return new Promise((resolve, reject) => pending.push({ resolve, reject })); },
@@ -338,12 +338,15 @@ test('changing from effort to an OpenCode model resets the secondary picker', ()
   const captured = [], control = { hidden: false }, modelDD = { value: 'opencode:fixture/model' };
   const context = { modelChoices: [{ value: modelDD.value, variants: ['high', 'deep'] }], modelDD,
     effortDD: { setLabel: label => captured.push({ label }), setItems: (items, fallback, reset) => captured.push({ items, fallback, reset }) },
-    EFFORTS: ['high'], effortLabel: String, effortModel: 'sonnet', $: () => control };
+    TERMINAL: { value: 'terminal', label: 'Terminal' }, EFFORTS: ['high'], effortLabel: String, effortModel: 'sonnet', $: () => control };
   runInNewContext(`${code}; updateEfforts();`, context);
   assert.equal(captured[0].label, 'Variant');
   assert.equal(captured[1].reset, true, 'an old effort must not silently become an OpenCode variant');
   assert.equal(captured[1].items[0].value, '');
   assert.equal(control.hidden, false);
+  modelDD.value = 'terminal';
+  runInNewContext('updateEfforts();', context);
+  assert.equal(control.hidden, true, 'a bare terminal takes no effort');
 });
 
 
@@ -368,7 +371,7 @@ test('refreshing a project catalog preserves its selected OpenCode model', async
   let now = 1000;
   const pending = [], dropdowns = [], dir = { value: '/project' };
   const context = {
-    MODELS: [{ value: 'sonnet', label: 'Claude' }], EFFORTS: ['medium'], effortLabel: String, gen: 1,
+    TERMINAL: { value: 'terminal', label: 'Terminal' }, MODELS: [{ value: 'sonnet', label: 'Claude' }], EFFORTS: ['medium'], effortLabel: String, gen: 1,
     Date: { now: () => now }, $: selector => selector === '#dir' ? dir : {}, toast() {},
     buildDropdown: (_el, _label, _items, initial) => {
       const dd = { value: initial, setLabel() {}, setItems(items, fallback) { if (!items.some(item => item.value === this.value)) this.value = fallback; } };
@@ -394,7 +397,7 @@ test('changing between Claude models preserves a compatible effort', () => {
   let reset;
   const context = { modelChoices: [{ value: 'opus', efforts: ['high'] }], modelDD: { value: 'opus' },
     effortDD: { setLabel() {}, setItems(_items, _fallback, value) { reset = value; } },
-    EFFORTS: ['high'], effortLabel: String, effortModel: 'sonnet', $: () => ({}) };
+    TERMINAL: { value: 'terminal', label: 'Terminal' }, EFFORTS: ['high'], effortLabel: String, effortModel: 'sonnet', $: () => ({}) };
   runInNewContext(`${code}; updateEfforts();`, context);
   assert.equal(reset, false);
 });
