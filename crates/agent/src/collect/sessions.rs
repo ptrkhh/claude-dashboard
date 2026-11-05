@@ -199,10 +199,17 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
         let git_out =
             Arc::clone(&ctx.git).status_for(Arc::clone(&ctx.runner), &p.path, now as u64);
 
+        let name_sid = sess.as_ref().and_then(|s| s.session_id.as_deref()).or(sid.as_deref());
+        let name_cwd = sess.as_ref().and_then(|s| s.cwd.as_deref()).unwrap_or(&p.path);
+        let display_name = match name_sid {
+            Some(sid) => super::lookup::custom_title(&ctx.claude_dir, name_cwd, sid)
+                .await
+                .or_else(|| Some(super::names::session_name("Claude", name_cwd, sid))),
+            None => None,
+        };
+
         running.push(Session {
-            display_name: sess.as_ref().and_then(|s| s.session_id.as_deref())
-                .or(sid.as_deref())
-                .map(|sid| super::names::session_name("Claude", &p.path, sid)),
+            display_name,
             name: p.name.clone(),
             dir: p.path.clone(),
             pid: p.pid,
@@ -262,8 +269,16 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
         }
         let model = t.model.as_deref().and_then(model_alias).map(str::to_owned);
         if !pinned { ordinary += 1; }
+        let cwd = g.cwd.as_deref().unwrap_or("?");
+        let display_name = super::lookup::custom_title(
+            &ctx.claude_dir,
+            g.cwd.as_deref().unwrap_or(""),
+            &g.sid,
+        )
+        .await
+        .or_else(|| Some(super::names::session_name("Claude", cwd, &g.sid)));
         resumable.push(Resumable {
-            display_name: Some(super::names::session_name("Claude", g.cwd.as_deref().unwrap_or("?"), &g.sid)),
+            display_name,
             sid: g.sid,
             dir: g.cwd,
             ts: g.ts,
@@ -471,6 +486,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_custom_title_from_the_claude_app_wins_over_the_generated_name() {
+        let d = tempdir("custom-title");
+        let a = seed(&d, "aaa", "/p/deep", 300, 3);
+        std::fs::write(d.join("history.jsonl"), a).unwrap();
+        let titled = d.join("projects").join(project_dir_name("/p/deep")).join("aaa");
+        std::fs::create_dir_all(&titled).unwrap();
+        std::fs::write(
+            titled.join("custom-title.json"),
+            r#"{"customTitle":"[Claude] deep · renamed"}"#,
+        )
+        .unwrap();
+
+        let r = collect_sessions(&ctx_for(d), RESUMABLE_MAX).await;
+        assert_eq!(
+            r.resumable[0].display_name.as_deref(),
+            Some("[Claude] deep · renamed")
+        );
+    }
+
+    #[tokio::test]
     async fn a_session_with_no_transcript_is_not_resumable() {
         // E8: history remembers sessions whose transcript is gone.
         let d = tempdir("notranscript");
@@ -658,6 +693,32 @@ mod tests {
         assert_eq!(response.resumable[0].sid, "ses_saved");
         assert_eq!(response.resumable[0].variant.as_deref(), Some("deep"));
         assert_eq!(response.resumable[0].prompts, ["Resume work"]);
+    }
+
+    #[tokio::test]
+    async fn a_pane_uses_the_custom_title_of_its_session() {
+        let d = tempdir("pane-title");
+        std::fs::write(d.join("history.jsonl"), "").unwrap();
+        std::fs::write(
+            d.join("sessions/4242.json"),
+            r#"{"sessionId":"s-9","cwd":"/proj","bridgeSessionId":"session_pane"}"#,
+        )
+        .unwrap();
+        let titled = d.join("projects").join(project_dir_name("/proj")).join("s-9");
+        std::fs::create_dir_all(&titled).unwrap();
+        std::fs::write(
+            titled.join("custom-title.json"),
+            r#"{"customTitle":"[Claude] proj · renamed"}"#,
+        )
+        .unwrap();
+        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000|/proj");
+        let ctx = ctx_with_path(d, path);
+
+        let r = collect_sessions(&ctx, RESUMABLE_MAX).await;
+        assert_eq!(
+            r.running[0].display_name.as_deref(),
+            Some("[Claude] proj · renamed")
+        );
     }
 
     #[tokio::test]
