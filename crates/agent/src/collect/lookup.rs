@@ -31,6 +31,25 @@ pub async fn session_file_for(claude_dir: &Path, pid: i32) -> Option<SessionFile
     serde_json::from_str(&txt).ok()
 }
 
+#[derive(Debug, Deserialize)]
+struct CustomTitle {
+    #[serde(rename = "customTitle")]
+    custom_title: Option<String>,
+}
+
+/// `projects/<dir>/<sid>/custom-title.json` — the name the user gave the
+/// session in the Claude app. It outlives the session file, so it also names
+/// resumable entries.
+pub async fn custom_title(claude_dir: &Path, cwd: &str, sid: &str) -> Option<String> {
+    let file = claude_dir
+        .join("projects")
+        .join(project_dir_name(cwd))
+        .join(sid)
+        .join("custom-title.json");
+    let title: CustomTitle = serde_json::from_str(&read_if(&file).await?).ok()?;
+    title.custom_title.filter(|t| !t.trim().is_empty())
+}
+
 pub async fn rc_link_for(claude_dir: &Path, pid: i32) -> Option<String> {
     let txt = read_if(&session_path(claude_dir, pid)).await?;
     parse_rc_file(&txt).map(|id| format!("https://claude.ai/code/{id}"))

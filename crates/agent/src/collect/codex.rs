@@ -28,7 +28,14 @@ pub async fn models(ctx: &Ctx) -> Result<Vec<ModelChoice>, Refused> {
             return Ok(choices.clone());
         }
     }
-    let choices = discover_models(ctx).await?;
+    let (codex, claude) = tokio::join!(discover_models(ctx), query(ctx, "--claude-models"));
+    let mut choices = codex?;
+    // Older Claude CLIs keep the generic alias labels when discovery is unavailable.
+    if let Ok(value) = claude {
+        if let Ok(models) = serde_json::from_value::<Vec<ModelChoice>>(value) {
+            choices.extend(models);
+        }
+    }
     *cache = Some((Instant::now(), choices.clone()));
     Ok(choices)
 }
@@ -40,7 +47,8 @@ async fn discover_models(ctx: &Ctx) -> Result<Vec<ModelChoice>, Refused> {
 
 pub(super) async fn query(ctx: &Ctx, mode: &str) -> Result<serde_json::Value, String> {
     // Codex and Node are optional: a Claude-only installation is healthy.
-    if !has_binary(&ctx.host.path, "codex") || !has_binary(&ctx.host.path, "node") {
+    let program = if mode == "--claude-models" { "claude" } else { "codex" };
+    if !has_binary(&ctx.host.path, program) || !has_binary(&ctx.host.path, "node") {
         return Ok(serde_json::json!([]));
     }
     let json = ctx
@@ -244,6 +252,13 @@ pub async fn launch(
         .await
         .map_err(|e| Refused::Failed(e.to_string()))?;
     let name = tmux_name(dir);
+    write_atomic(
+        &base.join("claude-remote.mjs"),
+        include_str!("claude-remote.mjs"),
+        &format!(".{name}.remote.tmp"),
+    )
+    .await
+    .map_err(|e| Refused::Failed(e.to_string()))?;
     let script = base.join("bridge.mjs");
     write_atomic(
         &script,
@@ -397,6 +412,7 @@ pub async fn history(ctx: &Ctx) -> Vec<Resumable> {
                 model_id: Some(t.model.as_ref().map_or("codex".into(), |m| format!("codex:{m}"))),
                 model: label.or(t.model).or_else(|| Some("Codex".into())),
                 effort: t.effort,
+                variant: None,
                 prompts: Vec::new(),
                 summary: None,
                 source_file: t.rollout_path,
@@ -429,14 +445,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("bin")).unwrap();
         std::fs::write(dir.join("threads.json"), row(&dir)).unwrap();
+        std::fs::write(dir.join("claude-models.json"), "[]").unwrap();
         let mut scripts = vec![
             ("tmux", format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}/tmux-args'\n", dir.display())),
             (
                 "node",
                 format!(
                     "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v22.1.0; exit; fi\nfor a; do last=$a; done\n\
-                     if [ \"$last\" = --threads ]; then read -r line < '{}/threads.json'; echo \"$line\"; else echo '{catalog}'; fi\n",
-                    dir.display()
+                     if [ \"$last\" = --claude-models ]; then /bin/cat '{}/claude-models.json'; elif [ \"$last\" = --threads ]; then read -r line < '{}/threads.json'; echo \"$line\"; else echo '{catalog}'; fi\n",
+                    dir.display(), dir.display()
                 ),
             ),
             ("claude", "#!/bin/sh\necho 1.0.0\n".to_string()),
@@ -556,6 +573,8 @@ mod tests {
         assert_eq!(history(&ctx).await[0].display_name.as_deref(), Some(display_name));
         resume(&ctx, SID, Some("codex:gpt-b"), Some("high")).await.unwrap();
         let s = saved_state(&dir);
+        assert_eq!(std::fs::read_to_string(root(&ctx).join("claude-remote.mjs")).unwrap(), include_str!("claude-remote.mjs"));
+        assert_eq!(std::fs::read_to_string(root(&ctx).join("bridge.mjs")).unwrap(), include_str!("codex-remote.mjs"));
         assert_eq!(s.display_name.as_deref(), Some(display_name));
         assert_eq!((s.model.as_deref(), s.effort.as_deref()), (Some("gpt-b"), Some("high")));
         assert_eq!(s.model_label.as_deref(), Some("GPT B"));
@@ -619,6 +638,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn picker_catalog_includes_claude_versions_without_requiring_codex() {
+        let (dir, ctx) = host_in("claude-model-labels", false, "[]");
+        let claude = serde_json::json!([{
+            "value": "opus", "model": "claude-opus-5-5", "label": "Claude Opus 5.5",
+            "efforts": ["low", "medium", "high"], "defaultEffort": "medium"
+        }]);
+        std::fs::write(dir.join("claude-models.json"), claude.to_string()).unwrap();
+        let choices = models(&ctx).await.unwrap();
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].label, "Claude Opus 5.5");
+        assert_eq!(choices[0].value, "opus");
+        // A cached catalog survives a failed subsequent probe.
+        std::fs::write(dir.join("claude-models.json"), "invalid").unwrap();
+        assert_eq!(models(&ctx).await.unwrap()[0].label, "Claude Opus 5.5");
+        *ctx.codex_models.lock().await = None;
+        assert!(models(&ctx).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn unavailable_codex_does_not_block_claude_or_spawn_phantom_panes() {
         for installed in [false, true] {
             // Codex signed out: node answers every catalog query with an empty list.
@@ -668,7 +706,7 @@ mod tests {
                 assert!(resume(&ctx, SID, None, None).await.unwrap().is_none());
             }
             assert!(!dir.join("tmux-args").exists());
-            assert!(super::super::spawn::launch_session(&ctx, dir.to_str().unwrap(), "sonnet", "medium")
+            assert!(super::super::spawn::launch_session(&ctx, dir.to_str().unwrap(), "sonnet", "medium", None)
                 .await
                 .is_ok());
             std::fs::remove_dir_all(dir).unwrap();

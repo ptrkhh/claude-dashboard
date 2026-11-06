@@ -1,7 +1,7 @@
 // Claude 2.1.296 worker transport. Authentication/registration stays in Claude.
 // ponytail: one worker + one Codex thread per tmux pane; no daemon or packages.
 import { spawn } from 'node:child_process';
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { createServer, createConnection } from 'node:net';
 import { createInterface } from 'node:readline';
 import { readFile, writeFile, rename, mkdir, chmod, rm, readdir, mkdtemp, open, access } from 'node:fs/promises';
@@ -43,7 +43,8 @@ class Codex {
     const executable = backend ? process.env.CDASH_CODEX_AGENT : 'codex';
     if (!executable) throw Error('Native Codex transport executable is missing');
     this.child = spawn(executable, backend ? ['codex-proxy', backend] : ['app-server', '--listen', 'stdio://'], {
-      env: options.env || codexEnv(), cwd: options.cwd, detached: true, stdio: ['pipe', 'pipe', options.quiet ? 'ignore' : 'inherit'],
+      // Only the proxy, never Codex, receives an Android loopback backend's token.
+      env: { ...(options.env || codexEnv()), ...(backend && { CDASH_CODEX_TOKEN: process.env.CDASH_CODEX_TOKEN }) }, cwd: options.cwd, detached: true, stdio: ['pipe', 'pipe', options.quiet ? 'ignore' : 'inherit'],
     });
     let notifications = Promise.resolve();
     createInterface({ input: this.child.stdout }).on('line', line => {
@@ -114,93 +115,49 @@ class Codex {
   }
 }
 
-class Remote {
-  sequence = 0;
-  sent = new Set();
-  stopped = new AbortController();
-  constructor(url, token, epoch, sid) {
-    const u = new URL(url);
-    if (u.protocol !== 'https:' || u.username || u.password || !/^\/v1\/code\/sessions\/[^/]+$/.test(u.pathname)) throw Error('Unexpected Claude worker URL');
-    this.url = url.replace(/\/$/, '');
-    this.token = token;
-    this.epoch = epoch;
-    this.sid = sid;
-  }
-  async request(path, method, body, stream = false) {
-    const signal = stream ? this.stopped.signal : AbortSignal.any([this.stopped.signal, AbortSignal.timeout(15_000)]);
-    const response = await fetch(`${this.url}${path}`, {
-      method, signal,
-      redirect: 'error',
-      headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
-    // Do not quote response bodies: a transport failure must not leak tokens.
-    if (!response.ok) { await response.body?.cancel(); throw Object.assign(Error(`Claude worker ${path.split('?')[0]}: HTTP ${response.status}`), { status: response.status }); }
-    if (stream) return response;
-    await response.body?.cancel();
-  }
-  async retry(path, method, body) {
-    for (let attempt = 0; ; attempt++) {
-      try { return await this.request(path, method, body); }
-      catch (e) {
-        if (this.stopped.signal.aborted || (e.status >= 400 && e.status < 500 && e.status !== 429) || attempt >= 5) throw e;
-        await sleep(Math.min(1000 * 2 ** attempt, 30_000));
-      }
-    }
-  }
-  state(worker_status, details = null) { return this.retry('/worker', 'PUT', { worker_epoch: this.epoch, worker_status, requires_action_details: details, external_metadata: { model: this.model || 'codex', pending_action: details, pending_actions: details ? [details] : [] } }); }
-  event(payload) {
-    payload = { session_id: this.sid, uuid: randomUUID(), ...payload };
-    this.sent.add(payload.uuid);
-    if (this.sent.size > 200) this.sent.delete(this.sent.values().next().value);
-    // Retry the same UUID so the service can deduplicate a lost HTTP response.
-    return this.retry('/worker/events', 'POST', { worker_epoch: this.epoch, events: [{ payload }] });
-  }
-  ack(id, status) { return this.retry('/worker/events/delivery', 'POST', { worker_epoch: this.epoch, updates: [{ event_id: id, status }] }); }
-  async listen(onEvent, onSequence) {
-    let delay = 1000;
-    while (!this.stopped.signal.aborted) {
-      try {
-        const response = await this.request(`/worker/events/stream?from_sequence_num=${this.sequence}`, 'GET', undefined, true);
-        let frame = '', kind = '', data = [];
-        for await (const chunk of response.body.pipeThrough(new TextDecoderStream())) {
-          frame += chunk;
-          if (frame.length > 16 * 1024 * 1024) throw Error('Claude SSE frame too large');
-          let pos;
-          while ((pos = frame.indexOf('\n')) >= 0) {
-            const line = frame.slice(0, pos).replace(/\r$/, '');
-            frame = frame.slice(pos + 1);
-            if (line.startsWith('event:')) kind = line.slice(6).trim();
-            else if (line.startsWith('data:')) data.push(line.slice(5).trimStart());
-            else if (!line) {
-              if (kind === 'client_event' && data.length) {
-                const e = JSON.parse(data.join('\n'));
-                const sequence = Number(e.sequence_num);
-                if (!Number.isSafeInteger(sequence) || sequence < 0) throw Error('Invalid Claude SSE sequence');
-                if (sequence > this.sequence) {
-                  if (e.source !== 'worker' && !this.sent.has(e.payload?.uuid)) await onEvent(e);
-                  this.sequence = sequence;
-                  await onSequence(sequence);
-                }
-              }
-              kind = ''; data = []; delay = 1000;
-            }
-          }
-        }
-      } catch (e) {
-        if (this.stopped.signal.aborted) break;
-        if ([401, 403, 404, 409, 410].includes(e.status)) throw e;
-        console.error(`${e.message}; reconnecting`);
-      }
-      await sleep(delay);
-      delay = Math.min(delay * 2, 30_000);
-    }
-  }
-}
 
 function messageUuid(remoteSid, threadId, turnId, itemId) {
   const hash = createHash('sha256').update(JSON.stringify([remoteSid, threadId, turnId, itemId])).digest('hex');
   return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-8${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+}
+
+function toolMessages(item, completed = true) {
+  let name, input, output;
+  let is_error = ['failed', 'declined'].includes(item.status);
+  switch (item.type) {
+    case 'mcpToolCall':
+      name = `mcp__${item.server}__${item.tool}`;
+      input = item.arguments;
+      output = item.error?.message ?? (item.result?.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
+      output ||= JSON.stringify(item.result?.structuredContent ?? '');
+      is_error ||= !!item.error;
+      break;
+    case 'commandExecution':
+      name = 'Bash'; input = { command: item.command, cwd: item.cwd };
+      output = item.aggregatedOutput ?? '';
+      is_error ||= item.exitCode != null && item.exitCode !== 0;
+      break;
+    case 'dynamicToolCall':
+      name = [item.namespace, item.tool].filter(Boolean).join('.'); input = item.arguments;
+      output = (item.contentItems || []).filter(b => b.type === 'inputText').map(b => b.text).join('\n');
+      is_error ||= item.success === false;
+      break;
+    case 'fileChange':
+      name = 'Edit'; input = { changes: item.changes }; output = item.status;
+      break;
+    default: return [];
+  }
+  if (!input || typeof input !== 'object' || Array.isArray(input)) input = { input: input ?? null };
+  const messages = [{ type: 'assistant', parent_tool_use_id: null, message: {
+    id: `${item.id}-tool-use`, role: 'assistant', stop_reason: 'tool_use',
+    content: [{ type: 'tool_use', id: item.id, name, input }],
+  } }];
+  // shortcut: remote tool text is capped at 65,536 characters; use the native terminal for larger output.
+  if (completed) messages.push({ type: 'user', parent_tool_use_id: null, message: {
+    id: `${item.id}-tool-result`, role: 'user',
+    content: [{ type: 'tool_result', tool_use_id: item.id, content: output.slice(0, 65_536), is_error }],
+  } });
+  return messages;
 }
 
 async function replayHistory(codex, threadId, remoteSid, emit, submitted = new Set()) {
@@ -211,6 +168,9 @@ async function replayHistory(codex, threadId, remoteSid, emit, submitted = new S
       threadId, limit: 50, sortDirection: 'asc', itemsView: 'full', ...(cursor ? { cursor } : {}),
     });
     for (const turn of page.data) for (const item of turn.items) {
+      for (const payload of toolMessages(item, item.status !== 'inProgress')) {
+        await emit({ ...payload, uuid: messageUuid(remoteSid, threadId, turn.id, payload.message.id) });
+      }
       const role = item.type === 'userMessage' ? 'user' : item.type === 'agentMessage' ? 'assistant' : null;
       if (!role || (role === 'user' && submitted.has(item.clientId))) continue;
       const content = role === 'user'
@@ -219,7 +179,7 @@ async function replayHistory(codex, threadId, remoteSid, emit, submitted = new S
       if (!content.length) continue;
       // Stable UUIDs let the remote deduplicate a replay interrupted by a crash.
       const uuid = messageUuid(remoteSid, threadId, turn.id, item.id);
-      await emit({ uuid, type: role, message: { id: item.id, role, content, ...(role === 'assistant' ? { stop_reason: 'end_turn' } : {}) } });
+      await emit({ uuid, type: role, message: { id: item.id, role, content, ...(role === 'assistant' ? { stop_reason: item.phase === 'commentary' ? null : 'end_turn' } : {}) } });
     }
     cursor = page.nextCursor;
     if (cursor && seen.has(cursor)) throw Error('Repeated Codex history cursor');
@@ -231,6 +191,7 @@ let stop = () => {};
 function fatal(e) { console.error(`Codex bridge: ${e.message}${e.cause ? ` (${e.cause.code || e.cause.message})` : ''}`); stop(); setTimeout(() => process.exit(1), 5000).unref(); process.exitCode = 1; }
 
 async function worker() {
+  const { Remote } = await import('./claude-remote.mjs');
   const statePath = process.env.CDASH_CODEX_STATE;
   const state = JSON.parse(await readFile(statePath, 'utf8'));
   const sid = option('--session-id');
@@ -245,6 +206,10 @@ async function worker() {
   let models = [];
   let outgoing = Promise.resolve(), saved = Promise.resolve(), queue = Promise.resolve(), savedNamePath;
   const emit = payload => { outgoing = outgoing.then(() => remote.event(payload)); outgoing.catch(fatal); return outgoing; };
+  const activity = turnId => emit({ type: 'stream_event', parent_tool_use_id: null, event: turnId ? {
+    type: 'message_start', message: { id: `codex-${turnId}`, type: 'message', role: 'assistant', model: state.model,
+      content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } },
+  } : { type: 'message_stop' } });
   const approvalState = () => {
     const details = [...delegated.values(), ...[...approvals.values()].map(a => a.details)].at(-1);
     return remote.state(details ? 'requires_action' : state.working ? 'running' : 'idle', details);
@@ -294,7 +259,12 @@ async function worker() {
       }
       await approvalState();
     }
-    if (m.method === 'item/started') items.set(p.item.id, p.item);
+    if (m.method === 'item/started') {
+      items.set(p.item.id, p.item);
+      for (const payload of toolMessages(p.item, false)) {
+        await emit({ ...payload, uuid: messageUuid(sid, state.sid, p.turnId, payload.message.id) });
+      }
+    }
     if (m.method === 'thread/settings/updated') {
       state.model = p.threadSettings.model;
       state.effort = p.threadSettings.effort;
@@ -302,10 +272,15 @@ async function worker() {
       remote.model = state.model;
       await save();
     }
-    if (m.method === 'turn/started') { state.working = true; await save(); await remote.state('running'); }
+    if (m.method === 'turn/started') { state.working = true; await save(); await remote.state('running'); await activity(p.turn.id); }
     if (m.method === 'item/completed') {
       const item = p.item;
+      const started = items.has(item.id);
       items.delete(item.id);
+      const tools = toolMessages(item);
+      for (const payload of tools.slice(started ? 1 : 0)) {
+        await emit({ ...payload, uuid: messageUuid(sid, state.sid, p.turnId, payload.message.id) });
+      }
       if (item.type === 'userMessage') {
         if (!(state.native_terminal ? submitted.has(item.clientId) : submitted.delete(item.clientId))) {
           const content = item.content.filter(b => b.type === 'text').map(b => ({ type: 'text', text: b.text }));
@@ -314,16 +289,18 @@ async function worker() {
       }
       if (item.type === 'agentMessage') {
         state.last_message = item.text;
-        await emit({ uuid: messageUuid(sid, state.sid, p.turnId, item.id), type: 'assistant', message: { id: item.id, role: 'assistant', model: state.model, content: [{ type: 'text', text: item.text }], stop_reason: 'end_turn' } });
+        await emit({ uuid: messageUuid(sid, state.sid, p.turnId, item.id), type: 'assistant', message: { id: item.id, role: 'assistant', model: state.model, content: [{ type: 'text', text: item.text }], stop_reason: item.phase === 'commentary' ? null : 'end_turn' } });
         if (!state.native_terminal) console.log(item.text);
         await save();
       }
+      if (state.working && p.turnId && (tools.length || item.phase === 'commentary')) await activity(p.turnId);
     }
     if (m.method === 'turn/completed') {
       state.working = false; state.ts = Date.now();
       for (const request_id of approvals.keys()) await emit({ type: 'control_cancel_request', request_id });
       approvals.clear(); delegated.clear();
       await save();
+      await activity();
       const failed = p.turn.status !== 'completed';
       await emit({ type: 'result', subtype: failed ? 'error_during_execution' : 'success', is_error: failed, result: state.last_message || '', errors: failed ? [p.turn.error?.message || `Codex turn ${p.turn.status}`] : [], num_turns: 1, total_cost_usd: 0, duration_ms: 0, duration_api_ms: 0 });
       await remote.state('idle');
@@ -381,7 +358,7 @@ async function worker() {
       await reportError(`Codex request failed: ${e.message}`);
     }
   };
-  await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', title: 'Claude Dashboard Codex Bridge', version: '0.5.1' }, ...(state.native_terminal ? { capabilities: { experimentalApi: true } } : {}) });
+  await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', title: 'RC Dashboard Codex Bridge', version: '0.5.2' }, ...(state.native_terminal ? { capabilities: { experimentalApi: true } } : {}) });
   codex.send({ method: 'initialized' });
   if (!await codex.ready()) throw Error('Codex is signed out; run codex login on the agent host.');
   const savedModel = state.model, savedLabel = state.model_label, resuming = !!state.sid;
@@ -393,15 +370,17 @@ async function worker() {
   state.sid = result.thread.id; state.working = Boolean(codex.turnId);
   state.model = result.model;
   state.effort = result.reasoningEffort;
+  remote.model = state.model;
+  // Queue activity before awaiting init; the resumed turn can finish during its upload.
+  const init = emit({ type: 'system', subtype: 'init', cwd: state.dir, model: state.model, tools: [], mcp_servers: [], permissionMode: 'default', slash_commands: [] });
+  await (codex.turnId ? activity(codex.turnId) : init);
   try { models = await codex.models(); }
   catch { console.error('Model catalog unavailable; using model ID.'); }
   state.model_label = models.find(m => m.model === state.model)?.label || (state.model === savedModel && savedLabel) || state.model;
-  remote.model = state.model;
   await save();
   if (state.remote_sid === sid) remote.sequence = state.remote_sequence || 0;
   await approvalState();
   heartbeat = setInterval(() => remote.retry('/worker/heartbeat', 'POST', { session_id: sid, worker_epoch: remote.epoch }).catch(fatal), 30_000);
-  await emit({ type: 'system', subtype: 'init', cwd: state.dir, model: state.model, tools: [], mcp_servers: [], permissionMode: 'default', slash_commands: [] });
   if (resuming && (state.native_terminal || state.remote_sid !== sid)) await replayHistory(codex, state.sid, sid, emit, submitted);
   state.remote_user_ids = [...submitted];
   // Commit the remote identity only after every history upload succeeds.
@@ -442,7 +421,11 @@ async function worker() {
 
 async function nativeLauncher(statePath, state, script) {
   const dir = await mkdtemp(join(tmpdir(), 'cdash-codex-native-'));
-  const endpoint = join(dir, 'backend.sock');
+  // Codex's Unix listener fails its socket-parent check on every Android path
+  // (/ and /data are unreadable to apps), so Android uses token-guarded loopback.
+  const loopback = process.platform === 'android';
+  const socket = join(dir, 'backend.sock'), tokenFile = join(dir, 'token');
+  let endpoint = loopback ? undefined : socket;
   let backend, runner, tui, control, log, cleanup, remoteRetry;
   let closing = false;
   stop = () => {
@@ -476,14 +459,25 @@ async function nativeLauncher(statePath, state, script) {
   log = await open(join(controlDir, 'native.log'), 'a', 0o600);
   // Buffer input without echo while the native TUI is starting.
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
-  backend = spawn('codex', ['app-server', '--listen', `unix://${endpoint}`], {
-    cwd: state.dir, env: codexEnv(), detached: true, stdio: ['ignore', log.fd, log.fd],
+  if (loopback) {
+    process.env.CDASH_CODEX_TOKEN = randomBytes(32).toString('hex');
+    await writeFile(tokenFile, process.env.CDASH_CODEX_TOKEN, { mode: 0o600 });
+  }
+  backend = spawn('codex', ['app-server', ...(loopback
+    ? ['--listen', 'ws://127.0.0.1:0', '--ws-auth', 'capability-token', '--ws-token-file', tokenFile]
+    : ['--listen', `unix://${socket}`])], {
+    cwd: state.dir, env: codexEnv(), detached: true, stdio: ['ignore', log.fd, loopback ? 'pipe' : log.fd],
   });
   backend.on('error', fatal);
   backend.on('exit', code => { if (!closing) fatal(Error(`Codex backend exited (${code})`)); });
+  // Codex reports the port it bound only on stderr.
+  if (loopback) createInterface({ input: backend.stderr }).on('line', line => {
+    endpoint ??= /listening on: (ws:\/\/127\.0\.0\.1:\d+)/.exec(line)?.[1];
+    log.write(`${line}\n`).catch(() => {});
+  });
   let ready = false;
   for (let i = 0; i < 100 && !closing; i++) {
-    ready = await access(endpoint).then(() => true, () => false);
+    ready = loopback ? Boolean(endpoint) : await access(socket).then(() => true, () => false);
     if (ready) break;
     await sleep(100);
   }
@@ -511,7 +505,7 @@ async function nativeLauncher(statePath, state, script) {
     } else return;
     await saveNative();
   }); // also tracks the active turn for shutdown; never answers approvals
-  await control.call('initialize', { clientInfo: { name: 'claude_dashboard', version: '0.5.1' }, capabilities: { experimentalApi: true } });
+  await control.call('initialize', { clientInfo: { name: 'claude_dashboard', version: '0.5.2' }, capabilities: { experimentalApi: true } });
   control.send({ method: 'initialized' });
   if (!await control.ready()) throw Error('Codex is signed out; run codex login on the agent host.');
   const result = await control.call(state.sid ? 'thread/resume' : 'thread/start', {
@@ -526,8 +520,8 @@ async function nativeLauncher(statePath, state, script) {
   await control.call('thread/name/set', { threadId: state.sid, name: state.display_name });
   await atomic(statePath, JSON.stringify(state));
   await saveNative();
-  tui = spawn('codex', ['resume', '--remote', `unix://${endpoint}`, '-c', 'tui.fullscreen_transcript=true', '-c', 'tui.alternate_screen="always"', state.sid], {
-    cwd: state.dir, env: codexEnv(), stdio: 'inherit',
+  tui = spawn('codex', ['resume', '--remote', loopback ? endpoint : `unix://${socket}`, ...(loopback ? ['--remote-auth-token-env', 'CDASH_CODEX_TOKEN'] : []), '-c', 'tui.fullscreen_transcript=true', '-c', 'tui.alternate_screen="always"', state.sid], {
+    cwd: state.dir, env: { ...codexEnv(), CDASH_CODEX_TOKEN: process.env.CDASH_CODEX_TOKEN }, stdio: 'inherit',
   });
   tui.on('error', fatal);
   tui.on('exit', code => { if (!closing) { process.exitCode = code ?? 1; stop(); } });
@@ -605,6 +599,39 @@ const queryMode = ['--models', '--usage'].find(mode => process.argv.includes(mod
 if (args[0] === '--summary') {
   import('./summary.mjs').then(({ summarize }) => summarize(JSON.parse(args[1]), Codex, fn => { stop = fn; }))
     .then(value => console.log(JSON.stringify(value)), () => { console.log(JSON.stringify({ error: 'Session summary unavailable' })); });
+} else if (process.argv.includes('--claude-models')) {
+  const child = spawn('claude', ['--print', '--verbose', '--input-format', 'stream-json', '--output-format', 'stream-json',
+    '--no-session-persistence', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'], {
+    env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== 'CLAUDECODE'
+      && !key.startsWith('CLAUDE_CODE_SESSION_') && !key.startsWith('CDASH_CODEX_'))),
+    cwd: homedir(), stdio: ['pipe', 'pipe', 'ignore'], detached: true,
+  });
+  let finished = false;
+  const finish = result => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(deadline);
+    console.log(JSON.stringify(result));
+    killGroup(child);
+  };
+  stop = () => finish({ error: 'Claude model discovery stopped' });
+  const deadline = setTimeout(() => finish({ error: 'Claude model discovery timed out' }), 10_000);
+  child.on('error', () => finish({ error: 'Claude model discovery unavailable' }));
+  child.stdin.on('error', () => finish({ error: 'Claude model discovery unavailable' }));
+  child.on('exit', () => finish({ error: 'Claude model discovery unavailable' }));
+  createInterface({ input: child.stdout }).on('line', line => {
+    let message;
+    try { message = JSON.parse(line); } catch { return; }
+    if (message.type !== 'control_response' || message.response?.request_id !== 'models') return;
+    const models = message.response?.response?.models;
+    if (!Array.isArray(models)) return finish({ error: 'Claude model discovery unavailable' });
+    finish(models.filter(m => ['sonnet', 'opus', 'haiku', 'fable'].includes(m.value)
+      && typeof m.displayName === 'string').map(m => ({
+      value: m.value, model: m.resolvedModel || m.value, label: `Claude ${m.displayName}`,
+      efforts: m.supportedEffortLevels || ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium',
+    })));
+  });
+  child.stdin.write(`${JSON.stringify({ type: 'control_request', request_id: 'models', request: { subtype: 'initialize' } })}\n`);
 } else if (process.argv.includes('--threads')) {
   // Resumable dashboard threads, read from Codex's own state database: it is
   // what Codex itself records per thread, so a thread continued elsewhere
@@ -634,7 +661,7 @@ if (args[0] === '--summary') {
   const deadline = setTimeout(() => { timedOut = true; codex.close(); }, 12_000);
   (async () => {
     try {
-      await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', version: '0.5.1' } }, 10_000);
+      await codex.call('initialize', { clientInfo: { name: 'claude_dashboard', version: '0.5.2' } }, 10_000);
       codex.send({ method: 'initialized' });
       let result;
       if (queryMode === '--usage') {

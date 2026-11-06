@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm, stat, rename } from 'node:fs/p
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-async function fixture(t, failure = '') {
+async function fixture(t, failure = '', platform = 'linux') {
   const dir = await mkdtemp(join(tmpdir(), 'cdash-native-test-'));
   const state = join(dir, 'state.json'), wire = join(dir, 'wire.jsonl');
   await mkdir(join(dir,'controls','cdash-test'),{recursive:true});
@@ -19,12 +19,13 @@ const credential=!!process.env.CLAUDE_CODE_SESSION_ACCESS_TOKEN;
   await writeFile(join(dir, 'codex'), header + `
 const args=process.argv.slice(2);
 if(args[0]==='app-server'){
- log({kind:'backend',pid:process.pid,args,credential});
+ log({kind:'backend',pid:process.pid,args,credential,token:process.env.CDASH_CODEX_TOKEN});
  if(process.env.CDASH_CHECK_FAILURE==='backend')process.exit(1);
- const path=args[args.indexOf('--listen')+1].replace('unix://','');
- require('node:net').createServer().listen(path,()=>fs.chmodSync(path,0o600));
+ const listen=args[args.indexOf('--listen')+1], path=listen.replace('unix://','');
+ if(listen.startsWith('ws://'))require('node:net').createServer().listen(0,'127.0.0.1',function(){console.error('codex app-server (WebSockets)\\n  listening on: ws://127.0.0.1:'+this.address().port)});
+ else require('node:net').createServer().listen(path,()=>fs.chmodSync(path,0o600));
 }else{
- log({kind:'tui',pid:process.pid,args,credential});
+ log({kind:'tui',pid:process.pid,args,credential,token:process.env.CDASH_CODEX_TOKEN});
  if(process.env.CDASH_CHECK_FAILURE==='tui')process.exit(1);
  console.log('NATIVE_TUI_READY');
  process.stdin.on('data',b=>{log({kind:'native-input',text:String(b)});if(String(b).includes('quit'))process.exit(0)});
@@ -32,7 +33,7 @@ if(args[0]==='app-server'){
 }
 `, { mode: 0o700 });
   await writeFile(join(dir, 'agent'), header + `
-log({kind:'proxy',pid:process.pid,args:process.argv.slice(2),credential});
+log({kind:'proxy',pid:process.pid,args:process.argv.slice(2),credential,token:process.env.CDASH_CODEX_TOKEN});
 setInterval(()=>{
  const marker=process.env.CDASH_CHECK_ROOT+'/native-event';
  if(fs.existsSync(marker)) {
@@ -59,7 +60,9 @@ fs.writeFileSync(process.env.CDASH_CODEX_STATE.replace(/\\.json$/,'' )+'.link','
 console.log('REMOTE_LOG_ONLY');
 setInterval(()=>{const marker=process.env.CDASH_CHECK_ROOT+'/stop-remote';if(fs.existsSync(marker)){const code=fs.readFileSync(marker,'utf8')==='0'?0:1;fs.unlinkSync(marker);process.exit(code)}},30);
 `, { mode: 0o700 });
-  const child = spawn(process.execPath, [resolve('crates/agent/src/collect/codex-remote.mjs'), '--state', state, '--name', 'cdash-test'], {
+  // The transport depends on the platform, so pin it: this suite also runs on Termux.
+  const pin = `data:text/javascript,${encodeURIComponent(`Object.defineProperty(process,'platform',{value:'${platform}'})`)}`;
+  const child = spawn(process.execPath, ['--import', pin, resolve('crates/agent/src/collect/codex-remote.mjs'), '--state', state, '--name', 'cdash-test'], {
     env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, CDASH_CHECK_ROOT: dir, CDASH_CHECK_WIRE: wire,
       CDASH_CHECK_FAILURE: failure, CDASH_CODEX_AGENT: join(dir, 'agent'), CLAUDE_CODE_SESSION_ACCESS_TOKEN: 'test-must-not-leak' },
     stdio: ['pipe','pipe','pipe'],
@@ -122,6 +125,32 @@ test('native launcher owns one backend, isolates credentials, and preserves TUI 
   assert.equal(f.child.exitCode,0);
   await f.wait(async()=> (await f.messages()).filter(m=>m.pid).every(m=>!f.alive(m.pid)));
   await assert.rejects(stat(path),{code:'ENOENT'});
+});
+
+test('Android native launcher reaches Codex over token-guarded loopback', {timeout:15000}, async t => {
+  const f=await fixture(t,'','android');
+  await f.wait(()=>f.output().includes('NATIVE_TUI_READY'));
+  const messages=await f.messages();
+  const [backend,tui,proxy]=['backend','tui','proxy'].map(kind=>messages.find(m=>m.kind===kind));
+  const at=(m,flag)=>m.args[m.args.indexOf(flag)+1];
+  assert.equal(at(backend,'--listen'),'ws://127.0.0.1:0');
+  assert.equal(at(backend,'--ws-auth'),'capability-token');
+  const tokenFile=at(backend,'--ws-token-file'), token=await readFile(tokenFile,'utf8');
+  assert.match(token,/^[0-9a-f]{64}$/);
+  assert.equal((await stat(tokenFile)).mode & 0o777,0o600);
+  assert.equal(backend.token,undefined,'Codex tools never see the token');
+  const endpoint=at(tui,'--remote');
+  assert.match(endpoint,/^ws:\/\/127\.0\.0\.1:\d+$/);
+  assert.notEqual(endpoint,'ws://127.0.0.1:0');
+  assert.equal(at(tui,'--remote-auth-token-env'),'CDASH_CODEX_TOKEN');
+  assert.equal(tui.token,token);
+  assert.deepEqual(proxy.args,['codex-proxy',endpoint]);
+  assert.equal(proxy.token,token);
+  assert.match(await readFile(join(f.dir,'controls','cdash-test','native.log'),'utf8'),/listening on: ws:/);
+  f.child.stdin.write('quit\n');
+  await f.wait(()=>f.child.exitCode!==null);
+  assert.equal(f.child.exitCode,0);
+  await assert.rejects(stat(tokenFile),{code:'ENOENT'});
 });
 
 for(const failure of ['backend','tui']) test(`native ${failure} failure cleans up its session processes`,{timeout:15000},async t=>{

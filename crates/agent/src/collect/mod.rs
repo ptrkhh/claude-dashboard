@@ -4,6 +4,7 @@ pub mod git;
 pub mod ctx;
 pub mod lookup;
 pub mod places;
+pub mod pins;
 pub mod browse;
 pub mod validate;
 pub mod term;
@@ -15,3 +16,5 @@ pub mod codex;
 pub mod codex_proxy;
 pub mod names;
 pub mod summaries;
+
+pub mod opencode;

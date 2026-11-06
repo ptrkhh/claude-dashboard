@@ -10,6 +10,9 @@ if (window.__cdashBooted) return;
 window.__cdashBooted = true;
 const $ = s => document.querySelector(s);
 const MODELS = ['sonnet', 'opus', 'haiku', 'fable'].map(value => ({ value, label: `Claude ${value.charAt(0).toUpperCase() + value.slice(1)}` }));
+// A bare tmux shell for first-time setup (signing in to Claude, Codex, OpenCode).
+// Launcher only: it is never a resume choice.
+const TERMINAL = { value: 'terminal', label: 'Terminal' };
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 let armedKill = null; // ponytail: survives render() replacing #running.innerHTML
 const picks = {}; // explicit model/effort choices on resumable cards by sid, kept across the poll's re-render
@@ -28,6 +31,7 @@ const ICONS = {
   download: svg('<path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/>'),
   refresh: svg('<path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/>'),
   trash: svg('<path d="M4 7h16"/><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/><path d="M18 7l-.8 12a2 2 0 0 1-2 1.9H8.8a2 2 0 0 1-2-1.9L6 7"/>'),
+  copy: svg('<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/>'),
   spinner: svg('<path d="M12 3a9 9 0 1 0 9 9"/>'),
   sun: svg('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>'),
   moon: svg('<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>'),
@@ -35,6 +39,7 @@ const ICONS = {
   folder: svg('<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>'),
   chevronRight: svg('<path d="M9 6l6 6-6 6"/>'),
   clock: svg('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'),
+  pin: svg('<path d="M16 3l5 5-4 1-3 5v3l-7-7h3l5-3zM3 21l6-6"/>'),
   star: svg('<path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.5 9.7l5.9-.9z"/>'),
   starFilled: `<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.5 9.7l5.9-.9z"/></svg>`,
 };
@@ -57,12 +62,17 @@ const store = {
 };
 const MODES = ['system', 'light', 'dark'];
 const systemDark = () => matchMedia('(prefers-color-scheme: dark)').matches;
-const themeMode = () => { const s = store.get(THEME_KEY); return s === 'light' || s === 'dark' ? s : 'system'; };
+// Keep the current choice even when the WebView cannot persist it.
+let activeMode = store.get(THEME_KEY);
+const themeMode = () => activeMode === 'light' || activeMode === 'dark' ? activeMode : 'system';
 const resolved = mode => mode === 'system' ? (systemDark() ? 'dark' : 'light') : mode;
 
 function applyMode(mode) {
   const dark = resolved(mode) === 'dark';
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  // Explicit URLs also follow a manual override and avoid SVG media-query bugs.
+  $('#favicon')?.setAttribute('href', dark ? 'icon.svg' : 'icon-light.svg');
+  $('#favicon-png')?.setAttribute('href', dark ? 'icon-32.png' : 'icon-light-32.png');
   const tt = $('#theme-toggle');
   tt.innerHTML = mode === 'system' ? ICONS.system : dark ? ICONS.moon : ICONS.sun;
   const label = mode === 'system' ? 'Theme: system — click to override' : `Theme: ${mode} — click to change`;
@@ -76,6 +86,7 @@ function applyMode(mode) {
 }
 $('#theme-toggle').onclick = () => {
   const next = MODES[(MODES.indexOf(themeMode()) + 1) % MODES.length];
+  activeMode = next;
   if (next === 'system') store.remove(THEME_KEY);
   else store.set(THEME_KEY, next);
   applyMode(next);
@@ -129,45 +140,101 @@ function buildDropdown(el, label, items, initial, onChange = () => {}) {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!isOpen()) open(); else if (opts[active]) pick(opts[active]); }
   });
   document.addEventListener('click', e => { if (isOpen() && !el.contains(e.target)) close(); });
-  const setItems = (items, fallback) => {
+  const setItems = (items, fallback, reset = false) => {
     entries = choices(items);
-    if (!entries.some(i => i.value === value)) value = fallback || entries[0]?.value || '';
+    if (reset || !entries.some(i => i.value === value)) value = fallback ?? entries[0]?.value ?? '';
     current.textContent = text();
     menu.innerHTML = optionsHtml(entries, value);
     opts = [...menu.querySelectorAll('li')];
     close();
   };
   setItems(items, initial);
-  return { get value() { return value; }, setItems };
+  const setLabel = label => { trigger.setAttribute('aria-label', label); el.querySelector('.cb-lead').textContent = label; };
+  return { get value() { return value; }, setItems, setLabel };
+}
+function latestModels(models) {
+  const families = new Map();
+  for (const model of models) {
+    const match = /^gpt-(\d+(?:\.\d+)*)(?:-(.+))?$/.exec(model.model || '');
+    const family = match ? `gpt:${match[2] || ''}` : model.value;
+    const previous = families.get(family);
+    if (!previous || (match && match[1].localeCompare(previous.version, 'en', { numeric: true }) > 0))
+      families.set(family, { version: match?.[1], model });
+  }
+  return [...families.values()].map(entry => entry.model);
 }
 let modelChoices = MODELS;
-const modelDD = buildDropdown($('#model'), 'Model', MODELS, 'sonnet', updateEfforts);
+const modelCatalogs = new Map();
+const modelDD = buildDropdown($('#model'), 'Model', [...MODELS, TERMINAL], 'sonnet', updateEfforts);
 const effortDD = buildDropdown($('#effort'), 'Effort', EFFORTS.map(value => ({ value, label: effortLabel(value) })), 'medium');
+let effortModel = modelDD.value;
 function updateEfforts() {
+  const changed = effortModel !== modelDD.value && (effortModel.startsWith('opencode:') || modelDD.value.startsWith('opencode:'));
+  effortModel = modelDD.value;
   const model = modelChoices.find(m => m.value === modelDD.value);
-  effortDD.setItems((model?.efforts || EFFORTS).map(value => ({ value, label: effortLabel(value) })), model?.defaultEffort || 'medium');
+  const isOpenCode = modelDD.value.startsWith('opencode:');
+  const variants = model?.variants || [];
+  $('#effort').hidden = modelDD.value === TERMINAL.value || (isOpenCode && !variants.length);
+  effortDD.setLabel(isOpenCode ? 'Variant' : 'Effort');
+  const choices = isOpenCode ? [{ value: '', label: 'Default' }, ...variants.map(value => ({ value, label: value }))]
+    : (model?.efforts || EFFORTS).map(value => ({ value, label: effortLabel(value) }));
+  effortDD.setItems(choices, isOpenCode ? model?.defaultVariant || '' : model?.defaultEffort || 'medium', changed);
 }
-let modelsAt = 0, modelsLoading = false;
-async function refreshModels(g) {
-  if (modelsLoading || Date.now() - modelsAt < 60_000) return;
-  modelsLoading = true;
-  try {
-    const models = await api('/api/models');
-    if (g !== gen) return;
-    modelChoices = [...MODELS, ...models];
-    modelDD.setItems(modelChoices, 'sonnet');
-    updateEfforts();
-  } catch (err) {
-    if (g === gen) {
-      modelChoices = MODELS;
-      modelDD.setItems(modelChoices, 'sonnet');
-      updateEfforts();
-      toast(`Model discovery failed: ${err.message}`);
-    }
-  } finally {
-    if (g === gen) modelsAt = Date.now();
-    modelsLoading = false;
+let modelsGeneration = -1;
+async function refreshModels(g, dir = $('#dir').value.trim()) {
+  if (g !== gen || (dir && !dir.startsWith('/'))) return;
+  if (modelsGeneration !== g) {
+    modelsGeneration = g; modelCatalogs.clear(); modelChoices = MODELS;
+    modelDD.setItems([...modelChoices, TERMINAL], 'sonnet'); updateEfforts();
   }
+  const key = dir || '';
+  let entry = modelCatalogs.get(key);
+  const active = () => g === gen && $('#dir').value.trim() === key;
+  const apply = models => {
+    if (!active()) return;
+    const catalog = new Map(models.map(model => [model.value, model]));
+    modelChoices = [
+      ...MODELS.map(model => catalog.get(model.value) || model),
+      ...latestModels(models.filter(model => model.value.startsWith('codex:'))),
+      ...models.filter(model => model.value.startsWith('opencode:')),
+    ];
+    modelDD.setItems([...modelChoices, TERMINAL], 'sonnet'); updateEfforts();
+  };
+  if (entry?.loading) return entry.loading;
+  if (entry?.at && Date.now() - entry.at < 60_000) { if (entry.models) apply(entry.models); return; }
+  if (active()) apply(entry?.models || modelChoices.filter(model => model.value.startsWith('codex:')));
+  if (!entry) {
+    if (modelCatalogs.size >= 32) modelCatalogs.delete(modelCatalogs.keys().next().value);
+    entry = { at: 0, models: null, loading: null }; modelCatalogs.set(key, entry);
+  }
+  entry.loading = (async () => {
+    try {
+      const models = await api(`/api/models${dir ? `?dir=${encodeURIComponent(dir)}` : ''}`);
+      if (g !== gen || modelCatalogs.get(key) !== entry) return;
+      entry.models = models; entry.at = Date.now(); apply(models);
+    } catch (err) {
+      if (g === gen && modelCatalogs.get(key) === entry) {
+        entry.at = Date.now();
+        if (entry.models) apply(entry.models);
+        else if (active()) toast(`Model discovery failed: ${err.message}`);
+      }
+    } finally {
+      if (modelCatalogs.get(key) === entry) entry.loading = null;
+    }
+  })();
+  return entry.loading;
+}
+
+// navigator.clipboard needs a secure context, which a phone on plain-HTTP LAN
+// lacks; execCommand still works there. Last resort: show it for a long-press.
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); toast('Session ID copied'); return; } catch {}
+  const ta = document.createElement('textarea');
+  ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+  document.body.append(ta); ta.select();
+  const ok = document.execCommand('copy');
+  ta.remove();
+  toast(ok ? 'Session ID copied' : `Session ID: ${text}`);
 }
 
 function toast(msg) {
@@ -242,19 +309,27 @@ function statTile({ label, value, pct, sub, title }) {
   return `<div class="stat"${tip}><div class="stat-top"><span class="stat-label">${label}</span><span class="stat-value">${value}</span></div>${meter}${caption}</div>`;
 }
 
+// The bare session UUID, as `/status` shows it, for handing a session to another agent.
+// A just-launched session has no sid until its transcript appears, so no button yet.
+const copyIdBtn = sid => sid
+  ? `<button class="action ghost" type="button" data-copy="${esc(sid)}" title="Copy session ID ${esc(sid)}" aria-label="Copy session ID">${ICONS.copy}</button>` : '';
+
 function runningCard(r) {
   const status = r.working ? 'working' : 'idle';
-  const chips = [r.model, r.effort && effortLabel(r.effort)].filter(Boolean);
+  const chips = [r.model, r.effort && effortLabel(r.effort), r.variant && `Variant: ${r.variant}`].filter(Boolean);
   const chipHtml = chips.length
     ? chips.map(x => `<span class="chip">${esc(x)}</span>`).join('')
     : `<span class="chip">${r.external ? 'external' : 'resumed'}</span>`;
   const peek = r.lastMessage
     ? `<div class="peek" onclick="this.classList.toggle('open')"><span class="peek-text">${esc(r.lastMessage)}</span></div>` : '';
-  const rc = r.rcLink
+  const rc = r.provider === 'terminal' ? ''
+    : r.rcLink
     ? `<a class="action primary" href="${esc(r.rcLink)}" target="_blank" rel="noopener">${ICONS.external}<span>Open in Claude</span></a>`
-    : r.nativeTerminal && r.rcUnavailable
-      ? '<span class="action pending">Claude link unavailable · use Terminal</span>'
-      : `<span class="action pending">${ICONS.spinner}<span>Waiting for link…</span></span>`;
+    : r.external
+      ? '<span class="action pending">No Claude link · run /remote-control in original terminal</span>'
+      : r.nativeTerminal && r.rcUnavailable
+        ? '<span class="action pending">Claude link unavailable · use Terminal</span>'
+        : `<span class="action pending">${ICONS.spinner}<span>Waiting for link…</span></span>`;
   const kill = r.external ? ''
     : `<button class="action danger" type="button" data-kill="${esc(r.name)}" ${r.name === armedKill ? 'data-arm="1"' : ''} aria-label="Kill session">${r.name === armedKill ? 'Sure?' : ICONS.x}</button>`;
   // The session's real TUI. tmux-owned panes only: an external session lives
@@ -269,24 +344,29 @@ function runningCard(r) {
         <div class="session-headline">
           <span class="session-title">${esc(r.displayName || r.dir.split('/').pop())}</span>
         </div>
-        <span class="status ${r.working ? 'on' : 'off'}"><span class="dot"></span>${r.working ? 'Working' : 'Waiting'}</span>
+        ${r.provider === 'terminal' ? '' : `<span class="status ${r.working ? 'on' : 'off'}"><span class="dot"></span>${r.working ? 'Working' : 'Waiting'}</span>`}
       </div>
       <div class="session-meta">
         ${chipHtml}${gitBadge(r.git)}
         <span class="time">${fmtUp(r.uptimeSec)}</span>
       </div>
       ${peek}
-      <div class="actions">${rc}${termBtn}${kill}</div>
+      <div class="actions">${rc}${termBtn}${copyIdBtn(r.sid)}${kill}</div>
     </div>`;
 }
 
 let lastRes = [];
+let lastPinned = [];
 // A session resumes only with its own provider's models: a Claude transcript and
 // a Codex thread cannot stand in for each other. Everything shown is concrete
 // (the model and effort the session last ran with); there is no "default" entry.
 function pickState(s) {
   const codex = s.modelId?.startsWith('codex');
-  const base = codex ? modelChoices.filter(m => m.value.startsWith('codex:')) : MODELS;
+  const isOpenCode = s.modelId?.startsWith('opencode:') || s.sid?.startsWith('ses_');
+  const projectModels = modelCatalogs.get(s.dir || '')?.models || [];
+  const base = isOpenCode ? projectModels.filter(m => m.value.startsWith('opencode:'))
+    : codex ? latestModels(modelChoices.filter(m => m.value.startsWith('codex:')))
+    : modelChoices.filter(m => !m.value.startsWith('codex:') && !m.value.startsWith('opencode:'));
   // The session's own model stays selectable even if the catalog no longer lists it.
   const models = !s.modelId || base.some(m => m.value === s.modelId)
     ? base : [{ value: s.modelId, label: s.model || s.modelId }, ...base];
@@ -297,7 +377,17 @@ function pickState(s) {
   const wanted = p.effort ?? s.effort;
   const effort = efforts.includes(wanted) ? wanted
     : current?.defaultEffort || (efforts.includes('medium') ? 'medium' : efforts[0]);
-  return { models, model, efforts, effort };
+  const variants = current?.variants || [];
+  const variant = p.variant ?? (model !== s.modelId ? '' : s.variant || '');
+  return { models, model, efforts, effort, variant, variants, isOpenCode };
+}
+function resumePayload(s) {
+  const { model, effort, variant, isOpenCode } = pickState(s);
+  const payload = { sid: s.sid, model };
+  if (isOpenCode) {
+    if (Object.hasOwn(picks[s.sid] || {}, 'variant') || model !== s.modelId) payload.variant = variant;
+  } else payload.effort = effort;
+  return payload;
 }
 const pickDropdown = (s, kind, label, items, value) => `
   <div class="cb-select pick-dd" data-sid="${esc(s.sid)}" data-pick="${kind}">
@@ -307,16 +397,19 @@ const pickDropdown = (s, kind, label, items, value) => `
     <ul class="cb-menu" role="listbox" hidden>${optionsHtml(items, value)}</ul>
   </div>`;
 function pickHtml(s) {
-  const { models, model, efforts, effort } = pickState(s);
+  const { models, model, efforts, effort, variants, variant, isOpenCode } = pickState(s);
+  const options = [{ value: '', label: 'Default' }, ...variants.map(value => ({ value, label: value }))];
+  if (variant && !options.some(item => item.value === variant)) options.push({ value: variant, label: variant });
   return `<div class="pick">
       ${pickDropdown(s, 'model', 'Model', models, model)}
-      ${pickDropdown(s, 'effort', 'Effort', efforts.map(value => ({ value, label: effortLabel(value) })), effort)}
+      ${isOpenCode ? (variants.length ? pickDropdown(s, 'variant', 'Variant', options, variant) : '')
+        : pickDropdown(s, 'effort', 'Effort', efforts.map(value => ({ value, label: effortLabel(value) })), effort)}
     </div>`;
 }
 
-function resumableCard(s) {
+function resumableCard(s, pinned = false) {
   return `
-    <div class="session resumable">
+    <div class="session resumable${pinned ? ' pinned' : ''}">
       <div class="session-head">
         <div class="session-headline">
           <span class="session-title">${esc(s.displayName || s.dir?.split('/').pop() || '?')}</span>
@@ -324,30 +417,38 @@ function resumableCard(s) {
         </div>
         <span class="time">${fmtTs(s.ts)}</span>
       </div>
-      ${s.model ? `<div class="session-meta"><span class="chip">${esc(s.model)}</span>${s.effort ? `<span class="chip">${esc(effortLabel(s.effort))}</span>` : ''}</div>` : ''}
+      ${s.model ? `<div class="session-meta"><span class="chip">${esc(s.model)}</span>${s.effort ? `<span class="chip">${esc(effortLabel(s.effort))}</span>` : ''}${s.variant ? `<span class="chip">${esc(`Variant: ${s.variant}`)}</span>` : ''}</div>` : ''}
       ${s.summary ? `<details class="peek summary" data-summary="${esc(s.sid)}"><summary class="peek-text">${esc(s.summary)}</summary></details>` : `<div class="prompts">↳ ${esc(s.prompts.length ? s.prompts.join(' · ') : 'No conversation preview available')}</div>`}
       ${pickHtml(s)}
       <div class="actions">
         <button class="action" type="button" data-resume="${esc(s.sid)}">${ICONS.refresh}<span>Resume</span></button>
+        ${copyIdBtn(s.sid)}
+        <button class="action pin" type="button" data-pin="${esc(s.sid)}" aria-pressed="${pinned}">${ICONS.pin}<span>${pinned ? 'Unpin' : 'Pin'}</span></button>
         <button class="action ghost" type="button" data-purge="${esc(s.sid)}" aria-label="Purge from list">${ICONS.trash}</button>
       </div>
     </div>`;
 }
 
 function renderResumable() {
-  const expanded = new Set([...$('#resumable').querySelectorAll('details[open]')].map(el => el.dataset.summary));
   const focused = document.activeElement?.closest('details[data-summary]')?.dataset.summary;
-  // A full page means there may be more; a short one is the whole list (or the server's ceiling).
-  const more = lastRes.length >= resLimit ? '<button class="action more" type="button" data-more>Show more…</button>' : '';
-  $('#resumable').innerHTML = (lastRes.map(resumableCard).join('') || '<div class="empty">No resumable sessions</div>') + more;
-  for (const el of $('#resumable').querySelectorAll('details[data-summary]')) {
-    el.open = expanded.has(el.dataset.summary);
-    if (el.dataset.summary === focused) el.querySelector('summary').focus({ preventScroll: true });
+  const focusedPin = document.activeElement?.closest('[data-pin]')?.dataset.pin;
+  const expanded = new Set([...$('#pinned').querySelectorAll('details[open]'), ...$('#resumable').querySelectorAll('details[open]')].map(el => el.dataset.summary));
+  for (const [id, sessions, pinned] of [['#pinned', lastPinned, true], ['#resumable', lastRes, false]]) {
+    const container = $(id);
+    // Pinned conversations are returned in full; only ordinary history has pages.
+    const more = !pinned && sessions.length >= resLimit ? '<button class="action more" type="button" data-more>Show more…</button>' : '';
+    container.innerHTML = (sessions.map(s => resumableCard(s, pinned)).join('') || `<div class="empty">No ${pinned ? 'pinned' : 'resumable'} sessions</div>`) + more;
+    for (const el of container.querySelectorAll('details[data-summary]')) {
+      el.open = expanded.has(el.dataset.summary);
+      if (el.dataset.summary === focused) el.querySelector('summary').focus({ preventScroll: true });
+    }
   }
+  if (focusedPin) document.querySelector(`[data-pin="${CSS.escape(focusedPin)}"]`)?.focus({ preventScroll: true });
 }
 
 function render(d) {
   $('#nrun').textContent = d.running.length;
+  $('#npin').textContent = d.pinned?.length || 0;
   $('#nres').textContent = d.resumable.length;
 
   const st = d.stats;
@@ -376,18 +477,29 @@ function render(d) {
     .map(row => `<div class="stats-row">${row.map(statTile).join('')}</div>`).join('');
 
   $('#running').innerHTML = d.running.map(runningCard).join('') || '<div class="empty">No running sessions</div>';
+  const runningSids = new Set(d.running.map(s => s.sid).filter(Boolean));
+  // Remove stale cards even when an unrelated open picker defers the full render.
+  for (const button of document.querySelectorAll('#pinned [data-resume], #resumable [data-resume]')) {
+    if (!runningSids.has(button.dataset.resume)) continue;
+    const card = button.closest('.session'), container = card.parentElement;
+    card.remove();
+    if (!container.querySelector('.session')) container.innerHTML = `<div class="empty">No ${container.id === 'pinned' ? 'pinned' : 'resumable'} sessions</div>`;
+  }
   lastRes = d.resumable;
+  lastPinned = d.pinned || [];
   // Same rule for the pickers: re-rendering would snap an open menu shut.
-  if (!document.activeElement?.closest('.pick-dd') && !$('#resumable .cb-menu:not([hidden])')) renderResumable();
+  if (!document.activeElement?.closest('.pick-dd') && !$('.pick-dd .cb-menu:not([hidden])')) renderResumable();
 
-  const dirs = [...new Set(d.resumable.map(s => s.dir).filter(Boolean))];
+  const dirs = [...new Set([...lastPinned, ...lastRes].map(s => s.dir).filter(Boolean))];
   $('#dirs').innerHTML = dirs.map(x => `<option value="${esc(x)}">`).join('');
 }
 
 document.body.addEventListener('click', async e => {
   const t = e.target.closest('[data-term]');
   if (t) { openTerm(t.dataset.term, t.dataset.title); return; }
-  const el = e.target.closest('[data-kill],[data-resume],[data-purge],[data-more]');
+  const c = e.target.closest('[data-copy]');
+  if (c) { copyText(c.dataset.copy); return; }
+  const el = e.target.closest('[data-kill],[data-resume],[data-purge],[data-more],[data-pin]');
   if (!el) return;
   try {
     if (el.dataset.more !== undefined) { resLimit += 20; poll(); }
@@ -399,11 +511,22 @@ document.body.addEventListener('click', async e => {
       }
     } else if (el.dataset.resume) {
       el.disabled = true;
-      const { model, effort } = pickState(lastRes.find(s => s.sid === el.dataset.resume) || { sid: el.dataset.resume });
-      try { await api('/api/resume', { sid: el.dataset.resume, model, effort }); delete picks[el.dataset.resume]; poll(); }
+      const selection = resumePayload([...lastPinned, ...lastRes].find(s => s.sid === el.dataset.resume) || { sid: el.dataset.resume });
+      try { await api('/api/resume', selection); delete picks[el.dataset.resume]; poll(); }
       finally { el.disabled = false; }
     } else if (el.dataset.purge) {
+      if (lastPinned.some(s => s.sid === el.dataset.purge)) await api('/api/pin', { sid: el.dataset.purge, pinned: false });
       await api('/api/purge', { sid: el.dataset.purge }); poll();
+    } else if (el.dataset.pin) {
+      const focused = document.activeElement === el;
+      el.disabled = true;
+      try {
+        await api('/api/pin', { sid: el.dataset.pin, pinned: el.getAttribute('aria-pressed') !== 'true' });
+        el.disabled = false;
+        if (focused && document.activeElement === document.body) el.focus({ preventScroll: true });
+        poll();
+      }
+      finally { el.disabled = false; }
     }
   } catch (err) { toast(err.message); poll(); } // re-arm even when the action failed
 });
@@ -421,13 +544,25 @@ function ddActive(dd, li) {
   if (li) { li.classList.add('active'); li.scrollIntoView({ block: 'nearest' }); }
 }
 function ddOpen(dd) {
+  const session = lastRes.find(item => item.sid === dd.dataset.sid);
+  if (dd.dataset.pick === 'model' && session?.modelId?.startsWith('opencode:') && session.dir) {
+    const g = gen;
+    refreshModels(g, session.dir).then(() => {
+      if (g !== gen || !dd.isConnected || ddMenu(dd).hidden) return;
+      const { models, model } = pickState(session);
+      ddMenu(dd).innerHTML = optionsHtml(models, model);
+      ddActive(dd, ddMenu(dd).querySelector('li.on'));
+    });
+  }
   document.querySelectorAll('.cb-menu:not([hidden])').forEach(m => { if (m.parentElement !== dd) { m.hidden = true; m.previousElementSibling.setAttribute('aria-expanded', 'false'); } });
   ddMenu(dd).hidden = false; ddTrigger(dd).setAttribute('aria-expanded', 'true');
   ddActive(dd, ddMenu(dd).querySelector('li.on'));
 }
 function ddPick(dd, li, refocus) {
   const { sid, pick } = dd.dataset;
-  (picks[sid] ||= {})[pick] = li.dataset.value;
+  const selected = picks[sid] ||= {};
+  if (pick === 'model' && selected.model !== li.dataset.value) delete selected.variant;
+  selected[pick] = li.dataset.value;
   renderResumable();
   // Keyboard users keep their place; a mouse click lets the list refresh again.
   if (refocus) document.querySelector(`.pick-dd[data-sid="${CSS.escape(sid)}"][data-pick="${pick}"] .cb-trigger`)?.focus();
@@ -534,6 +669,14 @@ function openTerm(name, title) {
   const fit = new FitAddon.FitAddon();
   xterm.loadAddon(fit);
   xterm.open($('#term-screen'));
+  // Let native copy/paste events reach xterm; Ctrl+C without a selection still interrupts.
+  xterm.attachCustomKeyEventHandler(e => {
+    if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+      const key = e.key.toLowerCase();
+      if (key === 'v' || (key === 'c' && xterm.hasSelection())) return false;
+    }
+    return true;
+  });
   // The hidden textarea is what the phone keyboard types into.
   for (const [k, v] of [['autocapitalize', 'off'], ['autocorrect', 'off'], ['autocomplete', 'off'], ['spellcheck', 'false']])
     xterm.textarea.setAttribute(k, v);
@@ -588,15 +731,22 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden && term?.retry && !term.ws) termConnect();
 });
 
+let modelDirTimer;
+$('#dir').addEventListener('input', () => {
+  clearTimeout(modelDirTimer);
+  modelDirTimer = setTimeout(() => refreshModels(gen), 250);
+});
+
 // Launch: submitting the command bar (button or Enter in the directory field).
 $('#launcher').addEventListener('submit', async e => {
   e.preventDefault();
   const btn = $('#launch');
   const dir = $('#dir').value.trim();
   if (!dir) { toast('Enter a project directory first'); $('#dir').focus(); return; }
-  const model = modelDD.value, effort = effortDD.value;
+  const model = modelDD.value;
+  const selection = model.startsWith('opencode:') ? { model, variant: effortDD.value } : { model, effort: effortDD.value };
   btn.disabled = true; btn.innerHTML = `${ICONS.play}<span>Launching…</span>`;
-  try { await api('/api/launch', { dir, model, effort }); $('#dir').value = ''; poll(); }
+  try { await api('/api/launch', { dir, ...selection }); $('#dir').value = ''; poll(); }
   catch (err) { toast(err.message); poll(); } // re-arm even when the launch failed
   finally { btn.disabled = false; btn.innerHTML = `${ICONS.play}<span>Launch</span>`; }
 });
@@ -717,7 +867,7 @@ async function toggleFav(path) {
     if (pkTab === 'favorites') renderPlaces('favorites'); else refreshStars();
   } catch (err) { toast(err.message); }
 }
-function selectFolder(path) { $('#dir').value = path; closePicker(); $('#dir').focus(); }
+function selectFolder(path) { $('#dir').value = path; closePicker(); $('#dir').focus(); refreshModels(gen, path); }
 
 pkList.addEventListener('click', e => {
   const fav = e.target.closest('[data-fav]');
@@ -734,9 +884,9 @@ let timer = null;
 let gen = 0; // stale-tick guard: a superseded tick's result is dropped
 let polled = false; // has any tick actually run to completion?
 
-function arm() {
+function arm(delay = cdashBackoff.delay(bk)) {
   clearTimeout(timer);
-  timer = setTimeout(tick, cdashBackoff.delay(bk));
+  timer = setTimeout(tick, delay);
 }
 
 async function tick() {
@@ -747,7 +897,7 @@ async function tick() {
   // the listener below is attached — which left the app arming forever on
   // "Connecting…", with no request ever sent.
   if (document.hidden && polled) { arm(); return; }
-  let outcome;
+  let outcome, waitingForLink = false;
   try {
     const data = await api(`/api/sessions?resumable=${resLimit}`);
     if (g !== gen) return; // superseded mid-flight: never paint the old snapshot
@@ -758,6 +908,7 @@ async function tick() {
     refreshModels(g);
     checkAgent();
     outcome = 'ok';
+    waitingForLink = data.running.some(s => !s.external && !s.rcLink && !s.rcUnavailable);
   } catch (err) {
     if (g !== gen) return;
     // Only transport errors and 401/403 reach here as distinct things;
@@ -778,7 +929,7 @@ async function tick() {
   if (g !== gen) return;
   polled = true;
   bk = cdashBackoff.next(bk, outcome);
-  if (!bk.halted) arm();
+  if (!bk.halted) arm(waitingForLink ? 2000 : cdashBackoff.delay(bk));
 }
 
 // Any user-initiated action (launch, kill, resume, purge) calls poll():
@@ -819,9 +970,8 @@ async function hostPlatform() {
 /// differs in the dialog's wording.
 const SHELL = { android: 'Termux', windows: 'WSL' };
 
-/// Fetching the binary is the only part that differs; everything after it —
-/// the executable bit, the startup guard, sourcing it — is identical, so it
-/// lives here once.
+/// The executable bit, startup guard, and sourcing it are shared; Termux also
+/// needs its wake lock and CA bundle path.
 ///
 /// The binary lands beside its final name and is renamed into place. Writing
 /// straight over a running agent fails with "Text file busy", and re-pasting is
@@ -837,7 +987,7 @@ const SHELL = { android: 'Termux', windows: 'WSL' };
 /// path: Termux ships no pkill unless procps is installed, and matching on a bare
 /// name would also take out an editor or `tail` that merely has cdash-agent.log
 /// open. The subshell keeps the loop variable out of the user's own shell.
-const setupScript = (fetch, port, keepAwake) => `${fetch} &&
+const setupScript = (fetch, port, kind) => `${fetch} &&
 chmod +x "$HOME/cdash-agent.new" &&
 mv -f "$HOME/cdash-agent.new" "$HOME/cdash-agent" &&
 ( for p in /proc/[0-9]*; do
@@ -849,11 +999,13 @@ rm -f "$HOME/cdash-agent.new"
 grep -q cdash-agent "$HOME/.bashrc" 2>/dev/null || cat >> "$HOME/.bashrc" <<'CDASH'
 
 # claude-dashboard: start the agent whenever this shell opens, unless it is up
-if ! curl -fsS -m 1 http://127.0.0.1:${port}/api/health >/dev/null 2>&1; then${keepAwake}
+if ! curl -fsS -m 1 http://127.0.0.1:${port}/api/health >/dev/null 2>&1; then${keepAwakeLine(kind)}
   nohup "$HOME/cdash-agent" >"$HOME/cdash-agent.log" 2>&1 </dev/null &
 fi
 CDASH
-. "$HOME/.bashrc"`;
+${kind === 'copy' ? '' : `# Patch existing guards too, so re-pasting repairs Termux certificate lookup.
+sed -i --follow-symlinks 's|^  nohup "$HOME/cdash-agent" |  SSL_CERT_FILE="\${SSL_CERT_FILE:-$PREFIX/etc/tls/cert.pem}" nohup "$HOME/cdash-agent" |' "$HOME/.bashrc" &&
+`}. "$HOME/.bashrc"`;
 
 /// `curl` out of the app's own loopback server, or `cp` from the Windows
 /// filesystem that WSL already mounts. The source is quoted — a Windows path
@@ -884,7 +1036,7 @@ async function showSetup(mode = 'down', status = '') {
     const { kind, source, port } = await invoke('agent_handoff');
     $('#setup-addr').textContent = `localhost:${port}`;
     $('#setup-script').textContent =
-      setupScript(fetchLine(kind, source), port, keepAwakeLine(kind));
+      setupScript(fetchLine(kind, source), port, kind);
   } catch (e) {
     // No bundled agent (a build without CDASH_AGENT_BIN): say so rather than
     // showing a command that fetches nothing.

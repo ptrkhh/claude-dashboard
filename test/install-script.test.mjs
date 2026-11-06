@@ -4,7 +4,7 @@
 // here: a second copy of the text could drift from the one that ships.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, mkdtempSync, chmodSync, copyFileSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, chmodSync, copyFileSync, existsSync, statSync, rmSync } from 'node:fs';
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import vm from 'node:vm';
@@ -17,7 +17,7 @@ import { promisify } from 'node:util';
 // synchronous child would block the event loop that has to answer its curl.
 const run = promisify(execFile);
 
-const AGENT = '#!/bin/sh\ntouch "$HOME/agent-started"\nsleep 2\n';
+const AGENT = '#!/bin/sh\ntouch "$HOME/agent-started"\nprintf "%s" "${SSL_CERT_FILE-}" > "$HOME/agent-cert-file"\nsleep 2\n';
 // A port nothing else here is using: "down" must be decided from the agent's
 // own port, not from whatever else happens to be listening.
 const PORT = 23274;
@@ -34,7 +34,7 @@ const shipped = (() => {
 
 /** The shipped command for one platform, assembled the way showSetup does. */
 const setupScript = (kind, source) =>
-  shipped.setupScript(shipped.fetchLine(kind, source), PORT, shipped.keepAwakeLine(kind));
+  shipped.setupScript(shipped.fetchLine(kind, source), PORT, kind);
 
 /** Stands in for the app's loopback handoff on Android. */
 async function handoff() {
@@ -51,7 +51,8 @@ async function checkCommon(script, HOME) {
   const dir = mkdtempSync(join(tmpdir(), 'cdash-paste-'));
   const file = join(dir, 'setup.sh');
   writeFileSync(file, script);
-  const paste = () => run('bash', [file], { env: { ...process.env, HOME } });
+  const env = { ...process.env, HOME, PREFIX: join(HOME, 'prefix with spaces'), SSL_CERT_FILE: '' };
+  const paste = () => run('bash', [file], { env });
 
   // A syntax error would surface in the user's shell, one paste too late.
   await run('bash', ['-n', file]);
@@ -78,11 +79,21 @@ async function checkCommon(script, HOME) {
   const bin = mkdtempSync(join(tmpdir(), 'cdash-bin-'));
   writeFileSync(join(bin, 'curl'), '#!/bin/sh\nexit 1\n');
   chmodSync(join(bin, 'curl'), 0o755);
+  env.PATH = `${bin}:${process.env.PATH}`;
+  rmSync(join(HOME, 'agent-cert-file'), { force: true });
   await run('bash', ['-c', '. "$HOME/.bashrc"; sleep 0.5'], {
-    env: { ...process.env, HOME, PATH: `${bin}:${process.env.PATH}` },
+    env,
   });
   assert.ok(existsSync(join(HOME, 'agent-started')), 'the startup block launched the agent');
+  const certFile = readFileSync(join(HOME, 'agent-cert-file'), 'utf8');
+  rmSync(join(HOME, 'agent-cert-file'));
+  await run('bash', ['-c', '. "$HOME/.bashrc"; sleep 0.5'], {
+    env: { ...env, SSL_CERT_FILE: '/custom CA bundle.pem' },
+  });
+  assert.equal(readFileSync(join(HOME, 'agent-cert-file'), 'utf8'), '/custom CA bundle.pem',
+    'an explicit certificate bundle is preserved');
   await run('pkill', ['-f', agent]).catch(() => {});
+  return certFile;
 }
 
 test('the Termux command curls the agent out of the app and arms the shell', async () => {
@@ -91,7 +102,29 @@ test('the Termux command curls the agent out of the app and arms the shell', asy
   try {
     const script = setupScript('curl', url);
     assert.match(script, /termux-wake-lock/, 'Android holds a wake lock');
-    await checkCommon(script, HOME);
+    assert.equal(await checkCommon(script, HOME), join(HOME, 'prefix with spaces/etc/tls/cert.pem'),
+      'the agent inherits the Termux CA bundle in a new shell');
+  } finally {
+    server.close();
+  }
+});
+
+test('the Termux command fixes the certificate path in an existing startup block', async () => {
+  const { url, server } = await handoff();
+  const HOME = mkdtempSync(join(tmpdir(), 'cdash-home-'));
+  writeFileSync(join(HOME, '.bashrc'), `# user shell configuration
+export CDASH_TEST_SETTING=keep
+# claude-dashboard: start the agent whenever this shell opens, unless it is up
+if ! curl -fsS -m 1 http://127.0.0.1:${PORT}/api/health >/dev/null 2>&1; then
+  termux-wake-lock 2>/dev/null
+  nohup "$HOME/cdash-agent" >"$HOME/cdash-agent.log" 2>&1 </dev/null &
+fi
+`);
+  try {
+    assert.equal(await checkCommon(setupScript('curl', url), HOME),
+      join(HOME, 'prefix with spaces/etc/tls/cert.pem'));
+    assert.match(readFileSync(join(HOME, '.bashrc'), 'utf8'), /export CDASH_TEST_SETTING=keep/,
+      'unrelated shell configuration is preserved');
   } finally {
     server.close();
   }
@@ -107,7 +140,8 @@ test('the WSL command copies the agent off the Windows filesystem', async () => 
 
   const script = setupScript('copy', source);
   assert.doesNotMatch(script, /termux-wake-lock/, 'nothing termux-shaped in a WSL .bashrc');
-  await checkCommon(script, HOME);
+  assert.equal(await checkCommon(script, HOME), '', 'WSL keeps its default certificate lookup');
+  assert.doesNotMatch(readFileSync(join(HOME, '.bashrc'), 'utf8'), /SSL_CERT_FILE/);
 });
 
 test('pasting again replaces an agent that is running, and stops the old one', async () => {

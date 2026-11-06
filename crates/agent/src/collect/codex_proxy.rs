@@ -1,11 +1,14 @@
-//! JSONL adapter for the bridge's private app-server Unix WebSocket.
+//! JSONL adapter for the bridge's private app-server WebSocket.
 use futures_util::{SinkExt, StreamExt};
-use std::path::Path;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::ffi::OsStr;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::WebSocketStream;
 
 /// Both the standalone agent and in-process Tauri executable support this
-/// mode, so Node needs no WebSocket package and no additional network port.
+/// mode, so Node needs no WebSocket package.
 pub fn run_if_requested() -> bool {
     let mut args = std::env::args_os().skip(1);
     if args.next().as_deref() != Some(std::ffi::OsStr::new("codex-proxy")) {
@@ -14,7 +17,7 @@ pub fn run_if_requested() -> bool {
     let path = match (args.next(), args.next()) {
         (Some(path), None) => path,
         _ => {
-            eprintln!("usage: codex-proxy <private Unix socket>");
+            eprintln!("usage: codex-proxy <private Unix socket | ws://127.0.0.1:PORT>");
             std::process::exit(2);
         }
     };
@@ -22,7 +25,7 @@ pub fn run_if_requested() -> bool {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
-        let result = runtime.block_on(forward(Path::new(&path)));
+        let result = runtime.block_on(forward(&path));
         // Tokio stdin uses an uncancellable blocking read. This process mode
         // must exit on backend closure even while its parent keeps stdin open.
         runtime.shutdown_background();
@@ -35,9 +38,24 @@ pub fn run_if_requested() -> bool {
     true
 }
 
-async fn forward(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let stream = tokio::net::UnixStream::connect(path).await?;
-    let (mut socket, _) = tokio_tungstenite::client_async("ws://localhost/", stream).await?;
+async fn forward(target: &OsStr) -> Result<(), Box<dyn std::error::Error>> {
+    // Android's bridge listens on loopback: Codex cannot use Unix sockets there.
+    if let Some(url) = target.to_str().filter(|t| t.starts_with("ws://")) {
+        let token = std::env::var("CDASH_CODEX_TOKEN")
+            .map_err(|_| "CDASH_CODEX_TOKEN is not set")?;
+        let mut request = url.into_client_request()?;
+        request.headers_mut().insert(AUTHORIZATION, format!("Bearer {token}").parse()?);
+        let (socket, _) = tokio_tungstenite::connect_async(request).await?;
+        return pump(socket).await;
+    }
+    let stream = tokio::net::UnixStream::connect(target).await?;
+    let (socket, _) = tokio_tungstenite::client_async("ws://localhost/", stream).await?;
+    pump(socket).await
+}
+
+async fn pump<S: AsyncRead + AsyncWrite + Unpin>(
+    mut socket: WebSocketStream<S>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut input = BufReader::new(tokio::io::stdin()).lines();
     let mut output = tokio::io::stdout();
     loop {

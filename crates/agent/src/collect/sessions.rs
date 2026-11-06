@@ -36,6 +36,8 @@ pub struct Resumable {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
     /// What the model picker selects for this session; `model` is the display chip.
     #[serde(rename = "modelId", skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
@@ -67,6 +69,7 @@ pub struct Stats {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SessionsResponse {
     pub running: Vec<Session>,
+    pub pinned: Vec<Resumable>,
     pub resumable: Vec<Resumable>,
     pub stats: Stats,
 }
@@ -95,6 +98,37 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
 
     let mut running: Vec<Session> = Vec::new();
     for p in &panes {
+        if p.terminal {
+            // A bare shell has no transcript, model, or Remote Control link;
+            // guessing a Claude transcript from its cwd would mislabel it.
+            let cpu = ctx.host.sampler.lock().unwrap_or_else(|e| e.into_inner()).tree_usage(p.pid);
+            let git = Arc::clone(&ctx.git).status_for(Arc::clone(&ctx.runner), &p.path, now as u64);
+            running.push(Session {
+                display_name: None, name: p.name.clone(), dir: p.path.clone(), pid: p.pid,
+                uptime_sec: ((now / 1000.0 - p.created as f64).round() as i64).max(0),
+                model: Some("Terminal".into()), effort: None, variant: None,
+                provider: Some("terminal".into()), native_terminal: None,
+                rc_link: None, rc_unavailable: true,
+                git: git.as_deref().map(parse_git_status), working: false, last_message: None, sid: None,
+                cpu: cpu.cpu, rss_kb: cpu.rss_kb, cpu_sample_age_ms: cpu.cpu_sample_age_ms, external: false,
+            });
+            continue;
+        }
+        if let Some(s) = super::opencode::snapshot(ctx, &p.name, p.pid).await {
+            let cpu = ctx.host.sampler.lock().unwrap_or_else(|e| e.into_inner()).tree_usage(p.pid);
+            let git = Arc::clone(&ctx.git).status_for(Arc::clone(&ctx.runner), &p.path, now as u64);
+            running.push(Session {
+                display_name: s.display_name.or_else(|| s.sid.as_deref().map(|sid| super::names::session_name("OpenCode", &s.dir, sid))),
+                name: p.name.clone(), dir: s.dir, pid: p.pid,
+                uptime_sec: ((now / 1000.0 - p.created as f64).round() as i64).max(0),
+                model: s.model_label.or(s.model).or_else(|| Some("OpenCode".into())), effort: None, variant: s.variant,
+                provider: Some("opencode".into()), native_terminal: Some(s.native_terminal),
+                rc_link: super::opencode::link(ctx, &p.name).await, rc_unavailable: s.rc_unavailable,
+                git: git.as_deref().map(parse_git_status), working: s.working, last_message: s.last_message, sid: s.sid,
+                cpu: cpu.cpu, rss_kb: cpu.rss_kb, cpu_sample_age_ms: cpu.cpu_sample_age_ms, external: false,
+            });
+            continue;
+        }
         if let Some(s) = super::codex::snapshot(ctx, &p.name, p.pid).await {
             let cpu = ctx.host.sampler.lock().unwrap_or_else(|e| e.into_inner()).tree_usage(p.pid);
             let git = Arc::clone(&ctx.git).status_for(Arc::clone(&ctx.runner), &p.path, now as u64);
@@ -102,7 +136,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
                 display_name: s.display_name.or_else(|| s.sid.as_deref().map(|sid| super::names::session_name("Codex", &s.dir, sid))),
                 name: p.name.clone(), dir: s.dir, pid: p.pid,
                 uptime_sec: ((now / 1000.0 - p.created as f64).round() as i64).max(0),
-                model: s.model_label.or(s.model).or_else(|| Some("Codex".into())), effort: s.effort,
+                model: s.model_label.or(s.model).or_else(|| Some("Codex".into())), effort: s.effort, variant: None,
                 provider: Some("codex".into()),
                 native_terminal: Some(s.native_terminal),
                 rc_link: super::codex::link(ctx, &p.name).await,
@@ -165,16 +199,24 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
         let git_out =
             Arc::clone(&ctx.git).status_for(Arc::clone(&ctx.runner), &p.path, now as u64);
 
+        let name_sid = sess.as_ref().and_then(|s| s.session_id.as_deref()).or(sid.as_deref());
+        let name_cwd = sess.as_ref().and_then(|s| s.cwd.as_deref()).unwrap_or(&p.path);
+        let display_name = match name_sid {
+            Some(sid) => super::lookup::custom_title(&ctx.claude_dir, name_cwd, sid)
+                .await
+                .or_else(|| Some(super::names::session_name("Claude", name_cwd, sid))),
+            None => None,
+        };
+
         running.push(Session {
-            display_name: sess.as_ref().and_then(|s| s.session_id.as_deref())
-                .or(sid.as_deref())
-                .map(|sid| super::names::session_name("Claude", &p.path, sid)),
+            display_name,
             name: p.name.clone(),
             dir: p.path.clone(),
             pid: p.pid,
             uptime_sec: ((now / 1000.0 - p.created as f64).round() as i64).max(0),
             model: meta.model.clone(),
             effort: meta.effort.clone(),
+            variant: None,
             provider: None,
             native_terminal: None,
             rc_unavailable: false,
@@ -195,13 +237,21 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
 
     let running_sids: HashSet<String> = running.iter().filter_map(|r| r.sid.clone()).collect();
     let hist = read_if(&ctx.claude_dir.join("history.jsonl")).await.unwrap_or_default();
+    let pins = super::pins::read_pins(ctx).await.unwrap_or_else(|e| {
+        ctx.host.log.push(format!("Could not read pinned conversations: {e}"));
+        Default::default()
+    });
 
     let mut resumable = Vec::new();
+    let mut ordinary = 0;
+    let mut candidates = 0;
     // Scan three candidates per entry wanted, so ghosts (history without a
     // transcript) and abandoned starts do not starve the list.
-    for g in group_history(&hist).into_iter().take(limit.saturating_mul(3)) {
-        if resumable.len() >= limit {
-            break;
+    for g in group_history(&hist) {
+        let pinned = pins.contains(&g.sid);
+        if !pinned {
+            if ordinary >= limit || candidates >= limit.saturating_mul(3) { continue; }
+            candidates += 1;
         }
         if running_sids.contains(&g.sid)
             || ctx.purged.lock().unwrap_or_else(|e| e.into_inner()).contains(&g.sid)
@@ -218,8 +268,17 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             continue;
         }
         let model = t.model.as_deref().and_then(model_alias).map(str::to_owned);
+        if !pinned { ordinary += 1; }
+        let cwd = g.cwd.as_deref().unwrap_or("?");
+        let display_name = super::lookup::custom_title(
+            &ctx.claude_dir,
+            g.cwd.as_deref().unwrap_or(""),
+            &g.sid,
+        )
+        .await
+        .or_else(|| Some(super::names::session_name("Claude", cwd, &g.sid)));
         resumable.push(Resumable {
-            display_name: Some(super::names::session_name("Claude", g.cwd.as_deref().unwrap_or("?"), &g.sid)),
+            display_name,
             sid: g.sid,
             dir: g.cwd,
             ts: g.ts,
@@ -228,6 +287,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             model: model.clone(),
             model_id: model,
             effort: t.effort.clone(),
+            variant: None,
             summary: None,
             source_file: Some(file),
         });
@@ -237,10 +297,16 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
         !running_sids.contains(&s.sid)
             && !ctx.purged.lock().unwrap_or_else(|e| e.into_inner()).contains(&s.sid)
     }));
+    resumable.extend(super::opencode::history(ctx, RESUMABLE_CEILING).await.into_iter().filter(|s| {
+        !running_sids.contains(&s.sid)
+            && !ctx.purged.lock().unwrap_or_else(|e| e.into_inner()).contains(&s.sid)
+    }));
     resumable.sort_by(|a, b| b.ts.total_cmp(&a.ts));
+    let (mut pinned, mut resumable): (Vec<_>, Vec<_>) = resumable.into_iter().partition(|s| pins.contains(&s.sid));
     resumable.truncate(limit);
+    super::summaries::SummaryCache::attach(ctx, &mut pinned).await;
     super::summaries::SummaryCache::attach(ctx, &mut resumable).await;
-    for session in &mut resumable {
+    for session in pinned.iter_mut().chain(resumable.iter_mut()) {
         if session.summary.is_none()
             && session.model_id.as_deref().is_some_and(|m| m.starts_with("codex"))
         {
@@ -268,6 +334,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
 
     SessionsResponse {
         running,
+        pinned,
         resumable,
         stats: Stats {
             cpu_pct: machine.cpu_pct,
@@ -325,6 +392,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pins_survive_restart_and_bypass_the_history_page_limit() {
+        let d = tempdir("pins-old");
+        let mut hist = String::new();
+        for (sid, ts) in [("aaa", 500), ("bbb", 400), ("ccc", 300), ("ddd", 200), ("eee", 100)] {
+            hist.push_str(&seed(&d, sid, "/p", ts, 3));
+        }
+        std::fs::write(d.join("history.jsonl"), hist).unwrap();
+        std::fs::write(d.join("cdash-pins.json"), r#"["eee"]"#).unwrap();
+        for _ in 0..2 {
+            let r = serde_json::to_value(collect_sessions(&ctx_for(d.clone()), 1).await).unwrap();
+            assert_eq!(r["pinned"][0]["sid"], "eee");
+            assert_eq!(r["pinned"].as_array().unwrap().len(), 1);
+            assert_eq!(r["resumable"][0]["sid"], "aaa");
+            assert_eq!(r["resumable"].as_array().unwrap().len(), 1);
+        }
+        std::fs::write(d.join("cdash-pins.json"), r#"["aaa","bbb","ccc","eee"]"#).unwrap();
+        let r = serde_json::to_value(collect_sessions(&ctx_for(d), 1).await).unwrap();
+        assert_eq!(r["pinned"].as_array().unwrap().len(), 4);
+        assert_eq!(r["resumable"][0]["sid"], "ddd", "pins must not exhaust the ordinary scan budget");
+    }
+
+    #[tokio::test]
+    async fn codex_pins_do_not_consume_resumable_slots() {
+        let d = tempdir("pins-codex");
+        std::fs::write(d.join("history.jsonl"), seed(&d, "aaa", "/p", 300, 3)).unwrap();
+        std::fs::write(d.join("cdash-pins.json"), r#"["codex-pinned"]"#).unwrap();
+        let ctx = ctx_for(d);
+        *ctx.codex_threads.lock().await = Some((std::time::Instant::now(),
+            serde_json::from_value(serde_json::json!([
+                {"sid":"codex-pinned", "dir":"/work", "title":"old", "ts":100,
+                 "model":null, "effort":null}
+            ])).unwrap()));
+        let r = serde_json::to_value(collect_sessions(&ctx, 1).await).unwrap();
+        assert_eq!(r["pinned"][0]["sid"], "codex-pinned");
+        assert_eq!(r["resumable"][0]["sid"], "aaa");
+        ctx.purged.lock().unwrap().insert("codex-pinned".into());
+        let r = serde_json::to_value(collect_sessions(&ctx, 1).await).unwrap();
+        assert_eq!(r["pinned"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn a_running_pin_returns_to_pinned_when_it_stops() {
+        let d = tempdir("pins-running");
+        std::fs::write(d.join("history.jsonl"), seed(&d, "aaa", "/proj", 300, 3)).unwrap();
+        std::fs::write(d.join("cdash-pins.json"), r#"["aaa"]"#).unwrap();
+        std::fs::write(d.join("sessions/4242.json"), r#"{"sessionId":"aaa","cwd":"/proj"}"#).unwrap();
+        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000||/proj");
+        let ctx = ctx_with_path(d.clone(), path);
+        *ctx.codex_threads.lock().await = Some((std::time::Instant::now(), vec![]));
+        let r = serde_json::to_value(collect_sessions(&ctx, 1).await).unwrap();
+        assert_eq!(r["running"][0]["sid"], "aaa");
+        assert_eq!(r["pinned"], serde_json::json!([]));
+        assert_eq!(r["resumable"], serde_json::json!([]));
+        fake_tmux(&d, "");
+        let r = serde_json::to_value(collect_sessions(&ctx, 1).await).unwrap();
+        assert_eq!(r["running"], serde_json::json!([]));
+        assert_eq!(r["pinned"][0]["sid"], "aaa");
+        assert_eq!(r["resumable"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
     async fn a_resumable_session_needs_three_assistant_turns() {
         // E7: one or two turns is an abandoned start, not work worth resuming.
         let d = tempdir("turns");
@@ -355,6 +483,26 @@ mod tests {
         assert_eq!(r.resumable[0].model_id.as_deref(), Some("opus"));
         let j = serde_json::to_string(&r.resumable[0]).unwrap();
         assert!(j.contains("\"modelId\":\"opus\""), "{j}");
+    }
+
+    #[tokio::test]
+    async fn a_custom_title_from_the_claude_app_wins_over_the_generated_name() {
+        let d = tempdir("custom-title");
+        let a = seed(&d, "aaa", "/p/deep", 300, 3);
+        std::fs::write(d.join("history.jsonl"), a).unwrap();
+        let titled = d.join("projects").join(project_dir_name("/p/deep")).join("aaa");
+        std::fs::create_dir_all(&titled).unwrap();
+        std::fs::write(
+            titled.join("custom-title.json"),
+            r#"{"customTitle":"[Claude] deep · renamed"}"#,
+        )
+        .unwrap();
+
+        let r = collect_sessions(&ctx_for(d), RESUMABLE_MAX).await;
+        assert_eq!(
+            r.resumable[0].display_name.as_deref(),
+            Some("[Claude] deep · renamed")
+        );
     }
 
     #[tokio::test]
@@ -485,6 +633,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_terminal_pane_is_a_terminal_card_with_no_link_or_transcript() {
+        let d = tempdir("terminal");
+        std::fs::write(d.join("history.jsonl"), "").unwrap();
+        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000|terminal|/proj");
+        let ctx = ctx_with_path(d, path);
+        let r = collect_sessions(&ctx, RESUMABLE_MAX).await;
+        assert_eq!(r.running.len(), 1);
+        let t = &r.running[0];
+        assert_eq!((t.provider.as_deref(), t.model.as_deref()), (Some("terminal"), Some("Terminal")));
+        assert!(t.rc_link.is_none() && t.rc_unavailable && t.sid.is_none());
+    }
+
+    #[tokio::test]
     async fn a_pane_becomes_a_running_session_carrying_its_rc_link() {
         let d = tempdir("pane");
         std::fs::write(d.join("history.jsonl"), "").unwrap();
@@ -493,7 +654,7 @@ mod tests {
             r#"{"sessionId":"s-9","cwd":"/proj","bridgeSessionId":"session_pane"}"#,
         )
         .unwrap();
-        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000|/proj");
+        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000||/proj");
         let ctx = ctx_with_path(d, path);
 
         let r = collect_sessions(&ctx, RESUMABLE_MAX).await;
@@ -509,6 +670,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn opencode_cards_show_running_status_and_only_nonrunning_history() {
+        let d = tempdir("opencode-cards");
+        let root = d.join("cdash-opencode");
+        std::fs::create_dir_all(&root).unwrap();
+        let state = serde_json::json!({"sid":"ses_live", "dir":"/proj", "pid":4242, "native_terminal":true, "working":true, "model":"fixture/model", "variant":"deep"});
+        std::fs::write(root.join("cdash-test-1200-abc.json"), state.to_string()).unwrap();
+        std::fs::write(root.join("cdash-test-1200-abc.native"), state.to_string()).unwrap();
+        std::fs::write(root.join("cdash-test-1200-abc.link"), "https://claude.ai/code/session_test").unwrap();
+        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000||/proj");
+        let ctx = ctx_with_path(d, path);
+        *ctx.opencode_threads.lock().await = Some((std::time::Instant::now(), serde_json::from_value(serde_json::json!([
+            {"sid":"ses_live","dir":"/proj","ts":1000,"display_name":"Live","model":"fixture/model","model_label":"Fixture","variant":"deep","prompts":[],"source_file":null},
+            {"sid":"ses_saved","dir":"/proj","ts":900,"display_name":"Saved","model":"fixture/model","model_label":"Fixture","variant":"deep","prompts":["Resume work"],"source_file":null}
+        ])).unwrap()));
+        let response = collect_sessions(&ctx, RESUMABLE_MAX).await;
+        assert_eq!(response.running[0].provider.as_deref(), Some("opencode"));
+        assert!(response.running[0].working);
+        assert_eq!(response.running[0].variant.as_deref(), Some("deep"));
+        assert_eq!(response.running[0].rc_link.as_deref(), Some("https://claude.ai/code/session_test"));
+        assert_eq!(response.resumable.len(), 1);
+        assert_eq!(response.resumable[0].sid, "ses_saved");
+        assert_eq!(response.resumable[0].variant.as_deref(), Some("deep"));
+        assert_eq!(response.resumable[0].prompts, ["Resume work"]);
+    }
+
+    #[tokio::test]
+    async fn a_pane_uses_the_custom_title_of_its_session() {
+        let d = tempdir("pane-title");
+        std::fs::write(d.join("history.jsonl"), "").unwrap();
+        std::fs::write(
+            d.join("sessions/4242.json"),
+            r#"{"sessionId":"s-9","cwd":"/proj","bridgeSessionId":"session_pane"}"#,
+        )
+        .unwrap();
+        let titled = d.join("projects").join(project_dir_name("/proj")).join("s-9");
+        std::fs::create_dir_all(&titled).unwrap();
+        std::fs::write(
+            titled.join("custom-title.json"),
+            r#"{"customTitle":"[Claude] proj · renamed"}"#,
+        )
+        .unwrap();
+        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000|/proj");
+        let ctx = ctx_with_path(d, path);
+
+        let r = collect_sessions(&ctx, RESUMABLE_MAX).await;
+        assert_eq!(
+            r.running[0].display_name.as_deref(),
+            Some("[Claude] proj · renamed")
+        );
+    }
+
+    #[tokio::test]
     async fn native_remote_failure_reaches_the_session_card() {
         let d = tempdir("native-remote-status");
         let root = d.join("cdash-codex");
@@ -517,7 +730,7 @@ mod tests {
             "native_terminal": true, "pid": 4242, "sid": "native-thread", "dir": "/proj",
         });
         std::fs::write(root.join("cdash-test-1200-abc.json"), state.to_string()).unwrap();
-        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000|/proj");
+        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000||/proj");
         let ctx = ctx_with_path(d.clone(), path);
         for unavailable in [false, true] {
             state["rc_unavailable"] = unavailable.into();
@@ -541,7 +754,7 @@ mod tests {
             r#"{"sessionId":"s-7","cwd":"/proj","bridgeSessionId":"session_memo"}"#,
         )
         .unwrap();
-        let path = fake_tmux(&d, "cdash-memo-1200-xyz|777|1785050000|/proj");
+        let path = fake_tmux(&d, "cdash-memo-1200-xyz|777|1785050000||/proj");
         let ctx = ctx_with_path(d, path);
 
         assert!(ctx.meta_get("cdash-memo-1200-xyz").is_none());
@@ -560,7 +773,7 @@ mod tests {
         let s = Session {
             display_name: None,
             name: "x".into(), dir: "/x".into(), pid: 1, uptime_sec: 0,
-            model: None, effort: None, provider: None, native_terminal: None, rc_link: None, rc_unavailable: false, git: None, working: false,
+            model: None, effort: None, variant: None, provider: None, native_terminal: None, rc_link: None, rc_unavailable: false, git: None, working: false,
             last_message: None, sid: None, cpu: None, rss_kb: 0,
             cpu_sample_age_ms: 0, external: false,
         };

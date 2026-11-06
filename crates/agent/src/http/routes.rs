@@ -89,8 +89,18 @@ pub async fn get_logs(State(ctx): State<Arc<Ctx>>) -> Response {
     Json(serde_json::json!({ "lines": ctx.host.log.lines() })).into_response()
 }
 
-pub async fn get_models(State(ctx): State<Arc<Ctx>>) -> Result<Response, ApiError> {
-    Ok(Json(crate::collect::codex::models(&ctx).await?).into_response())
+pub async fn get_models(State(ctx): State<Arc<Ctx>>, Query(q): Query<HashMap<String, String>>) -> Result<Response, ApiError> {
+    let dir = q.get("dir").cloned().unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/".into()));
+    crate::collect::validate::assert_path(&dir)?;
+    if !tokio::fs::metadata(&dir).await.map(|m| m.is_dir()).unwrap_or(false) {
+        return Err(BadRequest(format!("not a directory: {dir}")).into());
+    }
+    let mut choices: Vec<serde_json::Value> = crate::collect::codex::models(&ctx).await?.into_iter().map(|m| serde_json::json!(m)).collect();
+    match crate::collect::opencode::models(&ctx, &dir).await {
+        Ok(models) => choices.extend(models.into_iter().map(|m| serde_json::json!(m))),
+        Err(error) => ctx.host.log.push(format!("OpenCode model discovery unavailable: {error:?}")),
+    }
+    Ok(Json(choices).into_response())
 }
 
 pub async fn get_places(State(ctx): State<Arc<Ctx>>) -> Response {
@@ -124,6 +134,7 @@ pub struct LaunchBody {
     pub model: String,
     #[serde(default = "default_effort")]
     pub effort: String,
+    pub variant: Option<String>,
 }
 
 // Node destructured `{ dir, model = 'sonnet', effort = 'medium' }`
@@ -142,12 +153,19 @@ pub struct SidBody {
 }
 
 #[derive(Deserialize)]
+pub struct PinBody {
+    pub sid: String,
+    pub pinned: bool,
+}
+
+#[derive(Deserialize)]
 pub struct ResumeBody {
     #[serde(default)]
     pub sid: String,
     // The UI sends "" for "keep what the session used".
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub variant: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -168,11 +186,19 @@ pub async fn post_favorites(
     Ok(Json(places).into_response())
 }
 
+pub async fn post_pin(
+    State(ctx): State<Arc<Ctx>>,
+    Json(body): Json<PinBody>,
+) -> Result<Response, ApiError> {
+    crate::collect::pins::set_pin(&ctx, &body.sid, body.pinned).await?;
+    Ok(Json(serde_json::json!({ "ok": true })).into_response())
+}
+
 pub async fn post_launch(
     State(ctx): State<Arc<Ctx>>,
     Json(body): Json<LaunchBody>,
 ) -> Result<Response, ApiError> {
-    let name = launch_session(&ctx, &body.dir, &body.model, &body.effort).await?;
+    let name = launch_session(&ctx, &body.dir, &body.model, &body.effort, body.variant.as_deref()).await?;
 
     // Fire-and-forget, exactly as `server.js:56`: a failed recents write logs
     // and does not fail the launch. The route resolves the directory before
@@ -197,7 +223,7 @@ pub async fn post_resume(
     Json(body): Json<ResumeBody>,
 ) -> Result<Response, ApiError> {
     let pick = |v: &Option<String>| v.clone().filter(|s| !s.is_empty());
-    let name = resume_session(&ctx, &body.sid, pick(&body.model).as_deref(), pick(&body.effort).as_deref()).await?;
+    let name = resume_session(&ctx, &body.sid, pick(&body.model).as_deref(), pick(&body.effort).as_deref(), body.variant.as_deref()).await?;
     Ok(Json(serde_json::json!({ "name": name })).into_response())
 }
 
@@ -294,11 +320,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sessions_returns_the_three_top_level_keys() {
+    async fn pins_are_persistent_idempotent_and_can_be_removed() {
+        let d = tempdir("pins");
+        let sid = "01234567-1234-1234-1234-0123456789ab";
+        let b = serve(cfg_for(d.clone())).await.unwrap();
+        let url = format!("http://{}/api/pin", b.addr);
+        let pin = serde_json::json!({"sid":sid,"pinned":true}).to_string();
+        for _ in 0..2 {
+            let (status, _) = http_post(&url, &pin).await;
+            assert_eq!(status, 200);
+        }
+        let saved: Vec<String> = serde_json::from_str(&std::fs::read_to_string(d.join("cdash-pins.json")).unwrap()).unwrap();
+        assert_eq!(saved, vec![sid]);
+        let (status, _) = http_post(&url, &serde_json::json!({"sid":sid,"pinned":false}).to_string()).await;
+        assert_eq!(status, 200);
+        assert_eq!(std::fs::read_to_string(d.join("cdash-pins.json")).unwrap(), "[]");
+    }
+
+    #[tokio::test]
+    async fn pin_rejects_invalid_input_and_preserves_corrupt_state() {
+        let d = tempdir("pins-invalid");
+        let b = serve(cfg_for(d.clone())).await.unwrap();
+        let url = format!("http://{}/api/pin", b.addr);
+        let (status, _) = http_post(&url, r#"{"sid":"../bad","pinned":true}"#).await;
+        assert_eq!(status, 400);
+        assert!(!d.join("cdash-pins.json").exists());
+        for body in [r#"{"sid":"01234567-1234-1234-1234-0123456789ab"}"#, r#"{"sid":"01234567-1234-1234-1234-0123456789ab","pinned":"yes"}"#] {
+            assert_eq!(http_post(&url, body).await.0, 422);
+        }
+        std::fs::write(d.join("cdash-pins.json"), "broken").unwrap();
+        let (status, _) = http_post(&url, r#"{"sid":"01234567-1234-1234-1234-0123456789ab","pinned":true}"#).await;
+        assert_eq!(status, 500);
+        assert_eq!(std::fs::read_to_string(d.join("cdash-pins.json")).unwrap(), "broken");
+        std::fs::remove_file(d.join("cdash-pins.json")).unwrap();
+        std::fs::create_dir(d.join("cdash-pins.json")).unwrap();
+        let (status, _) = http_post(&url, r#"{"sid":"01234567-1234-1234-1234-0123456789ab","pinned":true}"#).await;
+        assert_eq!(status, 500);
+    }
+
+    #[tokio::test]
+    async fn concurrent_pin_requests_keep_both_sessions() {
+        let d = tempdir("pins-concurrent");
+        let b = serve(cfg_for(d.clone())).await.unwrap();
+        let url = format!("http://{}/api/pin", b.addr);
+        let (a, b) = tokio::join!(
+            http_post(&url, r#"{"sid":"01234567-1234-1234-1234-0123456789ab","pinned":true}"#),
+            http_post(&url, r#"{"sid":"01234567-1234-1234-1234-0123456789ac","pinned":true}"#)
+        );
+        assert_eq!((a.0, b.0), (200, 200));
+        let saved: Vec<String> = serde_json::from_str(&std::fs::read_to_string(d.join("cdash-pins.json")).unwrap()).unwrap();
+        assert_eq!(saved.len(), 2);
+        assert!(saved.contains(&"01234567-1234-1234-1234-0123456789ab".into()));
+        assert!(saved.contains(&"01234567-1234-1234-1234-0123456789ac".into()));
+    }
+
+    #[tokio::test]
+    async fn sessions_returns_the_four_top_level_keys() {
         let b = serve(cfg_for(tempdir("sessions"))).await.unwrap();
         let body = reqwest_get(&format!("http://{}/api/sessions", b.addr)).await;
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(v["running"].is_array());
+        assert!(v["pinned"].is_array());
         assert!(v["resumable"].is_array());
         assert!(v["stats"]["ramTotalKb"].is_number());
     }
@@ -502,7 +584,37 @@ mod tests {
     async fn embedded_ui_is_served() {
         let b = serve(cfg_for(tempdir("embedded-ui"))).await.unwrap();
         let body = reqwest_get(&format!("http://{}/", b.addr)).await;
-        assert!(body.contains("<title>Claude Dashboard</title>"));
+        assert!(body.contains("<title>RC Dashboard</title>"));
+    }
+
+    #[tokio::test]
+    async fn branding_assets_and_manifest_icons_are_embedded() {
+        let b = serve(cfg_for(tempdir("branding-assets"))).await.unwrap();
+        let base = format!("http://{}", b.addr);
+        let client = reqwest::Client::new();
+        let manifest: serde_json::Value =
+            serde_json::from_str(&reqwest_get(&format!("{base}/manifest.json")).await).unwrap();
+        let mut paths = vec!["icon-light.svg", "icon-32.png", "icon-light-32.png"];
+        for icon in manifest["icons"].as_array().unwrap() {
+            paths.push(icon["src"].as_str().unwrap());
+        }
+        for path in paths {
+            let response = client.get(format!("{base}/{path}")).send().await.unwrap();
+            assert_eq!(response.status(), 200, "{path} is embedded");
+            let png = path.ends_with(".png");
+            assert_eq!(
+                response.headers()["content-type"],
+                if png { "image/png" } else { "image/svg+xml" },
+                "{path} has the right content type"
+            );
+            let bytes = response.bytes().await.unwrap();
+            if png {
+                assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "{path} is a PNG");
+            } else {
+                assert!(std::str::from_utf8(&bytes).unwrap().contains("<svg"));
+            }
+        }
+        b.stop().await;
     }
 
     #[tokio::test]

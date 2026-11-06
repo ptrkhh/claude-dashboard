@@ -14,10 +14,10 @@ function statsRenderer() {
   const nodes = {};
   const context = {
     $: id => nodes[id] ||= {},
-    document: { activeElement: null },
+    document: { activeElement: null, querySelectorAll: () => [] },
     esc: s => s, fmtKb: String, fmtReset: String,
     runningCard: () => '', resumableCard: () => '',
-    resLimit: 20,
+    resLimit: 20, lastRes: [], lastPinned: [],
   };
   runInNewContext(`${statTile}\n${render}; this.render = render;`, context);
   return stats => {
@@ -107,7 +107,7 @@ test('the send bar is gone: the terminal replaced it', () => {
 
 test('legacy Codex sessions do not offer unsupported terminal controls', () => {
   const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
-  const code = app.slice(app.indexOf('function runningCard('), app.indexOf('let lastRes ='));
+  const code = app.slice(app.indexOf('const copyIdBtn ='), app.indexOf('let lastRes ='));
   const context = { esc: s => String(s || ''), ICONS: {}, gitBadge: () => '', fmtUp: () => '', armedKill: null };
   runInNewContext(`${code}; this.card = runningCard;`, context);
   const session = { name: 'cdash-test', dir: '/tmp/project', provider: 'codex' };
@@ -125,6 +125,58 @@ test('legacy Codex sessions do not offer unsupported terminal controls', () => {
   assert.match(context.card({ ...failed, rcLink: 'https://claude.ai/code/session_test' }), /Open in Claude/);
   assert.match(context.card({ ...session, provider: undefined }), /data-term=/);
   assert.doesNotMatch(context.card({ ...session, nativeTerminal: true, external: true }), /data-term=/);
+});
+
+test('cards offer the session ID for copying once one exists', () => {
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const code = app.slice(app.indexOf('const copyIdBtn ='), app.indexOf('let lastRes ='));
+  const context = { esc: s => String(s || ''), ICONS: {}, gitBadge: () => '', fmtUp: () => '', armedKill: null };
+  runInNewContext(`${code}; this.card = runningCard;`, context);
+  const session = { name: 'cdash-test', dir: '/tmp/project' };
+  assert.doesNotMatch(context.card(session), /data-copy=/, 'no sid yet, no button');
+  assert.match(context.card({ ...session, sid: '3c7254a1-54ff' }), /data-copy="3c7254a1-54ff"/);
+  assert.match(context.card({ ...session, sid: 'ext', external: true }), /data-copy="ext"/);
+});
+
+test('copy reports success and shows the ID when the clipboard APIs fail', async () => {
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const code = app.slice(app.indexOf('async function copyText('), app.indexOf('function toast('));
+  const run = async (write, exec) => {
+    let toastMsg;
+    const field = { style: {}, select() {}, remove() {} };
+    const context = {
+      navigator: { clipboard: { writeText: write } },
+      document: { createElement: () => field, body: { append() {} }, execCommand: () => exec },
+      toast: msg => { toastMsg = msg; },
+    };
+    runInNewContext(`${code}; this.copy = copyText;`, context);
+    await context.copy('sid-123');
+    return toastMsg;
+  };
+  assert.equal(await run(async () => {}, false), 'Session ID copied');
+  assert.equal(await run(async () => { throw Error('denied'); }, true), 'Session ID copied');
+  assert.equal(await run(async () => { throw Error('denied'); }, false), 'Session ID: sid-123');
+});
+
+test('external sessions without a link explain how to enable Remote Control instead of waiting forever', () => {
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const code = app.slice(app.indexOf('const copyIdBtn ='), app.indexOf('let lastRes ='));
+  const context = {
+    esc: s => String(s || ''), ICONS: { spinner: '<svg class="spinner"></svg>' },
+    gitBadge: () => '', fmtUp: () => '', armedKill: null,
+  };
+  runInNewContext(`${code}; this.card = runningCard;`, context);
+  const session = { name: 'external-test', dir: '/tmp/project', external: true, rcLink: null };
+  for (const uptimeSec of [0, 180, 8940]) {
+    const card = context.card({ ...session, uptimeSec });
+    assert.match(card, /\/remote-control/);
+    assert.match(card, /original terminal/);
+    assert.doesNotMatch(card, /Waiting for link|class="spinner"|data-term=|data-kill=/);
+  }
+  const linked = context.card({ ...session, rcLink: 'https://claude.ai/code/session_external' });
+  assert.match(linked, /href="https:\/\/claude.ai\/code\/session_external"[^>]*>.*Open in Claude/);
+  assert.doesNotMatch(linked, /\/remote-control|Waiting for link/);
+  assert.match(context.card({ ...session, external: false }), /Waiting for link/);
 });
 
 test('terminal scripts load before app.js', () => {
@@ -151,7 +203,7 @@ test('resumable summary uses escaped, keyboard-expandable peek and retains promp
   const context = {
     esc: s => String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;'),
     fmtTs: () => '', gitBadge: () => '', pickHtml: () => '', effortLabel: String,
-    ICONS: { refresh: '', trash: '' },
+    ICONS: { refresh: '', trash: '', pin: '' }, copyIdBtn: sid => `data-copy="${sid}"`,
   };
   runInNewContext(`${card}; this.card = resumableCard;`, context);
   const session = { sid: 'one', title: 'Title', prompts: ['Earlier prompt'] };
@@ -169,6 +221,7 @@ test('resumable summary uses escaped, keyboard-expandable peek and retains promp
   assert.match(codex, /&lt;img src=x onerror=alert\(1\)&gt; · Add tests/);
   assert.doesNotMatch(codex, /<img/);
   assert.match(summary, /data-resume="one"/);
+  assert.match(summary, /data-copy="one"/);
 });
 
 test('polling preserves expanded summaries and keyboard focus by session ID', () => {
@@ -185,7 +238,8 @@ test('polling preserves expanded summaries and keyboard focus by session ID', ()
     set innerHTML(_) { replaced = true; },
   };
   const context = {
-    $: () => container, lastRes: [{ sid: 'one' }, { sid: 'two' }], resLimit: 20,
+    $: id => id === '#pinned' ? { querySelectorAll: () => [] } : container,
+    lastRes: [{ sid: 'one' }, { sid: 'two' }], lastPinned: [], resLimit: 20,
     resumableCard: () => '', document: { activeElement: { closest: () => before[0] } },
   };
   runInNewContext(`${render}; renderResumable();`, context);
@@ -193,3 +247,264 @@ test('polling preserves expanded summaries and keyboard focus by session ID', ()
   assert.equal(after[1].open, false);
   assert.equal(focused, true);
 });
+
+function openCodePicker() {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const code = source.slice(source.indexOf('function pickState('), source.indexOf('function resumableCard('));
+  const context = {
+    MODELS: [{ value: 'sonnet', label: 'Claude Sonnet' }], EFFORTS: ['low', 'medium', 'high'],
+    modelChoices: [{ value: 'codex:gpt', label: 'Codex GPT', efforts: ['high'] }],
+    modelCatalogs: new Map(), picks: {}, esc: value => String(value ?? ''), effortLabel: String,
+    optionsHtml: (items, selected) => items.map(item => `<option value="${item.value}"${item.value === selected ? ' selected' : ''}>${item.label}</option>`).join(''),
+  };
+  runInNewContext(`${code}; this.state = pickState; this.html = pickHtml; this.payload = typeof resumePayload === 'function' ? resumePayload : undefined;`, context);
+  return context;
+}
+
+test('OpenCode resume controls preserve saved variants and send only applicable fields', () => {
+  const h = openCodePicker();
+  const model = { value: 'opencode:fixture/model', label: 'OpenCode Fixture', variants: ['fast', 'deep'] };
+  h.modelCatalogs.set('/project', { models: [model] });
+  const session = { sid: 'ses_saved', dir: '/project', modelId: model.value, model: model.label, variant: 'deep' };
+  assert.equal(h.state(session).isOpenCode, true);
+  assert.match(h.html(session), /Variant/);
+  assert.doesNotMatch(h.html(session), /Effort/);
+  assert.equal(h.payload(session).variant, undefined, 'unchanged resume preserves the native variant');
+  h.picks.ses_saved = { variant: 'fast' };
+  assert.equal(h.payload(session).variant, 'fast');
+  assert.equal('effort' in h.payload(session), false);
+  h.picks.ses_saved.variant = '';
+  assert.equal(h.payload(session).variant, '', 'the default is an explicit selection');
+  const claude = { sid: 'uuid', modelId: 'sonnet', effort: 'high' };
+  assert.equal(h.payload(claude).effort, 'high');
+  assert.equal('variant' in h.payload(claude), false);
+  h.modelCatalogs.set('/project', { models: [{ value: 'opencode:fixture/other', label: 'Other', variants: [] }] });
+  h.picks.ses_saved = { model: 'opencode:fixture/other' };
+  assert.doesNotMatch(h.html(session), /Effort|Variant/);
+  assert.equal(h.payload(session).variant, '', 'changing models clears an unsupported old variant');
+  h.picks.ses_saved = {};
+  assert.equal(h.state(session).model, model.value, 'a missing saved model remains selectable');
+  assert.equal(h.payload(session).variant, undefined, 'a missing saved variant remains unchanged');
+});
+
+test('project model loads do not let stale responses replace the active project or host', async () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const code = source.slice(source.indexOf('function latestModels('), source.indexOf('function toast('));
+  const dir = { value: '/a' }, calls = [], pending = [];
+  const context = {
+    TERMINAL: { value: 'terminal', label: 'Terminal' }, MODELS: [{ value: 'sonnet', label: 'Claude' }, { value: 'opus', label: 'Claude Opus' }], EFFORTS: ['medium'], effortLabel: String, gen: 1,
+    $: selector => selector === '#dir' ? dir : {},
+    buildDropdown: (_el, _label, _items, initial) => ({ value: initial, setItems() {}, setLabel() {} }),
+    api: path => { calls.push(path); return new Promise((resolve, reject) => pending.push({ resolve, reject })); },
+    toast() {}, renderResumable() {},
+  };
+  runInNewContext(`${code}; this.refresh = refreshModels; this.catalogs = modelCatalogs; this.values = () => modelChoices.map(model => model.value);`, context);
+  const first = context.refresh(1, '/a');
+  dir.value = '/b';
+  const second = context.refresh(1, '/b');
+  assert.equal(calls.length, 2, 'a different project starts its own request');
+  assert.match(calls[0], /dir=%2Fa/);
+  assert.match(calls[1], /dir=%2Fb/);
+  pending[1].resolve([{ value: 'codex:gpt', label: 'Codex', efforts: ['medium'] }, { value: 'opencode:b/model', label: 'B', variants: [] }]);
+  await second;
+  pending[0].resolve([{ value: 'opencode:a/model', label: 'A', variants: [] }]);
+  await first;
+  assert.ok(context.values().includes('opencode:b/model'));
+  assert.ok(!context.values().includes('opencode:a/model'));
+  dir.value = '/c';
+  const oldHost = context.refresh(1, '/c');
+  assert.equal(context.values().filter(value => value === 'opus').length, 1, 'project changes do not duplicate Claude models');
+  assert.ok(context.values().includes('codex:gpt'), 'Codex choices survive a project change');
+  context.gen = 2; dir.value = '/d';
+  const newHost = context.refresh(2, '/d');
+  pending[3].resolve([{ value: 'opencode:new/model', label: 'New', variants: [] }]);
+  await newHost;
+  pending[2].resolve([{ value: 'opencode:old/model', label: 'Old', variants: [] }]);
+  await oldHost;
+  assert.ok(context.values().includes('opencode:new/model'));
+  assert.ok(!context.values().includes('opencode:old/model'));
+  const cardCatalog = context.refresh(2, '/saved-project');
+  assert.match(calls.at(-1), /dir=%2Fsaved-project/, 'a card loads its own project catalog');
+  pending.at(-1).reject(new Error('discovery failed'));
+  await cardCatalog;
+  assert.ok(context.values().includes('opencode:new/model'), 'a different project failure does not replace launcher choices');
+  assert.equal(context.catalogs.get('/saved-project').models, null);
+});
+
+
+test('changing from effort to an OpenCode model resets the secondary picker', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const code = source.slice(source.indexOf('function updateEfforts() {'), source.indexOf('let modelsGeneration'));
+  const captured = [], control = { hidden: false }, modelDD = { value: 'opencode:fixture/model' };
+  const context = { modelChoices: [{ value: modelDD.value, variants: ['high', 'deep'] }], modelDD,
+    effortDD: { setLabel: label => captured.push({ label }), setItems: (items, fallback, reset) => captured.push({ items, fallback, reset }) },
+    TERMINAL: { value: 'terminal', label: 'Terminal' }, EFFORTS: ['high'], effortLabel: String, effortModel: 'sonnet', $: () => control };
+  runInNewContext(`${code}; updateEfforts();`, context);
+  assert.equal(captured[0].label, 'Variant');
+  assert.equal(captured[1].reset, true, 'an old effort must not silently become an OpenCode variant');
+  assert.equal(captured[1].items[0].value, '');
+  assert.equal(control.hidden, false);
+  modelDD.value = 'terminal';
+  runInNewContext('updateEfforts();', context);
+  assert.equal(control.hidden, true, 'a bare terminal takes no effort');
+});
+
+
+test('opening an OpenCode card loads that card project', async () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const code = source.slice(source.indexOf('function ddOpen('), source.indexOf('function ddPick('));
+  const calls = [], menu = { hidden: true, querySelector: () => null }, trigger = { setAttribute() {} };
+  const dd = { dataset: { sid: 'ses_saved', pick: 'model' }, isConnected: true };
+  const context = { lastRes: [{ sid: 'ses_saved', modelId: 'opencode:fixture/model', dir: '/saved' }], gen: 1,
+    refreshModels: async (...args) => calls.push(args), ddMenu: () => menu, ddTrigger: () => trigger,
+    ddActive() {}, document: { querySelectorAll: () => [] }, pickState: () => ({ models: [], model: '' }), optionsHtml: () => '' };
+  runInNewContext(`${code}; this.open = ddOpen;`, context);
+  context.open(dd);
+  await Promise.resolve();
+  assert.deepEqual(calls[0], [1, '/saved']);
+  assert.equal(menu.hidden, false);
+});
+
+test('refreshing a project catalog preserves its selected OpenCode model', async () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const code = source.slice(source.indexOf('function latestModels('), source.indexOf('function toast('));
+  let now = 1000;
+  const pending = [], dropdowns = [], dir = { value: '/project' };
+  const context = {
+    TERMINAL: { value: 'terminal', label: 'Terminal' }, MODELS: [{ value: 'sonnet', label: 'Claude' }], EFFORTS: ['medium'], effortLabel: String, gen: 1,
+    Date: { now: () => now }, $: selector => selector === '#dir' ? dir : {}, toast() {},
+    buildDropdown: (_el, _label, _items, initial) => {
+      const dd = { value: initial, setLabel() {}, setItems(items, fallback) { if (!items.some(item => item.value === this.value)) this.value = fallback; } };
+      dropdowns.push(dd); return dd;
+    },
+    api: () => new Promise(resolve => pending.push(resolve)),
+  };
+  runInNewContext(`${code}; this.refresh = refreshModels;`, context);
+  const first = context.refresh(1);
+  const catalog = [{ value: 'opencode:fixture/model', variants: [] }];
+  pending.shift()(catalog); await first;
+  dropdowns[0].value = catalog[0].value;
+  now += 61000;
+  const second = context.refresh(1);
+  assert.equal(dropdowns[0].value, catalog[0].value, 'a refresh must not silently change the model during loading');
+  pending.shift()(catalog); await second;
+  assert.equal(dropdowns[0].value, catalog[0].value);
+});
+
+test('changing between Claude models preserves a compatible effort', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const code = source.slice(source.indexOf('function updateEfforts() {'), source.indexOf('let modelsGeneration'));
+  let reset;
+  const context = { modelChoices: [{ value: 'opus', efforts: ['high'] }], modelDD: { value: 'opus' },
+    effortDD: { setLabel() {}, setItems(_items, _fallback, value) { reset = value; } },
+    TERMINAL: { value: 'terminal', label: 'Terminal' }, EFFORTS: ['high'], effortLabel: String, effortModel: 'sonnet', $: () => ({}) };
+  runInNewContext(`${code}; updateEfforts();`, context);
+  assert.equal(reset, false);
+});
+
+test('inactive cards offer pin and unpin without changing Resume', () => {
+  const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const card = src.slice(src.indexOf('function resumableCard('), src.indexOf('function renderResumable('));
+  const context = { esc: String, fmtTs: () => '', gitBadge: () => '', pickHtml: () => '', ICONS: {}, copyIdBtn: () => '' };
+  runInNewContext(`${card}; this.card = resumableCard;`, context);
+  const s = { sid: 'one', prompts: [] };
+  assert.match(context.card(s), /data-pin="one"[^>]*aria-pressed="false"[^>]*>.*Pin/s);
+  assert.match(context.card(s, true), /data-pin="one"[^>]*aria-pressed="true"[^>]*>.*Unpin/s);
+  assert.match(context.card(s, true), /data-resume="one"/);
+});
+
+test('pinned summaries retain expansion and keyboard focus during polling', () => {
+  const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const render = src.slice(src.indexOf('function renderResumable('), src.indexOf('function render(d) {'));
+  let replaced = false, focused = false;
+  const detail = { dataset: { summary: 'pinned' }, open: false,
+    querySelector: () => ({ focus: () => { focused = true; } }) };
+  const pinned = { querySelectorAll: () => replaced ? [detail] : [{ dataset: { summary: 'pinned' } }],
+    set innerHTML(value) { this.html = value; replaced = true; } };
+  const resumable = { querySelectorAll: () => [] };
+  const context = {
+    $: id => id === '#pinned' ? pinned : resumable,
+    lastPinned: [{ sid: 'pinned' }], lastRes: [{ sid: 'history' }], resLimit: 1,
+    resumableCard: (s, pin) => `${s.sid}:${pin}`,
+    document: { activeElement: { closest: () => detail } },
+  };
+  runInNewContext(`${render}; renderResumable();`, context);
+  assert.equal(detail.open, true);
+  assert.equal(focused, true);
+  assert.match(pinned.html, /pinned:true/);
+  assert.doesNotMatch(pinned.html, /data-more|history/);
+  assert.match(resumable.innerHTML, /history:false.*data-more/);
+});
+
+test('a newly running conversation leaves inactive sections without disturbing another picker', () => {
+  const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const code = src.slice(src.indexOf('function render(d) {'), src.indexOf("document.body.addEventListener('click'", src.indexOf('function render(d) {')));
+  let painted = false;
+  const nodes = {};
+  const context = {
+    $: id => nodes[id] ||= {},
+    document: { activeElement: { closest: () => ({ dataset: { sid: 'two' } }) },
+      querySelectorAll: () => [{ dataset: { resume: 'one' }, closest: () => card }] },
+    lastPinned: [{ sid: 'one' }], lastRes: [],
+    esc: String, fmtKb: String, runningCard: () => '',
+    statTile: () => '', renderResumable: () => { painted = true; },
+  };
+  let removed = false;
+  const card = { parentElement: { id: 'pinned', querySelector: () => null }, remove: () => { removed = true; } };
+  runInNewContext(`${code}; this.render = render;`, context);
+  context.render({ running: [{ sid: 'one' }], pinned: [], resumable: [],
+    stats: { cpuPct: 1, ramUsedKb: 1, ramTotalKb: 2, disks: [] } });
+  assert.equal(removed, true, 'a stale pinned card must not remain beside its running card');
+  assert.equal(painted, false, 'the unrelated open picker keeps its DOM and focus');
+});
+
+test('summary expansion follows a conversation when it moves between inactive sections', () => {
+  const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const render = src.slice(src.indexOf('function renderResumable('), src.indexOf('function render(d) {'));
+  for (const destination of ['#pinned', '#resumable']) {
+    const detail = { dataset: { summary: 'one' }, open: false };
+    const nodes = Object.fromEntries(['#pinned', '#resumable'].map(id => {
+      let replaced = false;
+      return [id, { querySelectorAll: () => replaced ? (id === destination ? [detail] : [])
+        : (id !== destination ? [{ dataset: { summary: 'one' } }] : []),
+        set innerHTML(_) { replaced = true; } }];
+    }));
+    runInNewContext(`${render}; renderResumable();`, {
+      $: id => nodes[id], document: { activeElement: null },
+      lastPinned: destination === '#pinned' ? [{ sid: 'one' }] : [],
+      lastRes: destination === '#resumable' ? [{ sid: 'one' }] : [],
+      resLimit: 20, resumableCard: () => '',
+    });
+    assert.equal(detail.open, true, `summary stays expanded after moving to ${destination}`);
+  }
+});
+
+test('pin keeps keyboard focus unless the user focuses something else while saving', async () => {
+  const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const start = src.indexOf("document.body.addEventListener('click'");
+  const handler = src.slice(start, src.indexOf('// Resume-card dropdowns:', start));
+  for (const moveFocus of [false, true]) {
+    const body = {};
+    const other = {};
+    const document = { body, activeElement: null };
+    const el = {
+      dataset: { pin: 'one' }, getAttribute: () => 'false',
+      set disabled(value) { if (value && document.activeElement === el) document.activeElement = body; },
+      focus: () => { document.activeElement = el; },
+    };
+    document.activeElement = el;
+    let click, polledFocus;
+    body.addEventListener = (_, callback) => { click = callback; };
+    runInNewContext(handler, { document,
+      api: async (path, request) => {
+        assert.equal(path, '/api/pin');
+        assert.equal(request.sid, 'one');
+        assert.equal(request.pinned, true);
+        if (moveFocus) document.activeElement = other;
+      },
+      poll: () => { polledFocus = document.activeElement; },
+      toast: message => { assert.fail(message); },
+    });
+    await click({ target: { closest: selector => selector === '[data-term]' || selector === '[data-copy]' ? null : el } });
+    assert.equal(polledFocus, moveFocus ? other : el);
+  }});
