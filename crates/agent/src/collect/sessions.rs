@@ -711,7 +711,7 @@ mod tests {
             r#"{"customTitle":"[Claude] proj · renamed"}"#,
         )
         .unwrap();
-        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000|/proj");
+        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000||/proj");
         let ctx = ctx_with_path(d, path);
 
         let r = collect_sessions(&ctx, RESUMABLE_MAX).await;
