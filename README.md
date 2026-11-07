@@ -108,6 +108,32 @@ Sessions run in tmux. Launching or resuming a session prepares its Remote Contro
 
 The browser terminal sends input to the CLI, so anyone who can reach it can control that session. Terminal connections check the page origin, and session APIs use the configured authentication guards. The log records terminal open and close events, not typed input.
 
+### Browser view
+
+Some sessions drive a visible Chromium browser through Playwright MCP and stop at a login or MFA prompt. A session card shows **Browser** while its browser's debugging port answers. The overlay streams that session's tab to your phone so you can tap, type, scroll, switch tabs, go back and reload, then close it and let the agent carry on. It works with any Chromium-based browser that exposes the DevTools methods it needs (Chrome, Chromium, Brave, Edge and others). Edge is optional.
+
+The agent learns which port belongs to which folder from `cdash-browsers.json` in your Claude data folder (`~/.claude`, or `CLAUDE_DIR`). Write it by hand as an object of absolute session folder to port. A session uses the longest folder that equals or contains its directory:
+
+```json
+{ "/mnt/d/p/Downloads/JOBS": 9301, "/mnt/d/p/Downloads/INVEST": 9302 }
+```
+
+Ports outside 1024–65535 are ignored. A missing or malformed file means no **Browser** buttons.
+
+Open the same port in each project's Playwright MCP launcher with `--config=<file>`:
+
+```json
+{ "browser": { "browserName": "chromium", "launchOptions": { "args": ["--remote-debugging-port=9301"] } } }
+```
+
+Keep the browser you already launch (a channel or `--executable-path`) and a dedicated `--user-data-dir` that belongs to that browser. Chrome 136 and later ignores debugging switches on its default profile folder, so a personal profile will not work. Do not add `--remote-allow-origins=*` or disable the sandbox. If the browser runs on Windows and the agent in WSL, WSL needs `networkingMode=mirrored` so its `127.0.0.1` reaches the Windows loopback port; a browser on the agent's own host needs nothing extra.
+
+The agent connects only to `127.0.0.1` on the mapped port. It ignores proxies and follows no redirects. The listener must be bound to loopback only. While the port is open, any process on that machine can control the browser's logged-in tabs without a password; use this on a machine you trust.
+
+The view cannot show the browser's own interface: saved-password and autofill lists, "Save password?" and permission prompts, HTTP sign-in dialogs, file pickers, Windows Hello and PIN prompts. Type the password instead. It never opens, closes or resizes the browser and never brings a tab forward. A sign-in popup appears in the tab picker and you choose it. Text goes to the page one key press per character, so one-box-per-digit MFA fields fill.
+
+The overlay says **Browser not running** when nothing answers on the port and **Browser closed** when the browser exits. **Browser view unsupported** means the browser lacks a DevTools method the view needs; the dashboard cannot work around that, so use another Chromium build. The log records open and close events and a fixed failure category, never errors, page addresses, titles or typed input.
+
 ### Claude Code sessions
 
 Choose a model and effort level when launching or resuming Claude Code sessions. When the Claude account supports usage lookup, meters use the same undocumented OAuth endpoint as the CLI; that endpoint may change. Missing credentials hide usage meters without blocking session controls.
