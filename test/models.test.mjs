@@ -49,7 +49,7 @@ test('resume preserves an older saved Codex model while offering only latest alt
 test('launch refresh merges discovered Claude labels and latest GPT families with alias fallbacks', async () => {
   const catalog = [{ value: 'opus', model: 'claude-opus-5-5', label: 'Claude Opus 5.5' },
     ...['gpt-6-sol', 'gpt-6.1-sol', 'gpt-6-luna'].map(choice)];
-  const context = { gen: 1, api: async () => catalog, updateEfforts() {},
+  const context = { gen: 1, api: async () => catalog, updateEfforts() {}, store: { get() {}, set() {} },
     $: () => ({ value: '' }),
     modelDD: { setItems(items) { context.items = plain(items); } } };
   const definitions = src.slice(src.indexOf('const MODELS ='), src.indexOf('const EFFORTS ='));
