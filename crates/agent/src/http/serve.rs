@@ -165,6 +165,10 @@ async fn embedded_asset(uri: OriginalUri) -> Response {
             "text/javascript; charset=utf-8",
             include_bytes!("../../../../public/term/keys.js"),
         ),
+        "browser/view.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("../../../../public/browser/view.js"),
+        ),
         "vendor/xterm.js" => (
             "text/javascript; charset=utf-8",
             include_bytes!("../../../../public/vendor/xterm.js"),

@@ -662,6 +662,7 @@ mod tests {
             ("/vendor/addon-fit.js", "FitAddon"),
             ("/vendor/xterm.css", ".xterm"),
             ("/term/keys.js", "cdashKeys"),
+            ("/browser/view.js", "cdashBrowser"),
         ] {
             let body = reqwest_get(&format!("http://{}{path}", b.addr)).await;
             assert!(body.contains(needle), "{path} is served");
