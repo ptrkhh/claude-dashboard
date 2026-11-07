@@ -582,3 +582,25 @@ button, input, select { font: inherit; }
 }
 .term-keys button:active { background: #302e2b; }
 .term-keys button.on { background: var(--accent); border-color: transparent; color: #1a1917; }
+
+/* ---------- Browser overlay (shares the terminal's shell) ---------- */
+.browser-tabbar { padding: 0 8px 6px 14px; }
+.browser-tabbar select {
+  width: 100%; padding: 8px 10px; border-radius: var(--r-sm); border: 1px solid #383632;
+  background: #262523; color: #f4f2ec; font: 500 13px var(--font-mono);
+}
+.browser-stage {
+  flex: 1; min-height: 0; overflow: hidden; position: relative;
+  touch-action: none; user-select: none; -webkit-user-select: none;
+}
+.browser-stage img {
+  display: block; width: 100%; height: auto; transform-origin: 0 0;
+  pointer-events: none; -webkit-user-drag: none;
+}
+.browser-stage img:not([src]) { visibility: hidden; }
+/* Concealed but still focusable: a hidden or display:none input cannot open the keyboard. */
+.browser-input {
+  position: absolute; left: 0; bottom: 0; width: 1px; height: 1px; padding: 0; border: 0;
+  opacity: 0; pointer-events: none;
+}
+.browser .term-keys { grid-template-columns: repeat(7, 1fr); }

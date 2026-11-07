@@ -13,7 +13,7 @@ function dashboard(session = {}) {
   const timers = new Map(), rendered = [], nodes = {};
   const running = [{ name: 'cdash-new', external: false, ...session }];
   const context = {
-    cdashBackoff: globalThis.cdashBackoff, term: null, resLimit: 20, isTauri: false,
+    cdashBackoff: globalThis.cdashBackoff, term: null, browserView: null, resLimit: 20, isTauri: false,
     document: { hidden: false },
     $: selector => nodes[selector] ||= {},
     api: async () => {
@@ -85,6 +85,10 @@ test('a pending link retains failure backoff and pauses polling under Terminal',
   await d.advance(2000);
   assert.equal(d.calls(), 1);
   d.context.term = null;
+  d.context.browserView = {};
+  await d.advance(2000);
+  assert.equal(d.calls(), 1, 'polling pauses under the Browser overlay too');
+  d.context.browserView = null;
   d.fail();
   await d.poll();
   await d.advance(119999);

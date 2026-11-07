@@ -27,6 +27,8 @@ const ICONS = {
   play: `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15a1 1 0 0 0 1.5.87l12-7.5a1 1 0 0 0 0-1.74l-12-7.5A1 1 0 0 0 7 4.5z"/></svg>`,
   external: svg('<path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/>'),
   terminal: svg('<path d="M4 17l6-5-6-5"/><path d="M12 19h8"/>'),
+  globe: svg('<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18"/>'),
+  back: svg('<path d="M15 6l-6 6 6 6"/>'),
   x: svg('<path d="M18 6 6 18"/><path d="M6 6l12 12"/>'),
   download: svg('<path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/>'),
   refresh: svg('<path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/>'),
@@ -338,6 +340,9 @@ function runningCard(r) {
     : r.provider === 'codex' && !r.nativeTerminal
       ? '<span class="action pending">Terminal available for new or resumed sessions</span>'
       : `<button class="action" type="button" data-term="${esc(r.name)}" data-title="${esc(r.dir.split('/').pop())}">${ICONS.terminal}<span>Terminal</span></button>`;
+  // The session's Chromium tab, shown only while its configured debugging port answers.
+  const browserBtn = r.browser
+    ? `<button class="action" type="button" data-browser="${esc(r.name)}" data-title="${esc(r.dir.split('/').pop())}">${ICONS.globe}<span>Browser</span></button>` : '';
   return `
     <div class="session ${status} ${r.external ? 'external' : ''}">
       <div class="session-head">
@@ -351,7 +356,7 @@ function runningCard(r) {
         <span class="time">${fmtUp(r.uptimeSec)}</span>
       </div>
       ${peek}
-      <div class="actions">${rc}${termBtn}${copyIdBtn(r.sid)}${kill}</div>
+      <div class="actions">${rc}${termBtn}${browserBtn}${copyIdBtn(r.sid)}${kill}</div>
     </div>`;
 }
 
@@ -496,7 +501,9 @@ function render(d) {
 
 document.body.addEventListener('click', async e => {
   const t = e.target.closest('[data-term]');
-  if (t) { openTerm(t.dataset.term, t.dataset.title); return; }
+  if (t) { if (browserView) closeBrowser(); openTerm(t.dataset.term, t.dataset.title); return; }
+  const b = e.target.closest('[data-browser]');
+  if (b) { openBrowser(b.dataset.browser, b.dataset.title); return; }
   const c = e.target.closest('[data-copy]');
   if (c) { copyText(c.dataset.copy); return; }
   const el = e.target.closest('[data-kill],[data-resume],[data-purge],[data-more],[data-pin]');
@@ -598,8 +605,8 @@ document.addEventListener('keydown', e => {
    fullscreen renderer instead. */
 let term = null; // { name, xterm, fit, ro, ws, ctrl, retry } while the overlay is open
 
-async function termUrl(name, cols, rows) {
-  const q = `/api/term?name=${encodeURIComponent(name)}&cols=${cols}&rows=${rows}`;
+// Both overlays dial the agent the same way.
+async function wsUrl(q) {
   // The webview cannot proxy a WebSocket through invoke, so it dials the agent.
   if (isTauri) return (await invoke('agent_base')).replace(/^http/, 'ws') + q;
   return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${q}`;
@@ -620,7 +627,7 @@ async function termConnect() {
   t.xterm.reset();
   termStatus('Connecting…', false);
   let url;
-  try { url = await termUrl(t.name, t.xterm.cols, t.xterm.rows); }
+  try { url = await wsUrl(`/api/term?name=${encodeURIComponent(t.name)}&cols=${t.xterm.cols}&rows=${t.xterm.rows}`); }
   catch (e) { termStatus(String(e?.message ?? e), true); return; }
   if (term !== t) return; // closed while resolving the URL
   const ws = new WebSocket(url);
@@ -729,6 +736,336 @@ $('#term-keys').addEventListener('pointerdown', e => {
 });
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden && term?.retry && !term.ws) termConnect();
+});
+
+/* ---------- Browser: a session's Chromium tab over a WebSocket ----------
+   The agent streams JPEG frames of one tab and forwards taps, typing and
+   navigation; it never relays raw CDP. A frame's metadata arrives as text just
+   before its JPEG. That pair stays pending until the image has decoded, and
+   only a displayed pair enables input, so a tap is always measured against the
+   picture the user saw. Tab labels and titles are page-controlled: DOM text,
+   never HTML. Nothing typed is kept: no buffering, no replay. */
+const BROWSER_SENTINEL = '​'; // keeps an empty-field Backspace observable
+const BROWSER_MAX_SCALE = 5;
+const BROWSER_TAP_SLOP = 10; // px a finger may travel and still be a tap
+const BROWSER_CLOSED = {
+  4002: 'Browser not running', 4003: 'Browser closed',
+  4004: 'Browser view unsupported', 1011: 'Browser connection failed',
+};
+let browserView = null; // while the overlay is open: socket, tab, displayed/pending frame, input state
+
+const browserStatus = (text, reconnect) => {
+  $('#browser-status').textContent = text;
+  $('#browser-reconnect').hidden = !reconnect;
+};
+
+function browserReady() {
+  const v = browserView;
+  return !!(v && v.ws?.readyState === WebSocket.OPEN && v.active && !v.want && v.shown);
+}
+
+function browserSync() {
+  const v = browserView, open = v?.ws?.readyState === WebSocket.OPEN;
+  $('#browser-input').disabled = !browserReady();
+  for (const id of ['#browser-back', '#browser-reload']) $(id).disabled = !(open && v.active);
+  $('#browser-tabs').disabled = !open;
+}
+
+function browserResetInput(v) {
+  v.composing = false;
+  v.dedupe = null;
+  $('#browser-input').value = BROWSER_SENTINEL;
+}
+
+/* Forget the displayed frame. A tab change or a reconnect starts a new epoch;
+   a decode still running belongs to the old one and is dropped when it ends. */
+function browserClearFrame(v) {
+  v.epoch++;
+  v.pending = null;
+  if (v.shown) URL.revokeObjectURL(v.shown.url);
+  v.shown = null;
+  v.scale = 1; v.tx = 0; v.ty = 0; v.multi = false;
+  v.pointers.clear();
+  const img = $('#browser-screen');
+  img.removeAttribute('src');
+  img.style.transform = '';
+  browserResetInput(v);
+  browserSync();
+}
+
+// Never buffered: input and navigation go out now or not at all.
+function browserSend(msg, needFrame = true) {
+  const v = browserView;
+  if (!v || v.ws?.readyState !== WebSocket.OPEN) return;
+  if (needFrame && !browserReady()) return;
+  v.ws.send(JSON.stringify(msg));
+}
+
+function browserMeta(f) {
+  const ok = n => typeof n === 'number' && Number.isFinite(n);
+  return f && ok(f.deviceWidth) && ok(f.deviceHeight) && f.deviceWidth > 0 && f.deviceHeight > 0
+    && ok(f.offsetTop) && ok(f.pageScaleFactor) ? f : null;
+}
+
+function browserShow(v, ws, meta, buf) {
+  const frame = { epoch: v.epoch, seq: ++v.seq, meta, url: URL.createObjectURL(new Blob([buf], { type: 'image/jpeg' })) };
+  const probe = new Image();
+  probe.src = frame.url;
+  probe.decode().then(() => {
+    const stale = browserView !== v || v.ws !== ws || v.epoch !== frame.epoch || (v.shown && v.shown.seq > frame.seq);
+    if (stale) { URL.revokeObjectURL(frame.url); return; }
+    $('#browser-screen').src = frame.url;
+    if (v.shown) URL.revokeObjectURL(v.shown.url);
+    v.shown = frame;
+    browserSync();
+  }, () => URL.revokeObjectURL(frame.url));
+}
+
+function browserOptions(tabs, active) {
+  const sel = $('#browser-tabs');
+  sel.textContent = '';
+  const add = (value, label, title, disabled) => {
+    const o = document.createElement('option');
+    o.value = value; o.textContent = label; o.title = title; o.disabled = disabled;
+    sel.appendChild(o);
+  };
+  add('', 'Pick a tab', '', true);
+  for (const t of tabs) add(String(t.id), typeof t.origin === 'string' ? t.origin : 'No web origin', String(t.title ?? ''), false);
+  sel.value = active ?? '';
+}
+
+function browserTabs(v, tabs, active) {
+  browserOptions(tabs, active);
+  const ids = tabs.map(t => String(t.id));
+  if (v.want && (active === v.want || !ids.includes(v.want))) v.want = null; // done, or the tab is gone
+  if (active !== v.active) {
+    v.active = active;
+    browserClearFrame(v);
+  }
+  const gone = 'Tab closed. Pick a tab.';
+  if (active === null) $('#browser-status').textContent = gone;
+  else if ($('#browser-status').textContent === gone) $('#browser-status').textContent = '';
+  browserSync();
+}
+
+function browserOnMessage(v, ws, data) {
+  if (browserView !== v || v.ws !== ws) return;
+  if (typeof data === 'string') {
+    let m;
+    try { m = JSON.parse(data); } catch { return; }
+    if (m?.frame) v.pending = browserMeta(m.frame);
+    else if (Array.isArray(m?.tabs)) browserTabs(v, m.tabs, m.active ?? null);
+    return;
+  }
+  // A JPEG pairs with the metadata sent just before it. While a tab switch is
+  // pending, frames still on the wire belong to the old tab.
+  const meta = v.pending;
+  v.pending = null;
+  if (meta && !v.want) browserShow(v, ws, meta, data);
+}
+
+async function browserConnect() {
+  const v = browserView;
+  v.retry = false;
+  v.active = null;
+  v.want = null;
+  browserClearFrame(v);
+  browserOptions([], null);
+  browserStatus('Connecting…', false);
+  let url;
+  try { url = await wsUrl(`/api/browser?name=${encodeURIComponent(v.name)}`); }
+  catch (e) { browserStatus(String(e?.message ?? e), true); return; }
+  if (browserView !== v) return; // closed while resolving the URL
+  const ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+  v.ws = ws;
+  let opened = false;
+  ws.onopen = () => { opened = true; browserStatus('', false); browserSync(); };
+  ws.onmessage = e => browserOnMessage(v, ws, e.data);
+  ws.onclose = e => {
+    if (browserView !== v || v.ws !== ws) return; // the UI closed it, or a newer socket replaced it
+    v.ws = null;
+    v.active = null;
+    v.want = null;
+    browserClearFrame(v);
+    // Fixed texts only: the server's own words are never shown.
+    const known = BROWSER_CLOSED[e.code];
+    if (known) return browserStatus(known, e.code !== 4004);
+    browserStatus(opened ? 'Disconnected' : 'Couldn’t connect', true);
+    v.retry = true; // network, agent restart, phone sleep: one retry when next visible
+  };
+}
+
+function openBrowser(name, title) {
+  if (browserView) return;
+  const replace = !!term; // the terminal's history entry is reused, not stacked
+  if (term) closeTerm();
+  browserView = {
+    name, opener: document.activeElement, ws: null, retry: false, active: null, want: null,
+    epoch: 0, seq: 0, pending: null, shown: null, composing: false, dedupe: null, enterSeen: false,
+    scale: 1, tx: 0, ty: 0, pointers: new Map(), multi: false,
+  };
+  $('#browser-title').textContent = `Browser · ${title}`;
+  $('#browser').hidden = false;
+  history[replace ? 'replaceState' : 'pushState']({ browser: name }, ''); // Android back closes the overlay
+  browserConnect();
+}
+
+function closeBrowser() {
+  const v = browserView;
+  if (!v) return;
+  browserView = null;
+  v.ws?.close();
+  if (v.shown) URL.revokeObjectURL(v.shown.url);
+  const img = $('#browser-screen');
+  img.removeAttribute('src');
+  img.style.transform = '';
+  const input = $('#browser-input');
+  input.value = '';
+  input.disabled = true;
+  $('#browser-tabs').textContent = '';
+  $('#browser').hidden = true;
+  v.opener?.focus?.();
+  poll(); // the poll paused while the overlay was open
+}
+
+/* ---- Picture gestures: tap, scroll, pinch, pan ----
+   Coordinates come from the transformed image's own rect, so stage padding,
+   pan offsets and letterboxing never count, and a touch outside the picture is
+   dropped. */
+function browserPoint(clientX, clientY) {
+  if (!browserReady()) return null;
+  const r = $('#browser-screen').getBoundingClientRect();
+  if (!(r.width > 0 && r.height > 0)) return null;
+  const x = clientX - r.left, y = clientY - r.top;
+  if (x < 0 || y < 0 || x > r.width || y > r.height) return null;
+  return cdashBrowser.toPage(x, y, { w: r.width, h: r.height }, browserView.shown.meta);
+}
+
+function browserTransform(v) {
+  const img = $('#browser-screen'), stage = $('#browser-stage');
+  v.tx = Math.min(0, Math.max(v.tx, stage.clientWidth - img.offsetWidth * v.scale));
+  v.ty = Math.min(0, Math.max(v.ty, stage.clientHeight - img.offsetHeight * v.scale));
+  img.style.transform = `translate(${v.tx}px, ${v.ty}px) scale(${v.scale})`;
+}
+
+$('#browser-stage').addEventListener('mousedown', e => e.preventDefault());
+$('#browser-stage').addEventListener('pointerdown', e => {
+  const v = browserView;
+  if (!v) return;
+  e.preventDefault();
+  v.pointers.set(e.pointerId, { x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, moved: false });
+  $('#browser-stage').setPointerCapture?.(e.pointerId);
+  if (v.pointers.size === 2) {
+    const [a, b] = [...v.pointers.values()];
+    v.pinch = { d0: Math.hypot(a.x - b.x, a.y - b.y) || 1, s0: v.scale };
+    v.multi = true;
+  }
+});
+$('#browser-stage').addEventListener('pointermove', e => {
+  const v = browserView, p = v?.pointers.get(e.pointerId);
+  if (!p) return;
+  const dx = e.clientX - p.x, dy = e.clientY - p.y;
+  p.x = e.clientX; p.y = e.clientY;
+  if (Math.hypot(p.x - p.x0, p.y - p.y0) > BROWSER_TAP_SLOP) p.moved = true;
+  if (v.pointers.size === 2 && v.pinch) {
+    const [a, b] = [...v.pointers.values()];
+    const s = Math.min(BROWSER_MAX_SCALE, Math.max(1, v.pinch.s0 * Math.hypot(a.x - b.x, a.y - b.y) / v.pinch.d0));
+    const st = $('#browser-stage').getBoundingClientRect();
+    const mx = (a.x + b.x) / 2 - st.left, my = (a.y + b.y) / 2 - st.top;
+    v.tx = mx - (mx - v.tx) * s / v.scale;
+    v.ty = my - (my - v.ty) * s / v.scale;
+    v.scale = s;
+    browserTransform(v);
+  } else if (v.pointers.size === 1 && p.moved) {
+    if (v.scale > 1) { v.tx += dx; v.ty += dy; browserTransform(v); return; }
+    // At fit width a drag scrolls the page: dragging up scrolls down.
+    const pt = browserPoint(p.x, p.y);
+    if (!pt) return;
+    const k = v.shown.meta.deviceWidth / $('#browser-screen').getBoundingClientRect().width;
+    browserSend({ scroll: [pt[0], pt[1], -dx * k, -dy * k] });
+  }
+});
+for (const type of ['pointerup', 'pointercancel']) {
+  $('#browser-stage').addEventListener(type, e => {
+    const v = browserView, p = v?.pointers.get(e.pointerId);
+    if (!p) return;
+    v.pointers.delete(e.pointerId);
+    if (type === 'pointerup' && !p.moved && !v.multi) {
+      const pt = browserPoint(e.clientX, e.clientY);
+      if (pt) browserSend({ tap: pt });
+    }
+    if (!v.pointers.size) { v.multi = false; v.pinch = null; }
+  });
+}
+
+/* ---- Typing: a concealed password-type field the phone keyboard fills ---- */
+$('#browser-input').addEventListener('compositionstart', () => {
+  if (browserView) browserView.composing = true;
+});
+$('#browser-input').addEventListener('compositionend', e => {
+  const v = browserView;
+  if (!v) return;
+  v.composing = false;
+  $('#browser-input').value = BROWSER_SENTINEL;
+  const text = e.data || ''; // empty when the composition was canceled
+  if (!text || !browserReady()) return;
+  browserSend({ text });
+  // Some browsers also fire a trailing input event for the same commit.
+  v.dedupe = text;
+  setTimeout(() => { if (browserView === v) v.dedupe = null; }, 0);
+});
+$('#browser-input').addEventListener('input', e => {
+  const v = browserView;
+  if (!v) return;
+  // Partial composition is neither sent nor reset, or the IME loses its text.
+  if (v.composing || e.isComposing || e.inputType === 'insertCompositionText') return;
+  const field = $('#browser-input');
+  const duplicate = (v.dedupe !== null && e.data === v.dedupe) || (v.enterSeen && e.inputType === 'insertLineBreak');
+  v.dedupe = null;
+  const out = duplicate || !browserReady() ? [] : cdashBrowser.fromInput(e.inputType, e.data);
+  field.value = BROWSER_SENTINEL;
+  for (const m of out) browserSend(m);
+});
+$('#browser-input').addEventListener('keydown', e => {
+  const v = browserView;
+  if (!v || e.key !== 'Enter' || v.composing || e.isComposing || e.keyCode === 229) return;
+  e.preventDefault(); // a single-line field's own Enter would submit nothing useful
+  v.enterSeen = true;
+  setTimeout(() => { if (browserView === v) v.enterSeen = false; }, 0);
+  browserSend({ key: 'Enter' });
+});
+
+/* ---- Bar buttons, tab picker, reconnect ---- */
+$('#browser-close').innerHTML = ICONS.x;
+$('#browser-back').innerHTML = ICONS.back;
+$('#browser-reload').innerHTML = ICONS.refresh;
+$('#browser-close').addEventListener('click', () => history.back()); // popstate closes it
+addEventListener('popstate', closeBrowser);
+$('#browser-back').addEventListener('click', () => browserSend({ nav: 'back' }, false));
+$('#browser-reload').addEventListener('click', () => browserSend({ nav: 'reload' }, false));
+$('#browser-reconnect').addEventListener('click', () => { if (browserView && !browserView.ws) browserConnect(); });
+$('#browser-tabs').addEventListener('change', () => {
+  const v = browserView, id = $('#browser-tabs').value;
+  if (!v || !id || id === v.active || v.ws?.readyState !== WebSocket.OPEN) return;
+  v.want = id; // input and frames stay off until the agent confirms the switch
+  browserSend({ tab: id }, false);
+  browserSync();
+});
+// Like the terminal's key bar: act on pointerdown and cancel it, so a tap
+// neither moves focus nor closes the phone keyboard.
+$('#browser-keys').addEventListener('mousedown', e => e.preventDefault());
+$('#browser-keys').addEventListener('pointerdown', e => {
+  const b = e.target.closest('[data-bkey]');
+  if (!b || !browserView) return;
+  e.preventDefault();
+  const k = b.dataset.bkey;
+  if (k === 'kbd') { if (browserReady()) $('#browser-input').focus(); return; }
+  const key = cdashBrowser.KEYBAR[k];
+  if (key) browserSend({ key });
+});
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && browserView?.retry && !browserView.ws) browserConnect();
 });
 
 let modelDirTimer;
@@ -890,7 +1227,7 @@ function arm(delay = cdashBackoff.delay(bk)) {
 }
 
 async function tick() {
-  if (term) return; // paused under the terminal; closeTerm() restarts it
+  if (term || browserView) return; // paused under an overlay; closing it restarts the poll
   const g = gen;
   // Skip background polls, but never the first one. An Android WebView is
   // hidden until its activity resumes, and `visibilitychange` can fire before
