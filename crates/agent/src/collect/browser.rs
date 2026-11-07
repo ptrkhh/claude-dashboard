@@ -35,13 +35,27 @@ pub fn port_for(map: &[(String, u16)], dir: &str) -> Option<u16> {
         .map(|(_, p)| *p)
 }
 
+/// Built once: constructing a client loads the TLS roots (about 25 ms), which
+/// would otherwise be paid for every probe of every mapped session on every
+/// poll. No proxy and no redirects: a 3xx is a failed probe, never a new
+/// destination. No idle pool: a connection must not outlive the runtime that
+/// opened it, and a loopback connect is cheap.
+fn client() -> Option<&'static reqwest::Client> {
+    static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .pool_max_idle_per_host(0)
+                .build()
+                .ok()
+        })
+        .as_ref()
+}
+
 async fn get_json(port: u16, path: &str) -> Result<serde_json::Value, &'static str> {
-    // No proxy and no redirects: a 3xx is a failed probe, never a new destination.
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| "connect")?;
+    let client = client().ok_or("connect")?;
     let resp = client.get(format!("http://127.0.0.1:{port}{path}")).send().await.map_err(|_| "connect")?;
     if !resp.status().is_success() {
         return Err("protocol");
