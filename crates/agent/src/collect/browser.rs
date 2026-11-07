@@ -95,6 +95,118 @@ pub async fn browser_flags(claude_dir: &Path, dirs: &[&str]) -> Vec<bool> {
     .await
 }
 
+/// Cap on one `text` message, in bytes.
+pub const MAX_TEXT: usize = 4096;
+
+/// What the phone may ask for. Anything else is dropped; the phone never
+/// supplies a CDP method or a raw key name outside `KEYS`.
+#[derive(Debug, PartialEq)]
+pub enum PhoneMsg {
+    Tap(f64, f64),
+    Scroll { x: f64, y: f64, dx: f64, dy: f64 },
+    Text(String),
+    Key(&'static str),
+    Tab(String),
+    Back,
+    Reload,
+}
+
+/// Allowed named keys and their Windows virtual key codes.
+const KEYS: [(&str, u32); 8] = [
+    ("Enter", 13),
+    ("Tab", 9),
+    ("Backspace", 8),
+    ("Escape", 27),
+    ("ArrowLeft", 37),
+    ("ArrowUp", 38),
+    ("ArrowRight", 39),
+    ("ArrowDown", 40),
+];
+
+fn finite_nums<const N: usize>(v: &serde_json::Value) -> Option<[f64; N]> {
+    let a = v.as_array().filter(|a| a.len() == N)?;
+    let mut out = [0.0; N];
+    for (o, x) in out.iter_mut().zip(a) {
+        *o = x.as_f64().filter(|f| f.is_finite())?;
+    }
+    Some(out)
+}
+
+/// One JSON object with exactly one known key and a well-formed value.
+pub fn parse_phone(text: &str) -> Option<PhoneMsg> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let obj = v.as_object().filter(|o| o.len() == 1)?;
+    let (key, val) = obj.iter().next()?;
+    match key.as_str() {
+        "tap" => {
+            let [x, y] = finite_nums(val)?;
+            Some(PhoneMsg::Tap(x, y))
+        }
+        "scroll" => {
+            let [x, y, dx, dy] = finite_nums(val)?;
+            Some(PhoneMsg::Scroll { x, y, dx, dy })
+        }
+        "text" => val.as_str().filter(|t| !t.is_empty() && t.len() <= MAX_TEXT).map(|t| PhoneMsg::Text(t.to_string())),
+        "key" => KEYS.iter().find(|(n, _)| Some(*n) == val.as_str()).map(|(n, _)| PhoneMsg::Key(n)),
+        "tab" => val.as_str().filter(|t| !t.is_empty()).map(|t| PhoneMsg::Tab(t.to_string())),
+        "nav" => match val.as_str()? {
+            "back" => Some(PhoneMsg::Back),
+            "reload" => Some(PhoneMsg::Reload),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `Input.dispatchKeyEvent` params for a named key, in send order. Enter also
+/// sends a `char` event. A key sent without its virtual key code can be
+/// ignored by the page (Backspace was, in the Edge spike).
+pub fn key_events(key: &str) -> Option<Vec<serde_json::Value>> {
+    let (name, vk) = KEYS.iter().find(|(n, _)| *n == key)?;
+    let ev = |kind: &str| serde_json::json!({"type": kind, "key": name, "code": name, "windowsVirtualKeyCode": vk});
+    let mut out = vec![ev("rawKeyDown")];
+    if *name == "Enter" {
+        let mut c = ev("char");
+        c["text"] = "\r".into();
+        out.push(c);
+    }
+    out.push(ev("keyUp"));
+    Some(out)
+}
+
+/// One key press per Unicode scalar. Only ASCII letters and digits carry a
+/// virtual key code (pages that filter by `keyCode` drop them otherwise);
+/// space and everything else deliberately has none.
+pub fn char_events(c: char) -> [serde_json::Value; 2] {
+    let s = c.to_string();
+    let mut down = serde_json::json!({"type": "keyDown", "key": s, "text": s});
+    let mut up = serde_json::json!({"type": "keyUp", "key": s});
+    if c.is_ascii_alphanumeric() {
+        let vk = c.to_ascii_uppercase() as u32;
+        down["windowsVirtualKeyCode"] = vk.into();
+        up["windowsVirtualKeyCode"] = vk.into();
+    }
+    [down, up]
+}
+
+/// Size of the page, in CSS pixels, that the displayed frame belongs to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Viewport {
+    pub width: f64,
+    pub height: f64,
+}
+
+impl Viewport {
+    /// `None` unless both dimensions are positive and finite.
+    pub fn new(width: f64, height: f64) -> Option<Viewport> {
+        (width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0).then_some(Viewport { width, height })
+    }
+}
+
+pub fn clamp_point(x: f64, y: f64, vp: &Viewport) -> (f64, f64) {
+    (x.clamp(0.0, vp.width), y.clamp(0.0, vp.height))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -199,6 +311,73 @@ pub(crate) mod tests {
             Ok(format!("ws://127.0.0.1:{port}/devtools/browser/a-1")),
             "scheme and authority come from the map, never the response"
         );
+    }
+
+    #[test]
+    fn phone_messages_are_validated() {
+        assert_eq!(parse_phone(r#"{"tap":[10.5,20]}"#), Some(PhoneMsg::Tap(10.5, 20.0)));
+        assert_eq!(parse_phone(r#"{"scroll":[1,2,3,-4]}"#), Some(PhoneMsg::Scroll { x: 1.0, y: 2.0, dx: 3.0, dy: -4.0 }));
+        assert_eq!(parse_phone(r#"{"text":"é"}"#), Some(PhoneMsg::Text("é".into())));
+        assert_eq!(parse_phone(r#"{"key":"Backspace"}"#), Some(PhoneMsg::Key("Backspace")));
+        assert_eq!(parse_phone(r#"{"tab":"P1"}"#), Some(PhoneMsg::Tab("P1".into())));
+        assert_eq!(parse_phone(r#"{"nav":"back"}"#), Some(PhoneMsg::Back));
+        assert_eq!(parse_phone(r#"{"nav":"reload"}"#), Some(PhoneMsg::Reload));
+        for bad in [r#"{"tap":[1]}"#, r#"{"tap":["a",1]}"#, r#"{"scroll":[1,2,3]}"#, r#"{"key":"F5"}"#, r#"{"nav":"forward"}"#,
+                    r#"{"text":""}"#, r#"{"tab":""}"#, r#"{"eval":"x"}"#, r#"{"tap":[1,2],"text":"x"}"#, "[]", "nope"] {
+            assert_eq!(parse_phone(bad), None, "{bad}");
+        }
+        let long = format!(r#"{{"text":"{}"}}"#, "a".repeat(MAX_TEXT + 1));
+        assert_eq!(parse_phone(&long), None);
+        let at_cap = format!(r#"{{"text":"{}"}}"#, "a".repeat(MAX_TEXT));
+        assert!(parse_phone(&at_cap).is_some(), "exactly MAX_TEXT bytes is allowed");
+    }
+
+    #[test]
+    fn keys_carry_virtual_key_codes() {
+        let enter = key_events("Enter").unwrap();
+        assert_eq!(enter.len(), 3);
+        assert_eq!(enter[0]["type"], "rawKeyDown");
+        assert_eq!(enter[0]["windowsVirtualKeyCode"], 13);
+        assert_eq!(enter[1]["type"], "char");
+        assert_eq!(enter[1]["text"], "\r");
+        assert_eq!(enter[2]["type"], "keyUp");
+        for (k, vk) in [("Tab", 9), ("Backspace", 8), ("Escape", 27), ("ArrowLeft", 37), ("ArrowUp", 38), ("ArrowRight", 39), ("ArrowDown", 40)] {
+            let ev = key_events(k).unwrap();
+            assert_eq!(ev.len(), 2, "{k}");
+            assert_eq!(ev[0]["type"], "rawKeyDown");
+            assert_eq!(ev[0]["windowsVirtualKeyCode"], vk, "{k}");
+            assert_eq!(ev[0]["key"], k);
+            assert_eq!(ev[1]["type"], "keyUp");
+        }
+        assert!(key_events("F5").is_none());
+    }
+
+    #[test]
+    fn chars_become_one_key_press_each() {
+        let [down, up] = char_events('a');
+        assert_eq!((down["type"].as_str(), down["text"].as_str(), down["windowsVirtualKeyCode"].as_u64()), (Some("keyDown"), Some("a"), Some(65)));
+        assert_eq!((up["type"].as_str(), up["windowsVirtualKeyCode"].as_u64()), (Some("keyUp"), Some(65)));
+        assert_eq!(char_events('7')[0]["windowsVirtualKeyCode"], 55);
+        for c in ['$', 'é', '😀', ' '] {
+            let [down, _] = char_events(c);
+            assert_eq!(down["text"], c.to_string());
+            assert!(down.get("windowsVirtualKeyCode").is_none(), "{c:?} has no VK");
+        }
+    }
+
+    #[test]
+    fn clamp_keeps_points_inside_the_viewport() {
+        let vp = Viewport { width: 1000.0, height: 600.0 };
+        assert_eq!(clamp_point(-5.0, 700.0, &vp), (0.0, 600.0));
+        assert_eq!(clamp_point(10.0, 20.0, &vp), (10.0, 20.0));
+    }
+
+    #[test]
+    fn viewport_requires_positive_finite_dimensions() {
+        assert!(Viewport::new(1000.0, 600.0).is_some());
+        for (w, h) in [(0.0, 600.0), (1000.0, 0.0), (-1.0, 600.0), (f64::NAN, 600.0), (1000.0, f64::INFINITY)] {
+            assert!(Viewport::new(w, h).is_none(), "{w} x {h}");
+        }
     }
 
     #[test]
