@@ -10,6 +10,7 @@ pub mod validate;
 pub mod term;
 pub mod browser;
 pub mod cdp;
+pub mod browser_bridge;
 pub mod spawn;
 pub mod external;
 pub mod sessions;

@@ -179,7 +179,7 @@ async fn write_all(fd: &AsyncFd<OwnedFd>, mut b: &[u8]) -> io::Result<()> {
 /// sends no FIN, so without this `recv` waits forever and the `tmux attach`
 /// child leaks; a peer that answers nothing for one full interval is gone.
 /// Short under test so a silent client is caught within the test's patience.
-const PING_EVERY: std::time::Duration =
+pub(crate) const PING_EVERY: std::time::Duration =
     std::time::Duration::from_secs(if cfg!(test) { 2 } else { 30 });
 
 enum Ended {
@@ -194,7 +194,7 @@ enum Ended {
 /// would then block the ping arm too, leaving the bridge and `tmux attach`
 /// alive until TCP itself gives up. Whether the send failed or timed out, the
 /// peer is gone.
-async fn send_or_drop(ws: &mut WebSocket, msg: Message) -> bool {
+pub(crate) async fn send_or_drop(ws: &mut WebSocket, msg: Message) -> bool {
     matches!(
         tokio::time::timeout(PING_EVERY, ws.send(msg)).await,
         Ok(Ok(()))
@@ -310,7 +310,7 @@ pub async fn bridge(ctx: Arc<Ctx>, name: String, cols: u16, rows: u16, mut ws: W
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -412,11 +412,11 @@ mod tests {
     use std::time::Duration;
     use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest, Message as WsMsg};
 
-    type Ws = tokio_tungstenite::WebSocketStream<
+    pub(crate) type Ws = tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >;
 
-    fn have_tmux() -> bool {
+    pub(crate) fn have_tmux() -> bool {
         #[allow(clippy::disallowed_types)] // test-only probe, no Runner in scope
         let ok = std::process::Command::new("tmux")
             .arg("-V")
@@ -437,24 +437,25 @@ mod tests {
     }
 
     /// A detached `sh` session, killed on drop.
-    struct Session(String);
+    pub(crate) struct Session(pub(crate) String);
     impl Session {
-        fn new(tag: &str) -> Self {
+        pub(crate) fn new(tag: &str) -> Self {
+            Self::start(tag, None)
+        }
+        /// Same, with the pane's working directory set to `dir`.
+        pub(crate) fn in_dir(tag: &str, dir: &std::path::Path) -> Self {
+            Self::start(tag, Some(dir))
+        }
+        fn start(tag: &str, dir: Option<&std::path::Path>) -> Self {
             let name = format!("cdash-termtest-{}-{tag}", std::process::id());
             let _ = tmux(&["kill-session", "-t", &format!("={name}")]);
-            assert!(tmux(&[
-                "new-session",
-                "-d",
-                "-s",
-                &name,
-                "-x",
-                "80",
-                "-y",
-                "24",
-                "sh"
-            ])
-            .status
-            .success());
+            let mut args = vec!["new-session", "-d", "-s", &name, "-x", "80", "-y", "24"];
+            let dir = dir.map(|d| d.to_string_lossy().into_owned());
+            if let Some(d) = &dir {
+                args.extend(["-c", d]);
+            }
+            args.push("sh");
+            assert!(tmux(&args).status.success());
             Self(name)
         }
         fn clients(&self) -> String {
@@ -474,7 +475,7 @@ mod tests {
         }
     }
 
-    fn tempdir(tag: &str) -> std::path::PathBuf {
+    pub(crate) fn tempdir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("cdash-term-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sessions")).unwrap();
@@ -497,7 +498,7 @@ mod tests {
             .map(|(ws, _)| ws)
     }
 
-    fn status_of(r: Result<Ws, tungstenite::Error>) -> u16 {
+    pub(crate) fn status_of(r: Result<Ws, tungstenite::Error>) -> u16 {
         match r {
             Err(tungstenite::Error::Http(res)) => res.status().as_u16(),
             Err(e) => panic!("expected an HTTP refusal, got {e}"),
@@ -523,7 +524,7 @@ mod tests {
     }
 
     /// Drains frames until the close frame and returns its code.
-    async fn close_code(ws: &mut Ws) -> u16 {
+    pub(crate) async fn close_code(ws: &mut Ws) -> u16 {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 match ws.next().await {
