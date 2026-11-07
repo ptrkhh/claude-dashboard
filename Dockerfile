@@ -24,6 +24,8 @@ COPY --from=build /src/target/release/cdash-agent /usr/local/bin/cdash-agent
 # The named volume is seeded from this directory, so it must be owned by node.
 RUN mkdir -p /projects && chown node:node /projects
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
+# The folder picker opens here instead of the home volume.
+ENV CDASH_BROWSE_ROOT=/projects
 
 USER node
 WORKDIR /projects

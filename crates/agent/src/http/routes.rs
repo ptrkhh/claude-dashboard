@@ -108,8 +108,12 @@ pub async fn get_places(State(ctx): State<Arc<Ctx>>) -> Response {
 }
 
 pub async fn get_browse(Query(q): Query<HashMap<String, String>>) -> Result<Response, ApiError> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-    let target = q.get("path").filter(|p| !p.is_empty()).cloned().unwrap_or(home);
+    // CDASH_BROWSE_ROOT lets a container start the picker in its projects
+    // folder; everywhere else it is unset and the picker starts at home.
+    let root = std::env::var("CDASH_BROWSE_ROOT")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| "/".to_string());
+    let target = q.get("path").filter(|p| !p.is_empty()).cloned().unwrap_or(root);
     let hidden = q.get("hidden").map(|h| h == "1").unwrap_or(false);
     Ok(Json(list_dirs(&target, hidden).await?).into_response())
 }
