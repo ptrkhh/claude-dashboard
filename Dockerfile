@@ -21,13 +21,12 @@ RUN npm install -g @anthropic-ai/claude-code @openai/codex @opencode/cli@2 \
 
 COPY --from=build /src/target/release/cdash-agent /usr/local/bin/cdash-agent
 
-# The named volume is seeded from this directory, so it must be owned by node.
-RUN mkdir -p /projects && chown node:node /projects
+# Projects mount under the home volume, so the picker (which opens at $HOME)
+# lists it first. The mountpoint must be owned by node.
+RUN mkdir -p /home/node/projects && chown node:node /home/node/projects
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
-# The folder picker opens here instead of the home volume.
-ENV CDASH_BROWSE_ROOT=/projects
 
 USER node
-WORKDIR /projects
+WORKDIR /home/node/projects
 EXPOSE 23274
 CMD ["cdash-agent"]

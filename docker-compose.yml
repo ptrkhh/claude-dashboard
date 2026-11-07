@@ -14,7 +14,7 @@ services:
     volumes:
       # One volume holds every CLI login and ~/.claude.json.
       - home:/home/node
-      - ${PROJECTS_DIR:-./projects}:/projects
+      - ${PROJECTS_DIR:-./projects}:/home/node/projects
     networks: [tunnel]
 
   cloudflared:

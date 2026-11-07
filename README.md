@@ -69,7 +69,7 @@ The image bundles the agent, Claude Code, Codex, OpenCode, and tmux. A second co
 
        docker compose up -d --build
 
-4. Sign in once. In the launcher, choose **Terminal** in the Model menu, pick a directory under `/projects`, and tap **Launch**. Open the new card's **Terminal** button and run `claude`, `codex`, or `opencode`. Claude Code must be signed in with an account that supports Remote Control.
+4. Sign in once. In the launcher, choose **Terminal** in the Model menu, open the `projects` folder and pick a directory in it, and tap **Launch**. Open the new card's **Terminal** button and run `claude`, `codex`, or `opencode`. Claude Code must be signed in with an account that supports Remote Control.
 
 Sessions run in tmux inside the container, so `docker restart`, `docker compose down`, and image rebuilds end them. Project files stay on the host. Cloudflare Access is the only guard: do not publish port 23274.
 
@@ -147,7 +147,6 @@ The desktop and Android apps’ saved remote profiles currently support **auth: 
 | **PORT** | 23274 | Listening port. Set to 0 to choose an available port. |
 | **CDASH_BIND** | 127.0.0.1 | Listen address. Network access requires an explicit bind address. |
 | **CLAUDE_DIR** | ~/.claude | Claude configuration and project directory. |
-| **CDASH_BROWSE_ROOT** | $HOME | Folder the picker opens at when no path is given. The Docker image sets it to /projects. |
 | **DISK_EXTRA** | — | Optional second disk mount to report, such as /mnt/d. |
 | **ANTHROPIC_BASE_URL** | https://api.anthropic.com | HTTPS base URL for Claude usage lookup. |
 | **CDASH_AUTH** | none | Comma-separated guard chain: none, bearer, password, trusted-proxy, cf-access. Every configured guard must pass. |
