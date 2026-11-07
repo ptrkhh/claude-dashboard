@@ -8,6 +8,7 @@ pub mod pins;
 pub mod browse;
 pub mod validate;
 pub mod term;
+pub mod browser;
 pub mod spawn;
 pub mod external;
 pub mod sessions;
