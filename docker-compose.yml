@@ -1,3 +1,5 @@
+name: cdash
+
 services:
   tools:
     build: .
