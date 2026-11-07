@@ -405,10 +405,20 @@ pub(crate) mod tests {
         let mut cfg = cfg_for(tempdir("rebind"));
         cfg.port = addr.port();
         b.stop().await;
-        // The old listener must be gone, not just the accept loop parked.
-        tokio::net::TcpListener::bind(addr)
-            .await
-            .expect("port must be rebindable after stop");
+        // The old listener must be gone, not just the accept loop parked. A
+        // parallel test's own socket can briefly hold the same port number, so
+        // AddrInUse is retried; a listener that was never released stays in use
+        // for the whole budget and still fails.
+        let mut last = None;
+        for _ in 0..100 {
+            match tokio::net::TcpListener::bind(addr).await {
+                Ok(_) => return,
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => last = Some(e),
+                Err(e) => panic!("rebind failed: {e}"),
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("port must be rebindable after stop: {last:?}");
     }
 
     /// `reqwest` used to be absent from this crate, which is why these helpers
