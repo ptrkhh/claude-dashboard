@@ -4,7 +4,7 @@
 //! Nothing the browser or the phone sends may reach the log or a close reason:
 //! only the fixed categories below.
 
-use super::browser::{browser_ws_url, Viewport};
+use super::browser::{browser_ws_url, char_events, clamp_point, key_events, parse_phone, PhoneMsg, Viewport};
 use super::cdp::{page_order, Cdp, Event};
 use super::ctx::Ctx;
 use super::term::{send_or_drop, PING_EVERY};
@@ -26,9 +26,12 @@ struct Tab {
 }
 
 /// The tab being streamed: its target id and the CDP session attached to it.
+/// `viewport` is the page size of the last frame relayed to the phone; input
+/// is dropped until there is one, and it dies with the view.
 struct View {
     target: String,
     session: String,
+    viewport: Option<Viewport>,
 }
 
 enum Exit {
@@ -108,7 +111,7 @@ async fn start_view(cdp: &Cdp, target: &str) -> Result<View, String> {
     let session = r["sessionId"].as_str().ok_or("protocol")?.to_string();
     cdp.call("Page.enable", json!({}), Some(&session)).await?;
     cdp.call("Page.startScreencast", json!({"format": "jpeg", "quality": 60, "maxWidth": 1280}), Some(&session)).await?;
-    Ok(View { target: target.to_string(), session })
+    Ok(View { target: target.to_string(), session, viewport: None })
 }
 
 /// Best effort and bounded: the browser, its tab and Playwright stay untouched.
@@ -120,48 +123,140 @@ async fn stop_view(cdp: &Cdp, view: &View) {
     .await;
 }
 
-/// Metadata for the phone, copied from CDP; `None` unless the page size is
-/// positive and finite and the other two fields are finite.
-fn frame_meta(m: &Value) -> Option<Value> {
+/// The page size and the metadata message for the phone, copied from CDP;
+/// `None` unless the page size is positive and finite and the other two fields
+/// are finite.
+fn frame_meta(m: &Value) -> Option<(Viewport, Value)> {
     let n = |k: &str| m[k].as_f64().filter(|f| f.is_finite());
     let (w, h) = (n("deviceWidth")?, n("deviceHeight")?);
-    Viewport::new(w, h)?;
-    Some(json!({"frame": {
-        "deviceWidth": w, "deviceHeight": h, "offsetTop": n("offsetTop")?, "pageScaleFactor": n("pageScaleFactor")?}}))
+    let vp = Viewport::new(w, h)?;
+    Some((vp, json!({"frame": {
+        "deviceWidth": w, "deviceHeight": h, "offsetTop": n("offsetTop")?, "pageScaleFactor": n("pageScaleFactor")?}})))
 }
 
 /// Metadata text, then the JPEG, then the ack, so a slow link lowers the frame
 /// rate instead of queueing frames. A frame that cannot be shown is still
 /// acked or the browser stops sending.
-async fn relay_frame(cdp: &Cdp, ws: &mut WebSocket, e: &Event) -> Option<Exit> {
+async fn relay_frame(cdp: &Cdp, ws: &mut WebSocket, view: &mut View, e: &Event) -> Option<Exit> {
     let p = &e.params;
     let jpeg = p["data"].as_str().and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok());
-    if let (Some(meta), Some(jpeg)) = (frame_meta(&p["metadata"]), jpeg) {
+    if let (Some((vp, meta)), Some(jpeg)) = (frame_meta(&p["metadata"]), jpeg) {
         if !send_or_drop(ws, Message::Text(meta.to_string().into())).await
             || !send_or_drop(ws, Message::Binary(jpeg.into())).await
         {
             return Some(Exit::Failed("send"));
         }
+        view.viewport = Some(vp);
     }
     let ack = p["sessionId"].as_u64()?;
     cdp.call("Page.screencastFrameAck", json!({"sessionId": ack}), e.session.as_deref()).await.err().map(|e| failed(&e))
 }
 
-async fn on_event(cdp: &Cdp, ws: &mut WebSocket, tabs: &mut Vec<Tab>, view: &Option<View>, e: Event) -> Option<Exit> {
+async fn on_event(cdp: &Cdp, ws: &mut WebSocket, tabs: &mut Vec<Tab>, view: &mut Option<View>, e: Event) -> Option<Exit> {
     match e.method.as_str() {
         "Page.screencastFrame" => {
             // A frame from a session that is no longer the viewed one is dropped.
-            if view.as_ref().map(|v| v.session.as_str()) != e.session.as_deref() {
-                return None;
-            }
-            relay_frame(cdp, ws, &e).await
+            let v = view.as_mut().filter(|v| Some(v.session.as_str()) == e.session.as_deref())?;
+            relay_frame(cdp, ws, v, &e).await
         }
         "Target.targetCreated" | "Target.targetInfoChanged" => {
             upsert(tabs, tab_of(&e.params["targetInfo"])?);
             (!send_or_drop(ws, tabs_msg(tabs, view.as_ref())).await).then_some(Exit::Failed("send"))
         }
+        "Target.targetDestroyed" => {
+            let id = e.params["targetId"].as_str()?;
+            let known = tabs.len();
+            tabs.retain(|t| t.id != id);
+            if tabs.len() == known {
+                return None; // not a page: nothing to show
+            }
+            // The viewed tab's session died with it: no stop, no detach.
+            if view.as_ref().is_some_and(|v| v.target == id) {
+                *view = None;
+            }
+            (!send_or_drop(ws, tabs_msg(tabs, view.as_ref())).await).then_some(Exit::Failed("send"))
+        }
         _ => None,
     }
+}
+
+/// Leave the old tab (if any) and stream `id`. Input stays off until the new
+/// tab's first frame, because the viewport went with the old view.
+async fn switch_tab(cdp: &Cdp, ws: &mut WebSocket, tabs: &[Tab], view: &mut Option<View>, id: &str) -> Option<Exit> {
+    if !tabs.iter().any(|t| t.id == id) || view.as_ref().is_some_and(|v| v.target == id) {
+        return None;
+    }
+    if let Some(old) = view.take() {
+        stop_view(cdp, &old).await;
+    }
+    match start_view(cdp, id).await {
+        Ok(v) => *view = Some(v),
+        Err(e) => return Some(failed(&e)),
+    }
+    (!send_or_drop(ws, tabs_msg(tabs, view.as_ref())).await).then_some(Exit::Failed("send"))
+}
+
+async fn back(cdp: &Cdp, session: Option<&str>) -> Result<(), String> {
+    let h = cdp.call("Page.getNavigationHistory", json!({}), session).await?;
+    let previous = (h["currentIndex"].as_u64().and_then(|i| i.checked_sub(1)))
+        .and_then(|i| h["entries"][i as usize]["id"].as_u64());
+    if let Some(entry) = previous {
+        cdp.call("Page.navigateToHistoryEntry", json!({"entryId": entry}), session).await?;
+    }
+    Ok(())
+}
+
+/// Points are clamped to the page; text is one key press per character, never
+/// one insert, so one-box-per-digit fields fill.
+async fn send_input(cdp: &Cdp, session: Option<&str>, vp: &Viewport, msg: PhoneMsg) -> Result<(), String> {
+    let mouse = |p: Value| cdp.call("Input.dispatchMouseEvent", p, session);
+    let key = |p: Value| cdp.call("Input.dispatchKeyEvent", p, session);
+    match msg {
+        PhoneMsg::Tap(x, y) => {
+            let (x, y) = clamp_point(x, y, vp);
+            mouse(json!({"type": "mouseMoved", "x": x, "y": y})).await?;
+            for kind in ["mousePressed", "mouseReleased"] {
+                mouse(json!({"type": kind, "x": x, "y": y, "button": "left", "clickCount": 1})).await?;
+            }
+        }
+        PhoneMsg::Scroll { x, y, dx, dy } => {
+            let (x, y) = clamp_point(x, y, vp);
+            mouse(json!({"type": "mouseWheel", "x": x, "y": y, "deltaX": dx, "deltaY": dy})).await?;
+        }
+        PhoneMsg::Text(t) => {
+            for c in t.chars() {
+                for ev in char_events(c) {
+                    key(ev).await?;
+                }
+            }
+        }
+        PhoneMsg::Key(k) => {
+            for ev in key_events(k).unwrap_or_default() {
+                key(ev).await?;
+            }
+        }
+        PhoneMsg::Tab(_) | PhoneMsg::Back | PhoneMsg::Reload => {}
+    }
+    Ok(())
+}
+
+async fn on_phone(cdp: &Cdp, ws: &mut WebSocket, tabs: &[Tab], view: &mut Option<View>, msg: PhoneMsg) -> Option<Exit> {
+    if let PhoneMsg::Tab(id) = &msg {
+        return switch_tab(cdp, ws, tabs, view, id).await;
+    }
+    // With no tab, navigation and input have nowhere to go.
+    let v = view.as_ref()?;
+    let session = Some(v.session.as_str());
+    let done = match msg {
+        PhoneMsg::Back => back(cdp, session).await,
+        PhoneMsg::Reload => cdp.call("Page.reload", json!({}), session).await.map(drop),
+        // Input needs the page size of a frame the phone has been shown.
+        input => match &v.viewport {
+            Some(vp) => send_input(cdp, session, vp, input).await,
+            None => Ok(()),
+        },
+    };
+    done.err().map(|e| failed(&e))
 }
 
 async fn pump(
@@ -191,8 +286,14 @@ async fn pump(
             },
             msg = ws.recv() => {
                 heard = true;
-                if matches!(msg, Some(Ok(Message::Close(_))) | Some(Err(_)) | None) {
-                    return Exit::Phone;
+                match msg {
+                    Some(Ok(Message::Text(t))) => {
+                        if let Some(m) = parse_phone(t.as_str()) {
+                            if let Some(exit) = on_phone(cdp, ws, tabs, view, m).await { return exit }
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return Exit::Phone,
+                    Some(Ok(_)) => {}
                 }
             }
         }
@@ -607,5 +708,219 @@ mod tests {
         assert_eq!(text(&mut ws).await, json!({"tabs": [{"id": "P9", "title": "T", "origin": "https://z.example"}], "active": null}));
         let calls = drain_calls(&mut r.edge, Duration::from_millis(300)).await;
         assert!(calls.iter().all(|(m, ..)| m != "Target.attachToTarget" && m != "Page.startScreencast"), "{calls:?}");
+    }
+
+    async fn send(ws: &mut Ws, v: Value) {
+        ws.send(WsMsg::text(v.to_string())).await.unwrap();
+    }
+
+    type Call = (String, Value, Option<String>);
+
+    fn only<'a>(calls: &'a [Call], method: &str) -> Vec<&'a Call> {
+        calls.iter().filter(|(m, ..)| m == method).collect()
+    }
+
+    const SETTLE: Duration = Duration::from_millis(250);
+
+    /// Phone connected, first frame (1000x600 on P1) shown, setup calls drained.
+    async fn viewing(tag: &str, pages: &[(&str, &str, &str)]) -> Option<(Rig, Ws)> {
+        let mut r = rig(tag, pages).await?;
+        let mut ws = r.open().await;
+        text(&mut ws).await;
+        call_until(&mut r.edge, "Page.startScreencast").await;
+        r.edge.events.send(frame_event("S-P1", "SlBFRw==", 1, 1000.0, 600.0)).unwrap();
+        text(&mut ws).await;
+        next_msg(&mut ws).await;
+        drain_calls(&mut r.edge, SETTLE).await;
+        Some((r, ws))
+    }
+
+    #[tokio::test]
+    async fn input_before_first_frame_is_dropped() {
+        let Some(mut r) = rig("noframe", &[("P1", "https://a.example/", "A")]).await else { return };
+        let mut ws = r.open().await;
+        text(&mut ws).await;
+        call_until(&mut r.edge, "Page.startScreencast").await;
+        send(&mut ws, json!({"tap": [5, 5]})).await;
+        let early = drain_calls(&mut r.edge, SETTLE).await;
+        assert!(only(&early, "Input.dispatchMouseEvent").is_empty(), "{early:?}");
+        r.edge.events.send(frame_event("S-P1", "SlBFRw==", 1, 1000.0, 600.0)).unwrap();
+        text(&mut ws).await;
+        next_msg(&mut ws).await;
+        send(&mut ws, json!({"tap": [2000, -1]})).await;
+        let calls = drain_calls(&mut r.edge, SETTLE).await;
+        let mouse = only(&calls, "Input.dispatchMouseEvent");
+        let kinds: Vec<_> = mouse.iter().map(|c| c.1["type"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["mouseMoved", "mousePressed", "mouseReleased"]);
+        for c in &mouse {
+            assert_eq!((c.1["x"].as_f64(), c.1["y"].as_f64(), c.2.as_deref()), (Some(1000.0), Some(0.0), Some("S-P1")));
+        }
+        assert_eq!((mouse[1].1["button"].as_str(), mouse[1].1["clickCount"].as_u64()), (Some("left"), Some(1)));
+    }
+
+    #[tokio::test]
+    async fn scroll_becomes_a_clamped_wheel_event() {
+        let Some((mut r, mut ws)) = viewing("scroll", &[("P1", "https://a.example/", "A")]).await else { return };
+        send(&mut ws, json!({"scroll": [-3, 700, 4, -25]})).await;
+        let calls = drain_calls(&mut r.edge, SETTLE).await;
+        let wheel = only(&calls, "Input.dispatchMouseEvent");
+        assert_eq!(wheel.len(), 1);
+        let p = &wheel[0].1;
+        assert_eq!((p["type"].as_str(), p["x"].as_f64(), p["y"].as_f64(), p["deltaX"].as_f64(), p["deltaY"].as_f64()), (Some("mouseWheel"), Some(0.0), Some(600.0), Some(4.0), Some(-25.0)));
+    }
+
+    #[tokio::test]
+    async fn text_becomes_key_presses() {
+        let Some((mut r, mut ws)) = viewing("text", &[("P1", "https://a.example/", "A")]).await else { return };
+        send(&mut ws, json!({"text": "a$"})).await;
+        let calls = drain_calls(&mut r.edge, SETTLE).await;
+        let keys: Vec<_> = only(&calls, "Input.dispatchKeyEvent").iter().map(|c| (c.1["type"].as_str().unwrap().to_string(), c.1["text"].as_str().map(str::to_string), c.1["windowsVirtualKeyCode"].as_u64())).collect();
+        assert_eq!(keys, vec![
+            ("keyDown".to_string(), Some("a".to_string()), Some(65)), ("keyUp".to_string(), None, Some(65)),
+            ("keyDown".to_string(), Some("$".to_string()), None), ("keyUp".to_string(), None, None),
+        ]);
+        assert!(calls.iter().all(|(m, ..)| m != "Input.insertText"), "text is never one insert");
+    }
+
+    #[tokio::test]
+    async fn backspace_has_vk_8() {
+        let Some((mut r, mut ws)) = viewing("bksp", &[("P1", "https://a.example/", "A")]).await else { return };
+        send(&mut ws, json!({"key": "Backspace"})).await;
+        let calls = drain_calls(&mut r.edge, SETTLE).await;
+        let keys = only(&calls, "Input.dispatchKeyEvent");
+        let seen: Vec<_> = keys.iter().map(|c| (c.1["type"].as_str().unwrap(), c.1["windowsVirtualKeyCode"].as_u64())).collect();
+        assert_eq!(seen, [("rawKeyDown", Some(8)), ("keyUp", Some(8))]);
+    }
+
+    #[tokio::test]
+    async fn tab_switch_and_close() {
+        let Some((mut r, mut ws)) = viewing("tabs", &[("P1", "https://a.example/", "A"), ("P2", "https://b.example/", "B")]).await else { return };
+        send(&mut ws, json!({"tab": "nope"})).await;
+        send(&mut ws, json!({"tab": "P1"})).await;
+        let none = drain_calls(&mut r.edge, SETTLE).await;
+        assert!(none.is_empty(), "an unlisted tab and the tab already shown make no calls: {none:?}");
+
+        send(&mut ws, json!({"tab": "P2"})).await;
+        let tabs = text(&mut ws).await;
+        assert_eq!(tabs["active"], "P2");
+        let calls = drain_calls(&mut r.edge, SETTLE).await;
+        let attach = only(&calls, "Target.attachToTarget");
+        assert_eq!(attach.len(), 1);
+        assert_eq!(attach[0].1["targetId"], "P2");
+        assert_eq!(only(&calls, "Page.stopScreencast")[0].2.as_deref(), Some("S-P1"), "the old view is stopped");
+
+        r.edge.events.send(page_event("Target.targetCreated", "P3", "https://c.example/")).unwrap();
+        let tabs = text(&mut ws).await;
+        assert_eq!((tabs["active"].clone(), tabs["tabs"].as_array().unwrap().len()), (json!("P2"), 3));
+
+        r.edge.events.send(frame_event("S-P2", "SlBFRw==", 2, 500.0, 300.0)).unwrap();
+        text(&mut ws).await;
+        next_msg(&mut ws).await;
+        r.edge.events.send(json!({"method": "Target.targetDestroyed", "params": {"targetId": "P2"}})).unwrap();
+        let tabs = text(&mut ws).await;
+        assert_eq!(tabs["active"], Value::Null);
+        assert_eq!(tabs["tabs"].as_array().unwrap().len(), 2);
+        drain_calls(&mut r.edge, SETTLE).await;
+        send(&mut ws, json!({"text": "x"})).await;
+        let after = drain_calls(&mut r.edge, SETTLE).await;
+        assert!(after.is_empty(), "no input once the viewed tab is gone: {after:?}");
+    }
+
+    #[tokio::test]
+    async fn back_uses_the_previous_entry_id() {
+        let Some((mut r, mut ws)) = viewing("back", &[("P1", "https://a.example/", "A")]).await else { return };
+        send(&mut ws, json!({"nav": "back"})).await;
+        send(&mut ws, json!({"nav": "reload"})).await;
+        let calls = drain_calls(&mut r.edge, SETTLE).await;
+        let nav = only(&calls, "Page.navigateToHistoryEntry");
+        assert_eq!((nav.len(), nav[0].1["entryId"].as_u64(), nav[0].2.as_deref()), (1, Some(10), Some("S-P1")));
+        assert_eq!(only(&calls, "Page.reload")[0].2.as_deref(), Some("S-P1"));
+    }
+
+    #[tokio::test]
+    async fn back_at_the_first_entry_does_nothing() {
+        let Some((mut r, mut ws)) = viewing("back0", &[("P1", "https://a.example/", "A")]).await else { return };
+        r.edge.replies.lock().unwrap().insert(
+            "Page.getNavigationHistory".into(),
+            Some(json!({"result": {"currentIndex": 0, "entries": [{"id": 10}]}})),
+        );
+        send(&mut ws, json!({"nav": "back"})).await;
+        let calls = drain_calls(&mut r.edge, SETTLE).await;
+        assert_eq!(only(&calls, "Page.getNavigationHistory").len(), 1, "Back looked at the history: {calls:?}");
+        assert!(only(&calls, "Page.navigateToHistoryEntry").is_empty(), "{calls:?}");
+    }
+
+    #[tokio::test]
+    async fn old_frames_cannot_enable_input_after_tab_switch() {
+        let Some((mut r, mut ws)) = viewing("stale", &[("P1", "https://a.example/", "A"), ("P2", "https://b.example/", "B")]).await else { return };
+        send(&mut ws, json!({"tab": "P2"})).await;
+        text(&mut ws).await;
+        drain_calls(&mut r.edge, SETTLE).await;
+
+        // A queued frame from the old session, then input: nothing.
+        r.edge.events.send(frame_event("S-P1", "T0xE", 50, 1000.0, 600.0)).unwrap();
+        tokio::time::sleep(SETTLE).await;
+        send(&mut ws, json!({"tap": [5, 5]})).await;
+        // A frame for the new tab with an unusable size does not enable input either.
+        r.edge.events.send(frame_event("S-P2", "QkFE", 51, 0.0, 300.0)).unwrap();
+        tokio::time::sleep(SETTLE).await;
+        send(&mut ws, json!({"text": "x"})).await;
+        let calls = drain_calls(&mut r.edge, SETTLE).await;
+        assert!(calls.iter().all(|(m, ..)| !m.starts_with("Input.")), "input reached the browser: {calls:?}");
+        assert!(only(&calls, "Page.screencastFrameAck").iter().all(|c| c.2.as_deref() == Some("S-P2")), "the old session's frame is not acked");
+
+        // Only a valid frame from the new tab sets the viewport, and clamping uses it.
+        r.edge.events.send(frame_event("S-P2", "SlBFRw==", 52, 500.0, 300.0)).unwrap();
+        text(&mut ws).await;
+        next_msg(&mut ws).await;
+        send(&mut ws, json!({"tap": [9999, 9999]})).await;
+        let calls = drain_calls(&mut r.edge, SETTLE).await;
+        let mouse = only(&calls, "Input.dispatchMouseEvent");
+        assert_eq!(mouse.len(), 3);
+        for c in mouse {
+            assert_eq!((c.1["x"].as_f64(), c.1["y"].as_f64(), c.2.as_deref()), (Some(500.0), Some(300.0), Some("S-P2")));
+        }
+    }
+
+    #[tokio::test]
+    async fn closed_tab_can_be_replaced() {
+        let Some((mut r, mut ws)) = viewing("closed", &[("P1", "https://a.example/", "A"), ("P2", "https://b.example/", "B")]).await else { return };
+        r.edge.events.send(json!({"method": "Target.targetDestroyed", "params": {"targetId": "P1"}})).unwrap();
+        assert_eq!(text(&mut ws).await["active"], Value::Null);
+        drain_calls(&mut r.edge, SETTLE).await;
+        send(&mut ws, json!({"nav": "back"})).await;
+        send(&mut ws, json!({"nav": "reload"})).await;
+        let idle = drain_calls(&mut r.edge, SETTLE).await;
+        assert!(idle.is_empty(), "back/reload with no active tab: {idle:?}");
+
+        send(&mut ws, json!({"tab": "P2"})).await;
+        assert_eq!(text(&mut ws).await["active"], "P2");
+        let calls = drain_calls(&mut r.edge, SETTLE).await;
+        assert_eq!(only(&calls, "Target.attachToTarget")[0].1["targetId"], "P2");
+        assert!(only(&calls, "Page.stopScreencast").is_empty() && only(&calls, "Target.detachFromTarget").is_empty(), "the destroyed session is not called: {calls:?}");
+    }
+
+    #[tokio::test]
+    async fn non_page_targets_do_not_disturb_the_list() {
+        let Some((r, mut ws)) = viewing("nonpage", &[("P1", "https://a.example/", "A")]).await else { return };
+        r.edge.events.send(json!({"method": "Target.targetCreated", "params": {"targetInfo": {"targetId": "W1", "type": "service_worker", "url": "https://a.example/sw.js"}}})).unwrap();
+        r.edge.events.send(json!({"method": "Target.targetDestroyed", "params": {"targetId": "W1"}})).unwrap();
+        r.edge.events.send(page_event("Target.targetInfoChanged", "P1", "https://a.example/next")).unwrap();
+        let tabs = text(&mut ws).await;
+        assert_eq!(tabs["tabs"].as_array().unwrap().len(), 1, "the first list update is P1's own: {tabs}");
+        assert_eq!(tabs["active"], "P1");
+    }
+
+    #[tokio::test]
+    async fn input_failures_never_expose_canaries() {
+        let Some((r, mut ws)) = viewing("inputfail", &[("P1", "https://a.example/", "A")]).await else { return };
+        r.edge.replies.lock().unwrap().insert(
+            "Input.dispatchKeyEvent".into(),
+            Some(json!({"error": {"code": -32000, "message": "https://secret.example/?URL_CANARY typed-text"}})),
+        );
+        send(&mut ws, json!({"text": "typed-text"})).await;
+        assert_eq!(close_of(&mut ws).await, (1011, "Browser connection failed".to_string()));
+        eventually("failure is logged", || r.log().contains(&format!("browser failed {}: protocol", r.name))).await;
+        r.assert_no_canary();
     }
 }
