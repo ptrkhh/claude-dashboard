@@ -18,3 +18,4 @@ crates/tauri-app/gen/android/
 
 # Output of scripts/build-all.sh
 dist/
+projects/

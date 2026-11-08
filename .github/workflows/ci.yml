@@ -19,6 +19,33 @@ jobs:
       - run: cargo test --all --locked
       - run: cargo clippy --all-targets --locked -- -D warnings -D clippy::disallowed_types
 
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose
+        env:
+          CF_TEAM_DOMAIN: https://example.cloudflareaccess.com
+          CF_AUD: smoke-audience
+          TUNNEL_TOKEN: smoke-token
+        run: docker compose config --quiet
+      - name: Build agent and check project-data exclusion
+        run: |
+          mkdir -p projects
+          printf 'not a build input\n' > projects/context-marker
+          docker build --target build -t rc-dashboard:build-test .
+          docker run --rm --entrypoint /bin/sh rc-dashboard:build-test -ec 'test ! -e /src/projects'
+      - name: Build and test runtime image
+        run: |
+          docker build -t rc-dashboard:ci .
+          bash scripts/test-docker.sh rc-dashboard:ci
+      - name: Rebuild after a source change
+        run: |
+          printf '\n' >> crates/agent/src/main.rs
+          docker build -t rc-dashboard:ci .
+          bash scripts/test-docker.sh rc-dashboard:ci
+
   release-matrix:
     runs-on: ubuntu-latest
     strategy:

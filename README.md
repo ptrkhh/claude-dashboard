@@ -61,17 +61,40 @@ For browser-only use, start the agent on your host and open its local address. F
 
 ## Run in Docker
 
-The image bundles the agent, Claude Code, Codex, OpenCode, and tmux. A second container runs cloudflared, so the dashboard is reachable only through a Cloudflare Tunnel with Cloudflare Access in front.
+The image bundles the agent, Claude Code, Codex, OpenCode, and tmux. A second container runs cloudflared, so the dashboard is reachable only through a Cloudflare Tunnel with Cloudflare Access in front. cloudflared waits for the agent's local healthcheck before starting.
 
 1. Copy `.env.example` to `.env` and fill it in.
-2. In Cloudflare Zero Trust, create a tunnel and a public hostname that points at `http://tools:23274`. Create an Access application for that hostname with a policy that allows you. Put the tunnel token, team domain, and application audience tag in `.env`.
-3. Create the directory named by `PROJECTS_DIR` and put your projects in it (create it yourself so it keeps your user's ownership), then start the stack:
+2. In Cloudflare Zero Trust, create a tunnel and a public hostname that points at `http://tools:23274`. Create an Access application for that hostname with a policy that allows you. Put the tunnel token, team domain, and application audience tag in `.env`. **`CF_TEAM_DOMAIN` must be the full HTTPS issuer URL**, such as `https://example.cloudflareaccess.com`, with no trailing slash. A bare hostname causes the agent to exit with a JWKS fetch error and the container to restart.
+3. Create the directory named by `PROJECTS_DIR` and put your projects in it, then start the stack:
 
        docker compose up -d --build
 
+   Projects appear at `/home/node/projects` in the container. On Linux, the directory and project files must be writable by the container's `node` user (UID/GID 1000); creating a directory as another host user does not automatically grant that access.
+
 4. Sign in once. In the launcher, choose **Terminal** in the Model menu, open the `projects` folder and pick a directory in it, and tap **Launch**. Open the new card's **Terminal** button and run `claude`, `codex`, or `opencode`. Claude Code must be signed in with an account that supports Remote Control.
 
-Sessions run in tmux inside the container, so `docker restart`, `docker compose down`, and image rebuilds end them. Project files stay on the host. Cloudflare Access is the only guard: do not publish port 23274.
+The container starts with fresh CLI configuration. Host logins, plugins, trust lists, and permission settings are not imported. Configure each CLI inside the container, and set Git's `user.name` and `user.email` before committing. Dashboard-launched Claude Code uses `--dangerously-skip-permissions`; Codex uses its own container configuration. The `home` volume preserves container logins, settings, and session history across rebuilds and `docker compose down`. `docker compose down -v` deletes that volume and its contents.
+
+The agent runs as `node` with passwordless `sudo`, so project dependencies can be installed from the remote terminal. Elevated commands can modify mounted host files. System packages installed interactively survive a container restart, but disappear when the container is removed or recreated; add lasting dependencies to the Dockerfile. The image also disables Git's ownership check for repositories, so mount repositories you trust. This does not grant filesystem write permission.
+
+Sessions run in tmux inside the container, so `docker restart`, `docker compose down`, and container replacement end them. Project files stay on the host. Cloudflare Access is the only guard: do not publish port 23274.
+
+CLI versions have exact defaults in the Dockerfile's `CLAUDE_CODE_VERSION`, `CODEX_VERSION`, and `OPENCODE_VERSION` build arguments. Override a version with `docker compose build --build-arg CODEX_VERSION=<version>`, then run `docker compose up -d`. Keep OpenCode on v2. BuildKit caches Cargo downloads and compiled dependencies for subsequent builds; the first build still compiles them.
+
+Use a separate tunnel for each independent dashboard stack. Cloudflare supports multiple connectors as replicas, but they must serve the same dashboard deployment; connectors pointing at independent stacks can send users to different code and session state. The default Compose project name is `cdash`; `-p` and `COMPOSE_PROJECT_NAME` can override it.
+
+Before changing a project name, stop the old stack explicitly, for example `docker compose -p old-project down`. Do not add `-v` if you want to retain its home volume. A new project name normally selects a new, empty home volume. To reuse the old one after stopping the old stack, save an override such as `compose.home.yml`:
+
+```yaml
+volumes:
+  home:
+    external: true
+    name: old-project_home
+```
+
+Replace `old-project_home` with the existing home volume's name, then start the new project with `docker compose -p new-project -f docker-compose.yml -f compose.home.yml up -d --build`. Include the override in subsequent Compose commands. Never run independent dashboard stacks against the same home volume.
+
+To check a built image without CLI credentials or published ports, run `bash scripts/test-docker.sh rc-dashboard:local`.
 
 ## Keep it private
 

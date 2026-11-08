@@ -12,16 +12,18 @@ services:
       CDASH_CF_TEAM_DOMAIN: ${CF_TEAM_DOMAIN:?set CF_TEAM_DOMAIN in .env}
       CDASH_CF_AUD: ${CF_AUD:?set CF_AUD in .env}
     volumes:
-      # One volume holds every CLI login and ~/.claude.json.
+      # One volume holds every CLI login, settings, and ~/.claude.json.
       - home:/home/node
       - ${PROJECTS_DIR:-./projects}:/home/node/projects
     networks: [tunnel]
 
   cloudflared:
-    image: cloudflare/cloudflared:latest
+    image: cloudflare/cloudflared:2026.10.7
     restart: unless-stopped
     command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN:?set TUNNEL_TOKEN in .env}
-    depends_on: [tools]
+    depends_on:
+      tools:
+        condition: service_healthy
     networks: [tunnel]
 
 networks:
