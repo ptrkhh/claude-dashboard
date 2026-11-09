@@ -17,7 +17,7 @@ RUN --mount=type=cache,target=${CARGO_HOME}/registry \
 FROM node:22-bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tmux git curl ca-certificates sudo unzip \
+    && apt-get install -y --no-install-recommends tmux git curl ca-certificates sudo unzip procps \
     && printf '%s\n' 'node ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/node \
     && chmod 0440 /etc/sudoers.d/node \
     && visudo -cf /etc/sudoers \
