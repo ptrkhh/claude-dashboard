@@ -5,11 +5,11 @@ import { mkdtemp, mkdir, writeFile, readFile, rm, stat, rename } from 'node:fs/p
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-async function fixture(t, failure = '', platform = 'linux') {
+async function fixture(t, failure = '', platform = 'linux', resuming = false) {
   const dir = await mkdtemp(join(tmpdir(), 'cdash-native-test-'));
   const state = join(dir, 'state.json'), wire = join(dir, 'wire.jsonl');
   await mkdir(join(dir,'controls','cdash-test'),{recursive:true});
-  await writeFile(state, JSON.stringify({ dir, native_terminal: true, ...(failure.startsWith('remote-once') ? { sid: '01234567-1234-1234-1234-0123456789ab', rc_unavailable: true } : {}), model: 'gpt-check', effort: 'low', display_name: '[Codex] project · elephant' }));
+  await writeFile(state, JSON.stringify({ dir, native_terminal: true, ...(resuming || failure.startsWith('remote-once') ? { sid: '01234567-1234-1234-1234-0123456789ab', rc_unavailable: true } : {}), model: 'gpt-check', effort: 'low', display_name: '[Codex] project · elephant' }));
   await writeFile(wire, '');
   const header = `#!${process.execPath}
 const fs=require('node:fs');
@@ -240,3 +240,19 @@ for(const exitCode of [0,1]) test(`Remote Control reconnect after exit ${exitCod
   await f.wait(()=>f.child.exitCode!==null);
   await f.wait(async()=> (await f.messages()).filter(m=>m.pid).every(m=>!f.alive(m.pid)));
 });
+
+for (const platform of ['linux', 'android']) for (const resuming of [false, true]) {
+  test('native Codex ' + platform + ' ' + (resuming ? 'resume' : 'start') + ' bypasses approvals and sandbox without saved config', { timeout: 15000 }, async t => {
+    const f = await fixture(t, '', platform, resuming);
+    await f.wait(() => f.output().includes('NATIVE_TUI_READY'));
+    const messages = await f.messages();
+    const method = resuming ? 'thread/resume' : 'thread/start';
+    const params = messages.find(message => message.rpc?.method === method).rpc.params;
+    assert.equal(params.approvalPolicy, 'never');
+    assert.equal(params.sandbox, 'danger-full-access');
+    assert.ok(messages.find(message => message.kind === 'tui').args.includes('--dangerously-bypass-approvals-and-sandbox'));
+    f.child.stdin.write('quit\n');
+    await f.wait(() => f.child.exitCode !== null);
+    assert.equal(f.child.exitCode, 0);
+  });
+}

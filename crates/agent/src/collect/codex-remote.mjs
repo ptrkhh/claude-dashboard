@@ -365,6 +365,7 @@ async function worker() {
   const result = await codex.call(state.sid ? 'thread/resume' : 'thread/start', {
     ...(state.sid ? { threadId: state.sid, excludeTurns: true,
       ...(state.native_terminal ? { initialTurnsPage: { limit: 1, itemsView: 'summary' } } : {}) } : {}), cwd: state.dir,
+    approvalPolicy: 'never', sandbox: 'danger-full-access',
     ...(!state.native_terminal ? { ...(state.model ? { model: state.model } : {}), config: { model_reasoning_effort: state.effort } } : {}),
   });
   state.sid = result.thread.id; state.working = Boolean(codex.turnId);
@@ -510,6 +511,7 @@ async function nativeLauncher(statePath, state, script) {
   if (!await control.ready()) throw Error('Codex is signed out; run codex login on the agent host.');
   const result = await control.call(state.sid ? 'thread/resume' : 'thread/start', {
     ...(state.sid ? { threadId: state.sid, excludeTurns: true, initialTurnsPage: { limit: 1, itemsView: 'summary' } } : {}), cwd: state.dir,
+    approvalPolicy: 'never', sandbox: 'danger-full-access',
     ...(state.model ? { model: state.model } : {}), config: { model_reasoning_effort: state.effort },
   });
   state.sid = result.thread.id;
@@ -520,7 +522,7 @@ async function nativeLauncher(statePath, state, script) {
   await control.call('thread/name/set', { threadId: state.sid, name: state.display_name });
   await atomic(statePath, JSON.stringify(state));
   await saveNative();
-  tui = spawn('codex', ['resume', '--remote', loopback ? endpoint : `unix://${socket}`, ...(loopback ? ['--remote-auth-token-env', 'CDASH_CODEX_TOKEN'] : []), '-c', 'tui.fullscreen_transcript=true', '-c', 'tui.alternate_screen="always"', state.sid], {
+  tui = spawn('codex', ['resume', '--dangerously-bypass-approvals-and-sandbox', '--remote', loopback ? endpoint : `unix://${socket}`, ...(loopback ? ['--remote-auth-token-env', 'CDASH_CODEX_TOKEN'] : []), '-c', 'tui.fullscreen_transcript=true', '-c', 'tui.alternate_screen="always"', state.sid], {
     cwd: state.dir, env: { ...codexEnv(), CDASH_CODEX_TOKEN: process.env.CDASH_CODEX_TOKEN }, stdio: 'inherit',
   });
   tui.on('error', fatal);

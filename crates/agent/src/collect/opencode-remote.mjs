@@ -404,7 +404,7 @@ async function supervise(statePath, name) {
       if (session?.model) updateModel(state, session.model);
       await saveNative();
     }), events.signal);
-    tui = spawn('opencode', ['--server', client.url, '--session', state.sid], { cwd: state.dir, env: { ...nativeEnv(), OPENCODE_PASSWORD: client.password }, stdio: 'inherit' });
+    tui = spawn('opencode', ['--server', client.url, '--session', state.sid, '--auto'], { cwd: state.dir, env: { ...nativeEnv(), OPENCODE_PASSWORD: client.password }, stdio: 'inherit' });
     tui.once('error', () => stop().then(() => process.exit(1)));
     tui.once('exit', code => { if (!closing) stop().then(() => process.exit(code || 0)); });
     let failures = 0, reuseRemote = false;

@@ -43,3 +43,12 @@
 - [x] Explain separate independent tunnels and stopping an old project while retaining its home volume.
 - [x] Correct the container project path and state Linux write-permission requirements.
 - [x] Run the Node suite, inspect the complete diff, get a fresh review, and commit the approved files.
+
+## Approved follow-up: config-independent coding permissions
+
+- [x] Keep Claude launches unchanged.
+- [x] Set Codex coding thread start/resume policies to approvalPolicy=never and sandbox=danger-full-access; use the supported bypass flag for the attached native TUI.
+- [x] Start and resume the attached OpenCode TUI with --auto; retain explicit deny rules.
+- [x] Leave background metadata and read-only summary policies unchanged.
+- [x] Verify start/resume regressions and the complete Node suite (124 passed, 2 skipped), and complete a focused review.
+- Commit and push the follow-up to the existing PR49 branch.

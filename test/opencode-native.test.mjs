@@ -104,6 +104,7 @@ else {
     assert.ok(tui, stderr);
     assert.equal(rows.filter(row => row.kind === 'server').length, 1);
     assert.equal(tui.args[tui.args.indexOf('--session')+1], 'ses_fixture');
+    assert.ok(tui.args.includes('--auto'), 'fresh coding sessions must auto-approve without saved config');
     assert.equal(tui.hasPassword, true);
     assert.equal(tui.leaked, false);
     assert.equal(rows.find(row => row.kind === 'server').leaked, false);
@@ -147,6 +148,7 @@ else {
     const resumed = rows.filter(row => row.kind === 'tui').at(-1);
     assert.equal(rows.filter(row => row.kind === 'tui').length, 2);
     assert.equal(resumed.args[resumed.args.indexOf('--session') + 1], 'ses_fixture');
+    assert.ok(resumed.args.includes('--auto'), 'resumed coding sessions must also auto-approve');
     assert.equal(rows.filter(row => row.kind === 'api' && row.path === '/api/session' && row.method === 'POST').length, 1, 'resume must not create another session');
     assert.equal(rows.filter(row => row.kind === 'api' && row.path === '/api/session/ses_fixture/model').length, 0, 'unchanged model must not be reselected');
   } finally {

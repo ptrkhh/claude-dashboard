@@ -73,7 +73,7 @@ The image bundles the agent, Claude Code, Codex, OpenCode, and tmux. A second co
 
 4. Sign in once. In the launcher, choose **Terminal** in the Model menu, open the `projects` folder and pick a directory in it, and tap **Launch**. Open the new card's **Terminal** button and run `claude`, `codex`, or `opencode`. Claude Code must be signed in with an account that supports Remote Control.
 
-The container starts with fresh CLI configuration. Host logins, plugins, trust lists, and permission settings are not imported. Configure each CLI inside the container, and set Git's `user.name` and `user.email` before committing. Dashboard-launched Claude Code uses `--dangerously-skip-permissions`; Codex uses its own container configuration. The `home` volume preserves container logins, settings, and session history across rebuilds and `docker compose down`. `docker compose down -v` deletes that volume and its contents.
+The container starts with fresh CLI configuration. Host logins, plugins, trust lists, and permission settings are not imported. Configure each CLI inside the container, and set Git's `user.name` and `user.email` before committing. Dashboard-launched coding sessions set permissions on launch and resume: Claude Code uses `--dangerously-skip-permissions`, Codex bypasses approvals and sandboxing, and OpenCode uses `--auto` (explicit deny rules still apply). No saved permission configuration is needed for these defaults. The `home` volume preserves container logins, settings, and session history across rebuilds and `docker compose down`. `docker compose down -v` deletes that volume and its contents.
 
 The agent runs as `node` with passwordless `sudo`, so project dependencies can be installed from the remote terminal. Elevated commands can modify mounted host files. System packages installed interactively survive a container restart, but disappear when the container is removed or recreated; add lasting dependencies to the Dockerfile. The image also disables Git's ownership check for repositories, so mount repositories you trust. This does not grant filesystem write permission.
 
@@ -161,7 +161,7 @@ Only OpenCode sessions created by this dashboard appear in its resumable history
 
 ### Access and security settings
 
-The agent defaults to **127.0.0.1** and **CDASH_AUTH=none**. If you enable network access, configure a guard or put the origin behind a trusted access layer. Claude sessions launch with broad permissions; treat access to the agent as access to your coding session.
+The agent defaults to **127.0.0.1** and **CDASH_AUTH=none**. If you enable network access, configure a guard or put the origin behind a trusted access layer. Coding sessions launch with broad permissions; treat access to the agent as access to your coding session.
 
 The desktop and Android apps’ saved remote profiles currently support **auth: none**. Do not expose those connections to a public network. Android also does not isolate loopback between apps, so other apps with internet access on the phone may be able to reach a loopback agent.
 
