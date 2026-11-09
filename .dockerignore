@@ -1,0 +1,12 @@
+.git
+.env
+.superpowers
+.worktrees
+target
+dist
+node_modules
+docs
+test
+scripts
+crates/tauri-app/gen
+projects/

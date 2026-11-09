@@ -176,6 +176,9 @@ createInterface({input:process.stdin}).on('line',line=>{
   start();
   await waitFor(async () => (await messages()).some(m => m.body?.updates?.some(u => u.event_id === 'second' && u.status === 'processed')));
   const first = await messages();
+  const startPolicy = first.find(m => m.rpc?.method === 'thread/start').rpc.params;
+  assert.equal(startPolicy.approvalPolicy, 'never');
+  assert.equal(startPolicy.sandbox, 'danger-full-access');
   assert.equal(first.some(m => m.credentialLeaked), false);
   assert.equal(first.filter(m => m.rpc?.method === 'turn/start' || m.rpc?.method === 'turn/steer').length, 2);
   assert.ok(first.some(m => m.rpc?.id === 500 && m.rpc.error?.code === -32601));
@@ -234,6 +237,9 @@ createInterface({input:process.stdin}).on('line',line=>{
   await waitFor(async () => (await messages()).slice(before).some(m => m.url?.includes('from_sequence_num=12')));
   const after = (await messages()).slice(before);
   assert.ok(after.some(m => m.rpc?.method === 'thread/resume'));
+  const resumePolicy = after.find(m => m.rpc?.method === 'thread/resume').rpc.params;
+  assert.equal(resumePolicy.approvalPolicy, 'never');
+  assert.equal(resumePolicy.sandbox, 'danger-full-access');
   assert.equal(JSON.parse(await readFile(state, 'utf8')).display_name, '[Codex] project · elephant');
   assert.ok(after.some(m => m.url?.includes('from_sequence_num=12')));
   assert.equal(after.some(m => ['turn/start', 'turn/steer'].includes(m.rpc?.method)), false, 'replayed prompts must not execute again');
@@ -296,6 +302,8 @@ createInterface({input:process.stdin}).on('line',line=>{
   assert.ok(nativeMessages.some(m=>m.body?.events?.some(e=>e.payload.type==='stream_event' && e.payload.event.type==='message_start')),
     'reconnecting during a native turn must restore activity');
   const resume=nativeMessages.find(m=>m.rpc?.method==='thread/resume').rpc.params;
+  assert.equal(resume.approvalPolicy, 'never');
+  assert.equal(resume.sandbox, 'danger-full-access');
   assert.equal(resume.model,undefined,'worker reconnect must preserve native model choices');
   assert.equal(resume.config,undefined,'worker reconnect must preserve native effort choices');
   const caughtUp=nativeMessages.flatMap(m=>m.body?.events||[]).map(e=>e.payload);
