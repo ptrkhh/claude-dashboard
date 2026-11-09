@@ -522,7 +522,7 @@ async function nativeLauncher(statePath, state, script) {
   await control.call('thread/name/set', { threadId: state.sid, name: state.display_name });
   await atomic(statePath, JSON.stringify(state));
   await saveNative();
-  tui = spawn('codex', ['resume', '--dangerously-bypass-approvals-and-sandbox', '--remote', loopback ? endpoint : `unix://${socket}`, ...(loopback ? ['--remote-auth-token-env', 'CDASH_CODEX_TOKEN'] : []), '-c', 'tui.fullscreen_transcript=true', '-c', 'tui.alternate_screen="always"', state.sid], {
+  tui = spawn('codex', ['resume', '--remote', loopback ? endpoint : `unix://${socket}`, ...(loopback ? ['--remote-auth-token-env', 'CDASH_CODEX_TOKEN'] : []), '-c', 'tui.fullscreen_transcript=true', '-c', 'tui.alternate_screen="always"', state.sid], {
     cwd: state.dir, env: { ...codexEnv(), CDASH_CODEX_TOKEN: process.env.CDASH_CODEX_TOKEN }, stdio: 'inherit',
   });
   tui.on('error', fatal);

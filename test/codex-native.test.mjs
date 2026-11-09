@@ -242,7 +242,7 @@ for(const exitCode of [0,1]) test(`Remote Control reconnect after exit ${exitCod
 });
 
 for (const platform of ['linux', 'android']) for (const resuming of [false, true]) {
-  test('native Codex ' + platform + ' ' + (resuming ? 'resume' : 'start') + ' bypasses approvals and sandbox without saved config', { timeout: 15000 }, async t => {
+  test('native Codex ' + platform + ' ' + (resuming ? 'resume' : 'start') + ' sets full access on the thread without saved config', { timeout: 15000 }, async t => {
     const f = await fixture(t, '', platform, resuming);
     await f.wait(() => f.output().includes('NATIVE_TUI_READY'));
     const messages = await f.messages();
@@ -250,7 +250,8 @@ for (const platform of ['linux', 'android']) for (const resuming of [false, true
     const params = messages.find(message => message.rpc?.method === method).rpc.params;
     assert.equal(params.approvalPolicy, 'never');
     assert.equal(params.sandbox, 'danger-full-access');
-    assert.ok(messages.find(message => message.kind === 'tui').args.includes('--dangerously-bypass-approvals-and-sandbox'));
+    // `codex resume --remote` exits with "Permission overrides are not supported" if given a bypass flag.
+    assert.ok(!messages.find(message => message.kind === 'tui').args.includes('--dangerously-bypass-approvals-and-sandbox'));
     f.child.stdin.write('quit\n');
     await f.wait(() => f.child.exitCode !== null);
     assert.equal(f.child.exitCode, 0);
