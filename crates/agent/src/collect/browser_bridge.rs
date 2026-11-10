@@ -100,10 +100,13 @@ fn tabs_msg(tabs: &[Tab], view: Option<&View>) -> Message {
     Message::Text(json!({"tabs": list, "active": view.map(|v| v.target.as_str())}).to_string().into())
 }
 
-/// The first tab `/json/list` names that `getTargets` also lists, else the
-/// first listed page. `/json/list` order is a hint, not activity order.
+/// In `/json/list` order (a hint, not activity order), then `getTargets`
+/// order: the first page with a web origin, else the first page. Browsers list
+/// their own dialogs and WebUI (`edge://`, `chrome://`) as pages too; headed
+/// Edge puts a sync dialog that never paints first. Those stay pickable.
 fn initial_tab<'a>(tabs: &'a [Tab], order: &[String]) -> Option<&'a Tab> {
-    order.iter().find_map(|id| tabs.iter().find(|t| &t.id == id)).or_else(|| tabs.first())
+    let ranked = || order.iter().filter_map(|id| tabs.iter().find(|t| &t.id == id)).chain(tabs);
+    ranked().find(|t| !t.origin.is_null()).or_else(|| ranked().next())
 }
 
 async fn start_view(cdp: &Cdp, target: &str) -> Result<View, String> {
@@ -697,6 +700,19 @@ mod tests {
                 assert!(ALLOWED.contains(&m.as_str()), "{m} is not an allowed CDP method");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_web_page_is_viewed_before_the_browsers_own_pages() {
+        // Headed Edge 157 lists its sync dialog as a page, first; it never paints.
+        let pages = [("D", "edge://sync-confirmation-dialog/", "We are now syncing"), ("P1", "https://a.example/", "A")];
+        let Some(mut r) = rig("webfirst", &pages).await else { return };
+        let mut ws = r.open().await;
+        let tabs = text(&mut ws).await;
+        assert_eq!(tabs["active"], "P1", "{tabs}");
+        assert_eq!(tabs["tabs"].as_array().unwrap().len(), 2, "the browser's own page stays pickable");
+        let (p, _) = call_until(&mut r.edge, "Target.attachToTarget").await;
+        assert_eq!(p["targetId"], "P1");
     }
 
     #[tokio::test]
