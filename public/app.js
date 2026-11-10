@@ -343,6 +343,7 @@ function runningCard(r) {
   // The session's Chromium tab, shown only while its configured debugging port answers.
   const browserBtn = r.browser
     ? `<button class="action" type="button" data-browser="${esc(r.name)}" data-title="${esc(r.dir.split('/').pop())}">${ICONS.globe}<span>Browser</span></button>` : '';
+  const rest = `${termBtn}${browserBtn}${copyIdBtn(r.sid)}${kill}`;
   return `
     <div class="session ${status} ${r.external ? 'external' : ''}">
       <div class="session-head">
@@ -356,7 +357,7 @@ function runningCard(r) {
         <span class="time">${fmtUp(r.uptimeSec)}</span>
       </div>
       ${peek}
-      <div class="actions">${rc}${termBtn}${browserBtn}${copyIdBtn(r.sid)}${kill}</div>
+      <div class="actions stacked">${rc ? `<div class="actions-row">${rc}</div>` : ''}${rest ? `<div class="actions-row">${rest}</div>` : ''}</div>
     </div>`;
 }
 
@@ -768,7 +769,6 @@ function browserSync() {
   const v = browserView, open = v?.ws?.readyState === WebSocket.OPEN;
   $('#browser-input').disabled = !browserReady();
   for (const id of ['#browser-back', '#browser-reload']) $(id).disabled = !(open && v.active);
-  $('#browser-tabs').disabled = !open;
 }
 
 function browserResetInput(v) {
@@ -815,30 +815,51 @@ function browserShow(v, ws, meta, buf) {
   }, () => URL.revokeObjectURL(frame.url));
 }
 
-function browserOptions(tabs, active) {
-  const sel = $('#browser-tabs');
-  sel.textContent = '';
-  const add = (value, label, title, disabled) => {
-    const o = document.createElement('option');
-    o.value = value; o.textContent = label; o.title = title; o.disabled = disabled;
-    sel.appendChild(o);
-  };
-  add('', 'Pick a tab', '', true);
-  for (const t of tabs) add(String(t.id), typeof t.origin === 'string' ? t.origin : 'No web origin', String(t.title ?? ''), false);
-  sel.value = active ?? '';
+/* One tab per page: the page's own title on top, the site under it. Only the
+   site comes from the browser's address, so it is the line to check before
+   typing a password. Built as DOM text, never HTML. Returns the selected tab. */
+function browserTabStrip(tabs, active) {
+  const strip = $('#browser-tabs');
+  const left = strip.scrollLeft; // an update must not yank the strip back
+  strip.textContent = '';
+  let selected = null;
+  for (const t of tabs) {
+    const site = typeof t.origin === 'string' ? t.origin.replace(/^https:\/\//, '') : 'Browser page';
+    const title = document.createElement('span');
+    const where = document.createElement('span');
+    title.className = 'tab-title';
+    title.textContent = t.title || site;
+    where.className = 'tab-site';
+    where.textContent = site;
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.dataset.tab = String(t.id);
+    b.title = `${t.title || ''}\n${site}`.trim(); // long-press or hover shows it whole
+    b.setAttribute('role', 'tab');
+    b.setAttribute('aria-selected', String(t.id === active));
+    b.append(title, where);
+    strip.appendChild(b);
+    if (t.id === active) selected = b;
+  }
+  strip.scrollLeft = left;
+  return selected;
 }
 
+const BROWSER_PICK = ['Tab closed. Pick a tab.', 'No tabs open yet. Pick one when it appears.'];
+
 function browserTabs(v, tabs, active) {
-  browserOptions(tabs, active);
+  const selected = browserTabStrip(tabs, active);
   const ids = tabs.map(t => String(t.id));
   if (v.want && (active === v.want || !ids.includes(v.want))) v.want = null; // done, or the tab is gone
   if (active !== v.active) {
     v.active = active;
+    v.hadTab ||= active !== null;
     browserClearFrame(v);
+    selected?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
   }
-  const gone = 'Tab closed. Pick a tab.';
-  if (active === null) $('#browser-status').textContent = gone;
-  else if ($('#browser-status').textContent === gone) $('#browser-status').textContent = '';
+  const status = $('#browser-status');
+  if (active === null) status.textContent = BROWSER_PICK[v.hadTab ? 0 : 1];
+  else if (BROWSER_PICK.includes(status.textContent)) status.textContent = '';
   browserSync();
 }
 
@@ -864,7 +885,7 @@ async function browserConnect() {
   v.active = null;
   v.want = null;
   browserClearFrame(v);
-  browserOptions([], null);
+  browserTabStrip([], null);
   browserStatus('Connecting…', false);
   let url;
   try { url = await wsUrl(`/api/browser?name=${encodeURIComponent(v.name)}`); }
@@ -1032,8 +1053,8 @@ addEventListener('popstate', closeBrowser);
 $('#browser-back').addEventListener('click', () => browserSend({ nav: 'back' }, false));
 $('#browser-reload').addEventListener('click', () => browserSend({ nav: 'reload' }, false));
 $('#browser-reconnect').addEventListener('click', () => { if (browserView && !browserView.ws) browserConnect(); });
-$('#browser-tabs').addEventListener('change', () => {
-  const v = browserView, id = $('#browser-tabs').value;
+$('#browser-tabs').addEventListener('click', e => {
+  const v = browserView, id = e.target.closest('[data-tab]')?.dataset.tab;
   if (!v || !id || id === v.active || v.ws?.readyState !== WebSocket.OPEN) return;
   v.want = id; // input and frames stay off until the agent confirms the switch
   browserSend({ tab: id }, false);

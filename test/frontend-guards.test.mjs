@@ -519,6 +519,21 @@ test('only sessions with a live browser get the Browser button', () => {
   assert.doesNotMatch(context.runningCard(row), /data-browser/);
 });
 
+test('running cards put Open in Claude on its own row and the other actions below', () => {
+  const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const card = src.slice(src.indexOf('function runningCard('), src.indexOf('\n}\n', src.indexOf('function runningCard(')) + 2);
+  const context = { esc: s => s, effortLabel: s => s, gitBadge: () => '', copyIdBtn: sid => sid ? '<button data-copy>' : '', fmtUp: () => '', armedKill: null, ICONS: new Proxy({}, { get: () => '' }) };
+  runInNewContext(`${card}; this.runningCard = runningCard;`, context);
+  const rows = html => [...html.matchAll(/<div class="actions-row">([\s\S]*?)<\/div>/g)].map(m => m[1]);
+  const row = { name: 'cdash-a', dir: '/x/JOBS', working: false, sid: 's1', browser: true, rcLink: 'https://claude.ai/code/session_x' };
+  const [main, rest] = rows(context.runningCard(row));
+  assert.match(main, /Open in Claude/);
+  assert.doesNotMatch(main, /data-term|data-browser|data-copy|data-kill/);
+  assert.match(rest, /data-term=[\s\S]*data-browser=[\s\S]*data-copy[\s\S]*data-kill=/, 'Terminal, Browser, Copy ID, Close in that order');
+  assert.match(rows(context.runningCard({ ...row, rcLink: null }))[0], /Waiting for link/, 'a pending link keeps the first row');
+  assert.equal(rows(context.runningCard({ ...row, provider: 'terminal' })).length, 1, 'a bare terminal has no Claude row');
+});
+
 test('the browser typing field stays focusable and its scripts load before app.js', () => {
   const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
   const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
@@ -560,6 +575,7 @@ function overlayHarness({ protocol = 'http:', tauri = false } = {}) {
         return ev;
       },
       appendChild(c) { e.children.push(c); return c; },
+      append(...cs) { e.children.push(...cs); },
       setAttribute(k, v) { e.attrs[k] = String(v); },
       removeAttribute(k) { delete e.attrs[k]; if (k === 'src') e.src = undefined; },
       focus() { doc.activeElement = e; },
@@ -692,25 +708,36 @@ test('tab_labels_are_text', async () => {
   ws.recv(JSON.stringify({ tabs: [
     { id: 'T1', title: evil, origin: 'https://a.example' },
     { id: 'T2', title: 'No origin', origin: null },
+    { id: 'T3', title: '', origin: 'http://b.example:8080' },
   ], active: 'T1' }));
-  const sel = h.$('#browser-tabs');
-  const [placeholder, one, two] = sel.children;
-  assert.equal(sel.children.length, 3);
-  assert.deepEqual([placeholder.textContent, placeholder.disabled], ['Pick a tab', true]);
-  assert.deepEqual([one.tag, one.textContent, one.title, one.value], ['option', 'https://a.example', evil, 'T1']);
-  assert.deepEqual([two.textContent, two.value], ['No web origin', 'T2']);
-  for (const o of sel.children) assert.equal(o.htmlWrites, 0, 'labels are assigned as text, never as HTML');
-  assert.equal(sel.value, 'T1');
+  const strip = h.$('#browser-tabs');
+  const lines = t => t.children.map(c => c.textContent);
+  const [one, two, three] = strip.children;
+  assert.equal(strip.children.length, 3);
+  assert.deepEqual(lines(one), [evil, 'a.example'], 'page title on top, site below without https://');
+  assert.deepEqual(lines(two), ['No origin', 'Browser page']);
+  assert.deepEqual(lines(three), ['http://b.example:8080', 'http://b.example:8080'], 'http and ports stay visible; no title shows the site');
+  assert.deepEqual(strip.children.map(t => [t.dataset.tab, t.attrs.role, t.attrs['aria-selected']]), [['T1', 'tab', 'true'], ['T2', 'tab', 'false'], ['T3', 'tab', 'false']]);
+  for (const t of [one, two, three, ...one.children, ...two.children]) assert.equal(t.htmlWrites, 0, 'labels are assigned as text, never as HTML');
 
   ws.recv(JSON.stringify({ tabs: [{ id: 'T2', title: 'No origin', origin: null }], active: null }));
-  assert.equal(sel.value, '', 'the placeholder is selected');
+  assert.deepEqual(strip.children.map(t => t.attrs['aria-selected']), ['false'], 'nothing is highlighted');
   assert.equal(h.$('#browser-status').textContent, 'Tab closed. Pick a tab.');
   assert.equal(h.$('#browser-input').disabled, true);
 
-  // Picking a tab asks the agent; input stays off until its frame pair is shown.
-  sel.value = 'T2';
-  sel.dispatch('change');
+  // Tapping a tab asks the agent; input stays off until its frame pair is shown.
+  strip.dispatch('click', { target: { closest: () => strip.children[0] } });
   assert.deepEqual(h.sent(ws), [{ tab: 'T2' }]);
+});
+
+test('a browser with no tabs yet says so', async () => {
+  const h = overlayHarness();
+  h.api.openBrowser('cdash-a', 'JOBS');
+  await h.flush();
+  const ws = h.sockets.at(-1);
+  ws.open();
+  ws.recv(JSON.stringify({ tabs: [], active: null }));
+  assert.equal(h.$('#browser-status').textContent, 'No tabs open yet. Pick one when it appears.');
 });
 
 test('frame_pairing_survives_switch_and_reconnect', async () => {
