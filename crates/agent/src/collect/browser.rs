@@ -27,10 +27,23 @@ pub async fn read_port_map(claude_dir: &Path) -> Vec<(String, u16)> {
         .collect()
 }
 
+/// WSL mounts Windows drives at `/mnt/<letter>` case-insensitively, and a
+/// session keeps whatever case its folder was typed in. Paths there compare
+/// lowercased; every other path compares exactly.
+fn fold(p: &str) -> std::borrow::Cow<'_, str> {
+    let b = p.as_bytes();
+    let drive = p.starts_with("/mnt/") && b.get(5).is_some_and(u8::is_ascii_alphabetic) && matches!(b.get(6), None | Some(b'/'));
+    if drive { p.to_lowercase().into() } else { p.into() }
+}
+
 /// Longest key that equals `dir` or is a parent of it, by path component.
 pub fn port_for(map: &[(String, u16)], dir: &str) -> Option<u16> {
+    let dir = fold(dir);
     map.iter()
-        .filter(|(k, _)| k == "/" || dir == k.as_str() || dir.starts_with(&format!("{k}/")))
+        .filter(|(k, _)| {
+            let k = fold(k);
+            k == "/" || dir == k || dir.starts_with(&format!("{k}/"))
+        })
         .max_by_key(|(k, _)| k.len())
         .map(|(_, p)| *p)
 }
@@ -401,6 +414,17 @@ pub(crate) mod tests {
         assert_eq!(port_for(&map, "/mnt/d/p/Downloads/JOBS/sub"), Some(9301));
         assert_eq!(port_for(&map, "/mnt/d/p/Downloads/JOBS2"), Some(9400), "sibling falls to the parent key");
         assert_eq!(port_for(&map, "/mnt/d/q"), None);
+    }
+
+    #[test]
+    fn windows_drive_paths_match_in_any_case() {
+        // WSL mounts Windows drives case-insensitively: a session launched as
+        // /mnt/d/p/downloads/jobs runs in the JOBS folder.
+        let map = vec![("/mnt/d/p/Downloads/JOBS".to_string(), 9301), ("/home/p/Proj".to_string(), 9400)];
+        assert_eq!(port_for(&map, "/mnt/d/p/downloads/jobs"), Some(9301));
+        assert_eq!(port_for(&map, "/mnt/d/p/downloads/jobs/sub"), Some(9301));
+        assert_eq!(port_for(&map, "/mnt/d/p/downloads/jobs2"), None, "still by path component");
+        assert_eq!(port_for(&map, "/home/p/proj"), None, "Linux paths stay case-sensitive");
     }
 
     #[tokio::test]
