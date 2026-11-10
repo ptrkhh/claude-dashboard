@@ -120,6 +120,8 @@ The agent learns which port belongs to which folder from `cdash-browsers.json` i
 
 Ports outside 1024–65535 are ignored. A missing or malformed file means no **Browser** buttons.
 
+The map follows the browser, not the project: give each Playwright profile its own port, and map every folder whose sessions drive that profile to it. Folders that share one profile share its port, and the tab picker then lists every tab in that browser, including other sessions' tabs. Playwright MCP's `--extension` mode, which drives your everyday browser through its extension, is not supported: viewing it would need a debugging port on your personal profile.
+
 Open the same port in each project's Playwright MCP launcher with `--config=<file>`:
 
 ```json
