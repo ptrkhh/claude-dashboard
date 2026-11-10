@@ -179,7 +179,7 @@ async fn write_all(fd: &AsyncFd<OwnedFd>, mut b: &[u8]) -> io::Result<()> {
 /// sends no FIN, so without this `recv` waits forever and the `tmux attach`
 /// child leaks; a peer that answers nothing for one full interval is gone.
 /// Short under test so a silent client is caught within the test's patience.
-pub(crate) const PING_EVERY: std::time::Duration =
+const PING_EVERY: std::time::Duration =
     std::time::Duration::from_secs(if cfg!(test) { 2 } else { 30 });
 
 enum Ended {
@@ -201,6 +201,31 @@ pub(crate) async fn send_or_drop(ws: &mut WebSocket, msg: Message) -> bool {
     )
 }
 
+/// The bridges' keepalive tick, every `PING_EVERY`. Burst (the default) would
+/// fire missed ticks back to back after a stall (a slow send on a bad mobile
+/// link), and the second would see `heard` still false and cut off a live
+/// client.
+pub(crate) fn ping_interval() -> tokio::time::Interval {
+    let mut ping = tokio::time::interval(PING_EVERY);
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ping
+}
+
+/// Tell the browser why the bridge ended, then wait for its Close reply.
+/// Dropping the socket with a frame still unread (a pong, a keystroke) makes
+/// the kernel answer RST, and the browser can then lose the close code and
+/// see a plain 1006.
+pub(crate) async fn close_and_drain(ws: &mut WebSocket, code: u16, reason: &str) {
+    let _ = ws
+        .send(Message::Close(Some(CloseFrame {
+            code,
+            reason: reason.into(),
+        })))
+        .await;
+    let drain = async { while let Some(Ok(_)) = ws.recv().await {} };
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), drain).await;
+}
+
 fn is_eio(e: &io::Error) -> bool {
     e.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error())
 }
@@ -216,11 +241,7 @@ async fn pump(
     let _child = spawn_attach(name, &ctx.host.path, slave)?; // killed on drop
     let master = AsyncFd::new(master)?;
     let mut buf = vec![0u8; 16 * 1024];
-    let mut ping = tokio::time::interval(PING_EVERY);
-    // Burst (the default) would fire missed ticks back to back after a stall
-    // (a slow send on a bad mobile link), and the second would see `heard`
-    // still false and cut off a live client.
-    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut ping = ping_interval();
     let mut heard = true;
     loop {
         tokio::select! {
@@ -294,17 +315,7 @@ pub async fn bridge(ctx: Arc<Ctx>, name: String, cols: u16, rows: u16, mut ws: W
         }
     };
     if let Some((code, reason)) = close {
-        let _ = ws
-            .send(Message::Close(Some(CloseFrame {
-                code,
-                reason: reason.into(),
-            })))
-            .await;
-        // Wait for the browser's Close reply. Dropping the socket with a frame
-        // still unread (a pong, a keystroke) makes the kernel answer RST, and
-        // the browser can then lose the close code and see a plain 1006.
-        let drain = async { while let Some(Ok(_)) = ws.recv().await {} };
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), drain).await;
+        close_and_drain(&mut ws, code, &reason).await;
     }
     ctx.host.log.push(format!("term close {name}"));
 }
@@ -439,7 +450,7 @@ pub(crate) mod tests {
     /// A detached `sh` session, killed on drop.
     pub(crate) struct Session(pub(crate) String);
     impl Session {
-        pub(crate) fn new(tag: &str) -> Self {
+        fn new(tag: &str) -> Self {
             Self::start(tag, None)
         }
         /// Same, with the pane's working directory set to `dir`.
@@ -524,7 +535,7 @@ pub(crate) mod tests {
     }
 
     /// Drains frames until the close frame and returns its code.
-    pub(crate) async fn close_code(ws: &mut Ws) -> u16 {
+    async fn close_code(ws: &mut Ws) -> u16 {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 match ws.next().await {
@@ -539,7 +550,7 @@ pub(crate) mod tests {
         .expect("no close frame within 5s")
     }
 
-    async fn eventually(what: &str, mut f: impl FnMut() -> bool) {
+    pub(crate) async fn eventually(what: &str, mut f: impl FnMut() -> bool) {
         for _ in 0..50 {
             if f() {
                 return;

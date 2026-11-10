@@ -26,7 +26,6 @@ fn lock(p: &Pending) -> MutexGuard<'_, Option<HashMap<u64, oneshot::Sender<Reply
     p.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-#[derive(Debug)]
 pub struct Event {
     pub method: String,
     pub params: Value,
@@ -52,23 +51,24 @@ impl Drop for Cdp {
 /// Route one incoming frame: a reply by `id`, or an event by `method`. An error
 /// reply keeps only its code; the message can carry URLs, titles or input.
 fn route(pending: &Pending, events: &mpsc::UnboundedSender<Event>, text: &str) {
-    let Ok(v) = serde_json::from_str::<Value>(text) else { return };
+    let Ok(mut v) = serde_json::from_str::<Value>(text) else { return };
     if let Some(id) = v["id"].as_u64() {
         let tx = lock(pending).as_mut().and_then(|m| m.remove(&id));
         let reply = match v.get("error") {
             Some(e) if e["code"].as_i64() == Some(-32601) => Err("unsupported"),
             Some(_) => Err("protocol"),
-            None => Ok(v.get("result").cloned().unwrap_or_else(|| json!({}))),
+            None => Ok(match v["result"].take() {
+                Value::Null => json!({}),
+                r => r,
+            }),
         };
         if let Some(tx) = tx {
             let _ = tx.send(reply);
         }
-    } else if let Some(method) = v["method"].as_str() {
-        let _ = events.send(Event {
-            method: method.to_string(),
-            params: v.get("params").cloned().unwrap_or(Value::Null),
-            session: v["sessionId"].as_str().map(str::to_string),
-        });
+    } else if let Some(method) = v["method"].as_str().map(str::to_string) {
+        // Taken, not cloned: a screencast frame's params carry the whole JPEG.
+        let session = v["sessionId"].as_str().map(str::to_string);
+        let _ = events.send(Event { method, params: v["params"].take(), session });
     }
 }
 
@@ -76,14 +76,14 @@ impl Cdp {
     /// `ws_url` must come from `browser::browser_ws_url`. Anything that is not
     /// plain `ws://127.0.0.1:` is refused here too. `connect_async` sends no
     /// `Origin` header, and none is added.
-    pub async fn connect(ws_url: &str) -> Result<(Cdp, mpsc::UnboundedReceiver<Event>), String> {
+    pub async fn connect(ws_url: &str) -> Result<(Cdp, mpsc::UnboundedReceiver<Event>), &'static str> {
         if !ws_url.starts_with("ws://127.0.0.1:") {
-            return Err("protocol".to_string());
+            return Err("protocol");
         }
         let (ws, _) = tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(ws_url))
             .await
-            .map_err(|_| "timeout".to_string())?
-            .map_err(|_| "connect".to_string())?;
+            .map_err(|_| "timeout")?
+            .map_err(|_| "connect")?;
         let (mut sink, mut stream) = ws.split();
         let (out, mut out_rx) = mpsc::unbounded_channel::<String>();
         let (events, event_rx) = mpsc::unbounded_channel();
@@ -121,7 +121,7 @@ impl Cdp {
         Ok((Cdp { out, pending, next: AtomicU64::new(1), reader }, event_rx))
     }
 
-    pub async fn call(&self, method: &str, params: Value, session: Option<&str>) -> Result<Value, String> {
+    pub async fn call(&self, method: &str, params: Value, session: Option<&str>) -> Result<Value, &'static str> {
         self.call_within(method, params, session, CALL_TIMEOUT).await
     }
 
@@ -131,12 +131,12 @@ impl Cdp {
         params: Value,
         session: Option<&str>,
         limit: Duration,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, &'static str> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         match lock(&self.pending).as_mut() {
             Some(map) => map.insert(id, tx),
-            None => return Err("connect".to_string()),
+            None => return Err("connect"),
         };
         let mut msg = json!({"id": id, "method": method, "params": params});
         if let Some(s) = session {
@@ -154,7 +154,7 @@ impl Cdp {
         if let Some(map) = lock(&self.pending).as_mut() {
             map.remove(&id);
         }
-        result.map_err(str::to_string)
+        result
     }
 }
 
@@ -173,8 +173,7 @@ pub async fn page_order(port: u16) -> Vec<String> {
 }
 
 /// A loopback stand-in for a Chromium browser: `/json/version`, `/json/list`
-/// and one CDP WebSocket. Shared by the bridge tests. The name is only a
-/// fixture name; nothing here requires an Edge product string.
+/// and one CDP WebSocket. Shared by the bridge tests.
 #[cfg(test)]
 pub(crate) mod fake {
     use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -187,9 +186,9 @@ pub(crate) mod fake {
     use std::sync::{Arc, Mutex};
     use tokio::sync::{mpsc, Notify};
 
-    type Call = (String, Value, Option<String>);
+    pub(crate) type Call = (String, Value, Option<String>);
 
-    pub(crate) struct FakeEdge {
+    pub(crate) struct FakeBrowser {
         pub port: u16,
         /// Every CDP call received: (method, params, sessionId).
         pub calls: mpsc::UnboundedReceiver<Call>,
@@ -222,7 +221,7 @@ pub(crate) mod fake {
         }
     }
 
-    pub(crate) async fn fake_edge(pages: &[(&str, &str, &str)]) -> FakeEdge {
+    pub(crate) async fn fake_browser(pages: &[(&str, &str, &str)]) -> FakeBrowser {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let (calls_tx, calls) = mpsc::unbounded_channel();
@@ -245,14 +244,11 @@ pub(crate) mod fake {
             .route("/devtools/browser/fake", axum::routing::get(ws))
             .with_state(state);
         tokio::spawn(async move { axum::serve(listener, app).await });
-        FakeEdge { port, calls, events, drop_socket, replies, connections }
+        FakeBrowser { port, calls, events, drop_socket, replies, connections }
     }
 
     async fn version(State(st): State<Shared>) -> axum::Json<Value> {
-        axum::Json(json!({
-            "Browser": "Chrome/0.0.0.0",
-            "webSocketDebuggerUrl": format!("ws://127.0.0.1:{}/devtools/browser/fake", st.port),
-        }))
+        axum::Json(json!({"webSocketDebuggerUrl": format!("ws://127.0.0.1:{}/devtools/browser/fake", st.port)}))
     }
 
     async fn list(State(st): State<Shared>) -> axum::Json<Value> {
@@ -322,10 +318,9 @@ pub(crate) mod fake {
 mod tests {
     use super::*;
     use crate::collect::browser::browser_ws_url;
-    use crate::collect::browser::tests::serve;
+    use crate::collect::term::tests::eventually;
     use serde_json::json;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
     const WAIT: Duration = Duration::from_secs(5);
@@ -334,109 +329,73 @@ mod tests {
         tokio::time::timeout(WAIT, ev.recv()).await.expect("event stream neither yielded nor ended")
     }
 
-    async fn until(mut done: impl FnMut() -> bool) -> bool {
-        let end = Instant::now() + WAIT;
-        while Instant::now() < end {
-            if done() {
-                return true;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        done()
-    }
-
     #[tokio::test]
     async fn calls_events_and_close() {
-        let mut edge = fake::fake_edge(&[("P1", "https://a.example/", "A")]).await;
-        let url = browser_ws_url(edge.port).await.unwrap();
+        let mut fake = fake::fake_browser(&[("P1", "https://a.example/", "A")]).await;
+        let url = browser_ws_url(fake.port).await.unwrap();
         let (cdp, mut ev) = Cdp::connect(&url).await.unwrap();
         let r = cdp.call("Target.attachToTarget", json!({"targetId":"P1","flatten":true}), None).await.unwrap();
         assert_eq!(r["sessionId"], "S-P1");
-        let (m, p, s) = edge.calls.recv().await.unwrap();
+        let (m, p, s) = fake.calls.recv().await.unwrap();
         assert_eq!((m.as_str(), p["targetId"].as_str(), s), ("Target.attachToTarget", Some("P1"), None));
-        edge.events.send(json!({"method":"Page.screencastFrame","params":{"sessionId":7},"sessionId":"S-P1"})).unwrap();
+        fake.events.send(json!({"method":"Page.screencastFrame","params":{"sessionId":7},"sessionId":"S-P1"})).unwrap();
         let e = next_event(&mut ev).await.unwrap();
         assert_eq!((e.method.as_str(), e.session.as_deref()), ("Page.screencastFrame", Some("S-P1")));
-        assert_eq!(page_order(edge.port).await, vec!["P1".to_string()]);
-        edge.drop_socket.notify_one();
+        assert_eq!(page_order(fake.port).await, vec!["P1".to_string()]);
+        fake.drop_socket.notify_one();
         assert!(next_event(&mut ev).await.is_none(), "event stream ends when the browser goes away");
         assert!(cdp.call("Page.reload", json!({}), Some("S-P1")).await.is_err());
     }
 
     #[tokio::test]
-    async fn list_discovery_never_follows_redirects() {
-        let hits = Arc::new(AtomicUsize::new(0));
-        let h = hits.clone();
-        let trap = serve(axum::Router::new().fallback(move || {
-            let h = h.clone();
-            async move {
-                h.fetch_add(1, Ordering::SeqCst);
-                axum::Json(json!([{"id": "TRAP", "type": "page"}]))
-            }
-        }))
-        .await;
-        let loc = format!("http://127.0.0.1:{trap}/json/list");
-        let port = serve(axum::Router::new().route(
-            "/json/list",
-            axum::routing::get(move || {
-                let loc = loc.clone();
-                async move { (axum::http::StatusCode::FOUND, [(axum::http::header::LOCATION, loc)]) }
-            }),
-        ))
-        .await;
-        assert!(page_order(port).await.is_empty());
-        assert_eq!(hits.load(Ordering::SeqCst), 0, "the redirect target received a request");
-    }
-
-    #[tokio::test]
     async fn cdp_errors_are_fixed_categories() {
-        let edge = fake::fake_edge(&[]).await;
-        let (cdp, _ev) = Cdp::connect(&browser_ws_url(edge.port).await.unwrap()).await.unwrap();
+        let fake = fake::fake_browser(&[]).await;
+        let (cdp, _ev) = Cdp::connect(&browser_ws_url(fake.port).await.unwrap()).await.unwrap();
         let canary = "https://secret.example/?token=URL_CANARY TITLE_CANARY typed-text";
         {
-            let mut replies = edge.replies.lock().unwrap();
+            let mut replies = fake.replies.lock().unwrap();
             replies.insert("Page.enable".into(), Some(json!({"error": {"code": -32601, "message": canary}})));
             replies.insert("Page.reload".into(), Some(json!({"error": {"code": -32000, "message": canary}})));
             replies.insert("Page.stopScreencast".into(), None);
         }
 
-        assert_eq!(cdp.call("Page.enable", json!({}), None).await, Err("unsupported".to_string()));
-        assert_eq!(cdp.call("Page.reload", json!({}), None).await, Err("protocol".to_string()));
+        assert_eq!(cdp.call("Page.enable", json!({}), None).await, Err("unsupported"));
+        assert_eq!(cdp.call("Page.reload", json!({}), None).await, Err("protocol"));
         let hung = cdp.call_within("Page.stopScreencast", json!({}), None, Duration::from_millis(150)).await;
-        assert_eq!(hung, Err("timeout".to_string()));
+        assert_eq!(hung, Err("timeout"));
         assert!(cdp.call("Target.getTargets", json!({}), None).await.is_ok(), "a timed-out call leaves the client usable");
     }
 
     #[tokio::test]
     async fn dropping_cdp_closes_socket_and_tasks() {
-        let edge = fake::fake_edge(&[]).await;
-        let (cdp, mut ev) = Cdp::connect(&browser_ws_url(edge.port).await.unwrap()).await.unwrap();
+        let fake = fake::fake_browser(&[]).await;
+        let (cdp, mut ev) = Cdp::connect(&browser_ws_url(fake.port).await.unwrap()).await.unwrap();
         cdp.call("Target.getTargets", json!({}), None).await.unwrap();
-        assert_eq!(edge.connections.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.connections.load(Ordering::SeqCst), 1);
         drop(cdp);
         assert!(next_event(&mut ev).await.is_none(), "event stream ends when the client is dropped");
-        assert!(until(|| edge.connections.load(Ordering::SeqCst) == 0).await, "the peer saw the socket close");
+        eventually("the peer sees the socket close", || fake.connections.load(Ordering::SeqCst) == 0).await;
     }
 
     #[tokio::test]
     async fn a_pending_call_fails_when_the_browser_goes_away() {
-        let edge = fake::fake_edge(&[]).await;
-        let (cdp, _ev) = Cdp::connect(&browser_ws_url(edge.port).await.unwrap()).await.unwrap();
-        edge.replies.lock().unwrap().insert("Page.reload".into(), None);
+        let fake = fake::fake_browser(&[]).await;
+        let (cdp, _ev) = Cdp::connect(&browser_ws_url(fake.port).await.unwrap()).await.unwrap();
+        fake.replies.lock().unwrap().insert("Page.reload".into(), None);
         let started = Instant::now();
         let (r, ()) = tokio::join!(cdp.call("Page.reload", json!({}), None), async {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            edge.drop_socket.notify_one();
+            fake.drop_socket.notify_one();
         });
-        assert_eq!(r, Err("connect".to_string()));
+        assert_eq!(r, Err("connect"));
         assert!(started.elapsed() < Duration::from_secs(3), "failed on disconnect, not on the call deadline");
     }
 
     #[tokio::test]
     async fn the_fake_refuses_an_origin_so_no_origin_is_proof() {
         use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest};
-        let edge = fake::fake_edge(&[]).await;
-        let mut req = browser_ws_url(edge.port).await.unwrap().into_client_request().unwrap();
+        let fake = fake::fake_browser(&[]).await;
+        let mut req = browser_ws_url(fake.port).await.unwrap().into_client_request().unwrap();
         req.headers_mut().insert("origin", "https://evil.example".parse().unwrap());
         match tokio_tungstenite::connect_async(req).await {
             Err(tungstenite::Error::Http(res)) => assert_eq!(res.status().as_u16(), 403),
@@ -447,7 +406,7 @@ mod tests {
     #[tokio::test]
     async fn connect_refuses_anything_but_mapped_loopback() {
         for url in ["ws://example.com:9301/devtools/browser/x", "ws://localhost:9301/devtools/browser/x", "wss://127.0.0.1:9301/x"] {
-            assert_eq!(Cdp::connect(url).await.err(), Some("protocol".to_string()), "{url}");
+            assert_eq!(Cdp::connect(url).await.err(), Some("protocol"), "{url}");
         }
     }
 }

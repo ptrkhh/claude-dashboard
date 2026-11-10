@@ -6,9 +6,7 @@
     /* Key-bar button to the named key the agent accepts. */
     KEYBAR: { tab: 'Tab', bksp: 'Backspace', left: 'ArrowLeft', right: 'ArrowRight', esc: 'Escape', enter: 'Enter' },
     /* x,y are relative to the transformed image's top-left, `shown` is its
-       displayed size, `meta` the metadata paired with that JPEG. The frame's
-       coordinates already start at the image, so offsetTop and pageScaleFactor
-       are not applied. */
+       displayed size, `meta` the page size paired with that JPEG. */
     toPage(x, y, shown, meta) {
       return [x / shown.w * meta.deviceWidth, y / shown.h * meta.deviceHeight];
     },

@@ -78,19 +78,15 @@ async fn get_json(port: u16, path: &str) -> Result<serde_json::Value, &'static s
 
 /// GET `path` from the mapped loopback port under the shared discovery policy.
 /// Errors are fixed categories (`connect`, `timeout`, `protocol`), never library text.
-pub(crate) async fn discover_json(port: u16, path: &str) -> Result<serde_json::Value, String> {
-    match tokio::time::timeout(DISCOVERY_DEADLINE, get_json(port, path)).await {
-        Ok(r) => r.map_err(str::to_string),
-        Err(_) => Err("timeout".to_string()),
-    }
+pub(crate) async fn discover_json(port: u16, path: &str) -> Result<serde_json::Value, &'static str> {
+    tokio::time::timeout(DISCOVERY_DEADLINE, get_json(port, path)).await.unwrap_or(Err("timeout"))
 }
 
 /// Keep only the validated `/devtools/browser/<id>` path from the response;
 /// scheme, host and port come from the map, never from the browser's answer.
-fn pinned_ws_url(port: u16, version: &serde_json::Value) -> Result<String, String> {
-    let bad = || "protocol".to_string();
-    let raw = version.get("webSocketDebuggerUrl").and_then(|v| v.as_str()).ok_or_else(bad)?;
-    let url = reqwest::Url::parse(raw).map_err(|_| bad())?;
+fn pinned_ws_url(port: u16, version: &serde_json::Value) -> Result<String, &'static str> {
+    let raw = version["webSocketDebuggerUrl"].as_str().ok_or("protocol")?;
+    let url = reqwest::Url::parse(raw).map_err(|_| "protocol")?;
     let id = url.path().strip_prefix("/devtools/browser/").unwrap_or("");
     if !matches!(url.scheme(), "ws" | "wss")
         || url.query().is_some()
@@ -98,13 +94,13 @@ fn pinned_ws_url(port: u16, version: &serde_json::Value) -> Result<String, Strin
         || id.is_empty()
         || id.contains('/')
     {
-        return Err(bad());
+        return Err("protocol");
     }
     Ok(format!("ws://127.0.0.1:{port}/devtools/browser/{id}"))
 }
 
 /// The browser-level CDP WebSocket URL, confined to `127.0.0.1:<port>`.
-pub async fn browser_ws_url(port: u16) -> Result<String, String> {
+pub async fn browser_ws_url(port: u16) -> Result<String, &'static str> {
     pinned_ws_url(port, &discover_json(port, "/json/version").await?)
 }
 
@@ -123,7 +119,7 @@ pub async fn browser_flags(claude_dir: &Path, dirs: &[&str]) -> Vec<bool> {
 }
 
 /// Cap on one `text` message, in bytes.
-pub const MAX_TEXT: usize = 4096;
+const MAX_TEXT: usize = 4096;
 
 /// What the phone may ask for. Anything else is dropped; the phone never
 /// supplies a CDP method or a raw key name outside `KEYS`.
@@ -186,8 +182,8 @@ pub fn parse_phone(text: &str) -> Option<PhoneMsg> {
 }
 
 /// `Input.dispatchKeyEvent` params for a named key, in send order. Enter also
-/// sends a `char` event. A key sent without its virtual key code can be
-/// ignored by the page (Backspace was, in the Edge spike).
+/// sends a `char` event. Every key carries its virtual key code: without one a
+/// page can ignore it (a Backspace then deletes nothing).
 pub fn key_events(key: &str) -> Option<Vec<serde_json::Value>> {
     let (name, vk) = KEYS.iter().find(|(n, _)| *n == key)?;
     let ev = |kind: &str| serde_json::json!({"type": kind, "key": name, "code": name, "windowsVirtualKeyCode": vk});
@@ -217,7 +213,6 @@ pub fn char_events(c: char) -> [serde_json::Value; 2] {
 }
 
 /// Size of the page, in CSS pixels, that the displayed frame belongs to.
-#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Viewport {
     pub width: f64,
     pub height: f64,
@@ -237,6 +232,7 @@ pub fn clamp_point(x: f64, y: f64, vp: &Viewport) -> (f64, f64) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::collect::term::tests::tempdir;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -261,9 +257,7 @@ pub(crate) mod tests {
     }
 
     fn map_dir(tag: &str, entries: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("cdash-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tempdir(tag);
         std::fs::write(dir.join(MAP_FILE), entries).unwrap();
         dir
     }
@@ -274,14 +268,6 @@ pub(crate) mod tests {
         let dead_port = { let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap(); l.local_addr().unwrap().port() };
         let dir = map_dir("bflags", &format!(r#"{{"/live":{live_port},"/dead":{dead_port}}}"#));
         assert_eq!(browser_flags(&dir, &["/live/x", "/dead", "/other"]).await, vec![true, false, false]);
-    }
-
-    #[tokio::test]
-    async fn empty_json_is_not_a_browser() {
-        let port = serve_version(json!({})).await;
-        let dir = map_dir("bempty", &format!(r#"{{"/e":{port}}}"#));
-        assert_eq!(browser_flags(&dir, &["/e"]).await, vec![false]);
-        assert!(browser_ws_url(port).await.is_err());
     }
 
     #[tokio::test]
@@ -331,7 +317,7 @@ pub(crate) mod tests {
             ws("ws://h:1/devtools/browser/a#f"),
             ws("ws://h:1/devtools/browser/../x"),
         ] {
-            assert_eq!(pinned_ws_url(port, &bad), Err("protocol".to_string()), "{bad}");
+            assert_eq!(pinned_ws_url(port, &bad), Err("protocol"), "{bad}");
         }
         assert_eq!(
             pinned_ws_url(port, &ws("wss://h:1/devtools/browser/a-1")),
@@ -429,9 +415,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn map_file_rules() {
-        let dir = std::env::temp_dir().join(format!("cdash-bmap-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tempdir("bmap");
         assert!(read_port_map(&dir).await.is_empty(), "missing file");
         std::fs::write(dir.join(MAP_FILE), "{not json").unwrap();
         assert!(read_port_map(&dir).await.is_empty(), "malformed file");

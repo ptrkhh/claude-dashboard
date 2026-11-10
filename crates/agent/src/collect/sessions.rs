@@ -107,7 +107,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
                 display_name: None, name: p.name.clone(), dir: p.path.clone(), pid: p.pid,
                 uptime_sec: ((now / 1000.0 - p.created as f64).round() as i64).max(0),
                 model: Some("Terminal".into()), effort: None, variant: None,
-                provider: Some("terminal".into()), native_terminal: None, browser: None,
+                provider: Some("terminal".into()), native_terminal: None, browser: false,
                 rc_link: None, rc_unavailable: true,
                 git: git.as_deref().map(parse_git_status), working: false, last_message: None, sid: None,
                 cpu: cpu.cpu, rss_kb: cpu.rss_kb, cpu_sample_age_ms: cpu.cpu_sample_age_ms, external: false,
@@ -122,7 +122,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
                 name: p.name.clone(), dir: s.dir, pid: p.pid,
                 uptime_sec: ((now / 1000.0 - p.created as f64).round() as i64).max(0),
                 model: s.model_label.or(s.model).or_else(|| Some("OpenCode".into())), effort: None, variant: s.variant,
-                provider: Some("opencode".into()), native_terminal: Some(s.native_terminal), browser: None,
+                provider: Some("opencode".into()), native_terminal: Some(s.native_terminal), browser: false,
                 rc_link: super::opencode::link(ctx, &p.name).await, rc_unavailable: s.rc_unavailable,
                 git: git.as_deref().map(parse_git_status), working: s.working, last_message: s.last_message, sid: s.sid,
                 cpu: cpu.cpu, rss_kb: cpu.rss_kb, cpu_sample_age_ms: cpu.cpu_sample_age_ms, external: false,
@@ -138,7 +138,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
                 uptime_sec: ((now / 1000.0 - p.created as f64).round() as i64).max(0),
                 model: s.model_label.or(s.model).or_else(|| Some("Codex".into())), effort: s.effort, variant: None,
                 provider: Some("codex".into()),
-                native_terminal: Some(s.native_terminal), browser: None,
+                native_terminal: Some(s.native_terminal), browser: false,
                 rc_link: super::codex::link(ctx, &p.name).await,
                 rc_unavailable: s.rc_unavailable,
                 git: git.as_deref().map(parse_git_status), working: s.working,
@@ -218,7 +218,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             effort: meta.effort.clone(),
             variant: None,
             provider: None,
-            native_terminal: None, browser: None,
+            native_terminal: None, browser: false,
             rc_unavailable: false,
             rc_link,
             git: git_out.as_deref().map(parse_git_status),
@@ -232,13 +232,13 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
         });
     }
 
-    // One row per pane, in pane order. The flag keys off the pane's own path (the
-    // one /api/browser resolves), not a provider's saved dir.
+    // Keyed by the pane's own path (the one /api/browser resolves), not a
+    // provider's saved dir.
     let dirs: Vec<&str> = panes.iter().map(|p| p.path.as_str()).collect();
-    for (row, live) in running.iter_mut().zip(super::browser::browser_flags(&ctx.claude_dir, &dirs).await) {
-        if live {
-            row.browser = Some(true);
-        }
+    let flags = super::browser::browser_flags(&ctx.claude_dir, &dirs).await;
+    let live: HashSet<&str> = panes.iter().zip(flags).filter(|(_, on)| *on).map(|(p, _)| p.name.as_str()).collect();
+    for row in &mut running {
+        row.browser = live.contains(row.name.as_str());
     }
 
     let pane_pids: HashSet<i32> = panes.iter().map(|p| p.pid).collect();
@@ -794,8 +794,8 @@ mod tests {
 
         let r = collect_sessions(&ctx, RESUMABLE_MAX).await;
         assert_eq!(r.running[0].dir, "/saved", "the card shows the provider's saved dir");
-        assert_eq!(r.running[0].browser, Some(true), "the flag follows the pane path /proj");
-        assert_eq!(r.running[1].browser, None, "an unmapped pane has no flag");
+        assert!(r.running[0].browser, "the flag follows the pane path /proj");
+        assert!(!r.running[1].browser, "an unmapped pane has no flag");
     }
 
     #[test]
@@ -805,7 +805,7 @@ mod tests {
         let s = Session {
             display_name: None,
             name: "x".into(), dir: "/x".into(), pid: 1, uptime_sec: 0,
-            model: None, effort: None, variant: None, provider: None, native_terminal: None, browser: None, rc_link: None, rc_unavailable: false, git: None, working: false,
+            model: None, effort: None, variant: None, provider: None, native_terminal: None, browser: false, rc_link: None, rc_unavailable: false, git: None, working: false,
             last_message: None, sid: None, cpu: None, rss_kb: 0,
             cpu_sample_age_ms: 0, external: false,
         };

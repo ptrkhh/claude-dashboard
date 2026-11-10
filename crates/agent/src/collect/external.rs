@@ -28,9 +28,9 @@ pub struct Session {
     pub provider: Option<String>,
     #[serde(rename = "nativeTerminal", skip_serializing_if = "Option::is_none")]
     pub native_terminal: Option<bool>,
-    /// `true` only while this pane's folder maps to a live browser CDP port.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub browser: Option<bool>,
+    /// While this pane's folder maps to a live browser CDP port.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub browser: bool,
     #[serde(rename = "rcLink")]
     pub rc_link: Option<String>,
     #[serde(rename = "rcUnavailable", skip_serializing_if = "std::ops::Not::not")]
@@ -142,7 +142,7 @@ pub async fn external_sessions(
             variant: None,
             provider: None,
             native_terminal: None,
-            browser: None,
+            browser: false,
             rc_unavailable: false,
             rc_link: sess
                 .bridge_session_id

@@ -590,7 +590,7 @@ button, input, select { font: inherit; }
   background: #262523; color: #f4f2ec; font: 500 13px var(--font-mono);
 }
 .browser-stage {
-  flex: 1; min-height: 0; overflow: hidden; position: relative;
+  flex: 1; min-height: 0; overflow: hidden;
   touch-action: none; user-select: none; -webkit-user-select: none;
 }
 .browser-stage img {

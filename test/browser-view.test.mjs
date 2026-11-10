@@ -4,11 +4,10 @@ import '../public/browser/view.js';
 const B = globalThis.cdashBrowser;
 
 test('taps map from displayed image pixels to page CSS pixels', () => {
-  const meta = { deviceWidth: 985, deviceHeight: 640, offsetTop: 0, pageScaleFactor: 1 };
+  const meta = { deviceWidth: 985, deviceHeight: 640 };
   assert.deepEqual(B.toPage(0, 0, { w: 394, h: 256 }, meta), [0, 0]);
   assert.deepEqual(B.toPage(197, 128, { w: 394, h: 256 }, meta), [492.5, 320]);
   assert.deepEqual(B.toPage(394, 256, { w: 788, h: 512 }, meta), [492.5, 320], '2x image zoom');
-  assert.deepEqual(B.toPage(197, 128, { w: 394, h: 256 }, { ...meta, offsetTop: 20, pageScaleFactor: 1.5 }), [492.5, 320], 'coordinates already start at the image');
 });
 
 test('keyboard input becomes text or keys', () => {

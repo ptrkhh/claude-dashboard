@@ -110,7 +110,7 @@ The browser terminal sends input to the CLI, so anyone who can reach it can cont
 
 ### Browser view
 
-Some sessions drive a visible Chromium browser through Playwright MCP and stop at a login or MFA prompt. A session card shows **Browser** while its browser's debugging port answers. The overlay streams that session's tab to your phone so you can tap, type, scroll, switch tabs, go back and reload, then close it and let the agent carry on. It works with any Chromium-based browser that exposes the DevTools methods it needs (Chrome, Chromium, Brave, Edge and others). Edge is optional.
+Some sessions drive a visible Chromium browser through Playwright MCP and stop at a login or MFA prompt. A session card shows **Browser** while its browser's debugging port answers. The overlay streams that session's tab to your phone so you can tap, type, scroll, switch tabs, go back and reload, then close it and let the agent carry on. It works with any Chromium-based browser that exposes the DevTools methods it needs (Chrome, Chromium, Brave, Edge and others).
 
 The agent learns which port belongs to which folder from `cdash-browsers.json` in your Claude data folder (`~/.claude`, or `CLAUDE_DIR`). Write it by hand as an object of absolute session folder to port. A session uses the longest folder that equals or contains its directory:
 

@@ -501,7 +501,7 @@ function render(d) {
 
 document.body.addEventListener('click', async e => {
   const t = e.target.closest('[data-term]');
-  if (t) { if (browserView) closeBrowser(); openTerm(t.dataset.term, t.dataset.title); return; }
+  if (t) { if (!browserView) openTerm(t.dataset.term, t.dataset.title); return; }
   const b = e.target.closest('[data-browser]');
   if (b) { openBrowser(b.dataset.browser, b.dataset.title); return; }
   const c = e.target.closest('[data-copy]');
@@ -801,12 +801,6 @@ function browserSend(msg, needFrame = true) {
   v.ws.send(JSON.stringify(msg));
 }
 
-function browserMeta(f) {
-  const ok = n => typeof n === 'number' && Number.isFinite(n);
-  return f && ok(f.deviceWidth) && ok(f.deviceHeight) && f.deviceWidth > 0 && f.deviceHeight > 0
-    && ok(f.offsetTop) && ok(f.pageScaleFactor) ? f : null;
-}
-
 function browserShow(v, ws, meta, buf) {
   const frame = { epoch: v.epoch, seq: ++v.seq, meta, url: URL.createObjectURL(new Blob([buf], { type: 'image/jpeg' })) };
   const probe = new Image();
@@ -853,7 +847,7 @@ function browserOnMessage(v, ws, data) {
   if (typeof data === 'string') {
     let m;
     try { m = JSON.parse(data); } catch { return; }
-    if (m?.frame) v.pending = browserMeta(m.frame);
+    if (m?.frame) v.pending = m.frame; // the agent sends only positive, finite sizes
     else if (Array.isArray(m?.tabs)) browserTabs(v, m.tabs, m.active ?? null);
     return;
   }
@@ -897,9 +891,7 @@ async function browserConnect() {
 }
 
 function openBrowser(name, title) {
-  if (browserView) return;
-  const replace = !!term; // the terminal's history entry is reused, not stacked
-  if (term) closeTerm();
+  if (browserView || term) return; // one overlay at a time; each covers the cards
   browserView = {
     name, opener: document.activeElement, ws: null, retry: false, active: null, want: null,
     epoch: 0, seq: 0, pending: null, shown: null, composing: false, dedupe: null, enterSeen: false,
@@ -907,7 +899,7 @@ function openBrowser(name, title) {
   };
   $('#browser-title').textContent = `Browser · ${title}`;
   $('#browser').hidden = false;
-  history[replace ? 'replaceState' : 'pushState']({ browser: name }, ''); // Android back closes the overlay
+  history.pushState({ browser: name }, ''); // Android back closes the overlay
   browserConnect();
 }
 
@@ -916,13 +908,8 @@ function closeBrowser() {
   if (!v) return;
   browserView = null;
   v.ws?.close();
-  if (v.shown) URL.revokeObjectURL(v.shown.url);
-  const img = $('#browser-screen');
-  img.removeAttribute('src');
-  img.style.transform = '';
-  const input = $('#browser-input');
-  input.value = '';
-  input.disabled = true;
+  browserClearFrame(v); // with no view, every control turns off
+  $('#browser-input').value = '';
   $('#browser-tabs').textContent = '';
   $('#browser').hidden = true;
   v.opener?.focus?.();
@@ -1009,7 +996,7 @@ $('#browser-input').addEventListener('compositionend', e => {
   v.composing = false;
   $('#browser-input').value = BROWSER_SENTINEL;
   const text = e.data || ''; // empty when the composition was canceled
-  if (!text || !browserReady()) return;
+  if (!text) return;
   browserSend({ text });
   // Some browsers also fire a trailing input event for the same commit.
   v.dedupe = text;
@@ -1023,7 +1010,7 @@ $('#browser-input').addEventListener('input', e => {
   const field = $('#browser-input');
   const duplicate = (v.dedupe !== null && e.data === v.dedupe) || (v.enterSeen && e.inputType === 'insertLineBreak');
   v.dedupe = null;
-  const out = duplicate || !browserReady() ? [] : cdashBrowser.fromInput(e.inputType, e.data);
+  const out = duplicate ? [] : cdashBrowser.fromInput(e.inputType, e.data);
   field.value = BROWSER_SENTINEL;
   for (const m of out) browserSend(m);
 });

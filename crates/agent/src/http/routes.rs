@@ -62,7 +62,7 @@ pub async fn get_sessions(
 /// over this one, and the latter then names a path that is no longer ours.
 /// Without `/proc` (macOS) there is no answer — and there the client runs the
 /// agent in process, so nothing asks.
-pub(crate) fn build_id() -> Option<&'static str> {
+fn build_id() -> Option<&'static str> {
     static ID: OnceLock<Option<String>> = OnceLock::new();
     ID.get_or_init(|| {
         let exe = std::fs::read("/proc/self/exe").ok()?;
@@ -655,20 +655,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ui_assets_are_versioned_and_never_cached() {
-        // A CDN in front of the agent (Cloudflare caches .js/.css by default when
-        // the origin is silent) kept serving the old app.js after an upgrade.
+    async fn ui_assets_are_never_cached() {
+        // A cache in front of the agent must not keep an old app.js after an upgrade.
         let b = serve(cfg_for(tempdir("asset-cache"))).await.unwrap();
-        let get = |p: &str| reqwest::get(format!("http://{}{p}", b.addr));
-        let page = get("/").await.unwrap();
-        assert_eq!(page.headers().get("cache-control").map(|v| v.to_str().unwrap()), Some("no-cache"));
-        let html = page.text().await.unwrap();
-        for asset in ["style.css", "app.js", "browser/view.js", "term/keys.js"] {
-            assert!(html.contains(&format!("\"{asset}?v=")), "{asset} carries the build version");
+        for path in ["/", "/app.js", "/style.css"] {
+            let res = reqwest::get(format!("http://{}{path}", b.addr)).await.unwrap();
+            assert_eq!(res.headers().get("cache-control").map(|v| v.to_str().unwrap()), Some("no-cache"), "{path}");
         }
-        let js = get("/app.js?v=x").await.unwrap();
-        assert_eq!(js.status(), 200, "the version query does not change what is served");
-        assert_eq!(js.headers().get("cache-control").map(|v| v.to_str().unwrap()), Some("no-cache"));
     }
 
     #[tokio::test]

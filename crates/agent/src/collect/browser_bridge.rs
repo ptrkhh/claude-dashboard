@@ -7,8 +7,8 @@
 use super::browser::{browser_ws_url, char_events, clamp_point, key_events, parse_phone, PhoneMsg, Viewport};
 use super::cdp::{page_order, Cdp, Event};
 use super::ctx::Ctx;
-use super::term::{send_or_drop, PING_EVERY};
-use axum::extract::ws::{CloseFrame, Message, WebSocket};
+use super::term::{close_and_drain, ping_interval, send_or_drop};
+use axum::extract::ws::{Message, WebSocket};
 use base64::Engine;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -19,6 +19,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 const CLEANUP: Duration = Duration::from_secs(2);
 
 /// One page target. `origin` is a tuple origin or JSON null, never a URL.
+#[derive(PartialEq)]
 struct Tab {
     id: String,
     title: String,
@@ -47,19 +48,10 @@ enum Exit {
     Failed(&'static str),
 }
 
-/// Map a `Cdp` error to one of the fixed categories. Nothing else is ever
-/// logged, whatever the string holds.
-fn category(e: &str) -> &'static str {
+/// Errors from `Cdp` and discovery are already fixed categories
+/// (`connect`, `timeout`, `protocol`, `unsupported`); nothing else is logged.
+fn failed(e: &'static str) -> Exit {
     match e {
-        "connect" => "connect",
-        "timeout" => "timeout",
-        "unsupported" => "unsupported",
-        _ => "protocol",
-    }
-}
-
-fn failed(e: &str) -> Exit {
-    match category(e) {
         "unsupported" => Exit::Unsupported,
         // The browser's socket went away mid-session.
         "connect" => Exit::Gone,
@@ -88,10 +80,18 @@ fn tab_of(info: &Value) -> Option<Tab> {
     })
 }
 
-fn upsert(tabs: &mut Vec<Tab>, tab: Tab) {
+/// Insert or replace by id; `false` when the list already held exactly this.
+fn upsert(tabs: &mut Vec<Tab>, tab: Tab) -> bool {
     match tabs.iter_mut().find(|t| t.id == tab.id) {
-        Some(t) => *t = tab,
-        None => tabs.push(tab),
+        Some(t) if *t == tab => false,
+        Some(t) => {
+            *t = tab;
+            true
+        }
+        None => {
+            tabs.push(tab);
+            true
+        }
     }
 }
 
@@ -109,7 +109,7 @@ fn initial_tab<'a>(tabs: &'a [Tab], order: &[String]) -> Option<&'a Tab> {
     ranked().find(|t| !t.origin.is_null()).or_else(|| ranked().next())
 }
 
-async fn start_view(cdp: &Cdp, target: &str) -> Result<View, String> {
+async fn start_view(cdp: &Cdp, target: &str) -> Result<View, &'static str> {
     let r = cdp.call("Target.attachToTarget", json!({"targetId": target, "flatten": true}), None).await?;
     let session = r["sessionId"].as_str().ok_or("protocol")?.to_string();
     cdp.call("Page.enable", json!({}), Some(&session)).await?;
@@ -126,15 +126,10 @@ async fn stop_view(cdp: &Cdp, view: &View) {
     .await;
 }
 
-/// The page size and the metadata message for the phone, copied from CDP;
-/// `None` unless the page size is positive and finite and the other two fields
-/// are finite.
-fn frame_meta(m: &Value) -> Option<(Viewport, Value)> {
-    let n = |k: &str| m[k].as_f64().filter(|f| f.is_finite());
-    let (w, h) = (n("deviceWidth")?, n("deviceHeight")?);
-    let vp = Viewport::new(w, h)?;
-    Some((vp, json!({"frame": {
-        "deviceWidth": w, "deviceHeight": h, "offsetTop": n("offsetTop")?, "pageScaleFactor": n("pageScaleFactor")?}})))
+/// The frame's page size in CSS pixels, `None` unless positive and finite.
+/// It is all the phone needs to map a tap on the picture back onto the page.
+fn frame_size(m: &Value) -> Option<Viewport> {
+    Viewport::new(m["deviceWidth"].as_f64()?, m["deviceHeight"].as_f64()?)
 }
 
 /// Metadata text, then the JPEG, then the ack, so a slow link lowers the frame
@@ -143,7 +138,8 @@ fn frame_meta(m: &Value) -> Option<(Viewport, Value)> {
 async fn relay_frame(cdp: &Cdp, ws: &mut WebSocket, view: &mut View, e: &Event) -> Option<Exit> {
     let p = &e.params;
     let jpeg = p["data"].as_str().and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok());
-    if let (Some((vp, meta)), Some(jpeg)) = (frame_meta(&p["metadata"]), jpeg) {
+    if let (Some(vp), Some(jpeg)) = (frame_size(&p["metadata"]), jpeg) {
+        let meta = json!({"frame": {"deviceWidth": vp.width, "deviceHeight": vp.height}});
         if !send_or_drop(ws, Message::Text(meta.to_string().into())).await
             || !send_or_drop(ws, Message::Binary(jpeg.into())).await
         {
@@ -152,7 +148,7 @@ async fn relay_frame(cdp: &Cdp, ws: &mut WebSocket, view: &mut View, e: &Event) 
         view.viewport = Some(vp);
     }
     let ack = p["sessionId"].as_u64()?;
-    cdp.call("Page.screencastFrameAck", json!({"sessionId": ack}), e.session.as_deref()).await.err().map(|e| failed(&e))
+    cdp.call("Page.screencastFrameAck", json!({"sessionId": ack}), e.session.as_deref()).await.err().map(failed)
 }
 
 async fn on_event(cdp: &Cdp, ws: &mut WebSocket, tabs: &mut Vec<Tab>, view: &mut Option<View>, e: Event) -> Option<Exit> {
@@ -163,7 +159,9 @@ async fn on_event(cdp: &Cdp, ws: &mut WebSocket, tabs: &mut Vec<Tab>, view: &mut
             relay_frame(cdp, ws, v, &e).await
         }
         "Target.targetCreated" | "Target.targetInfoChanged" => {
-            upsert(tabs, tab_of(&e.params["targetInfo"])?);
+            if !upsert(tabs, tab_of(&e.params["targetInfo"])?) {
+                return None; // nothing the phone shows changed
+            }
             (!send_or_drop(ws, tabs_msg(tabs, view.as_ref())).await).then_some(Exit::Failed("send"))
         }
         "Target.targetDestroyed" => {
@@ -194,12 +192,12 @@ async fn switch_tab(cdp: &Cdp, ws: &mut WebSocket, tabs: &[Tab], view: &mut Opti
     }
     match start_view(cdp, id).await {
         Ok(v) => *view = Some(v),
-        Err(e) => return Some(failed(&e)),
+        Err(e) => return Some(failed(e)),
     }
     (!send_or_drop(ws, tabs_msg(tabs, view.as_ref())).await).then_some(Exit::Failed("send"))
 }
 
-async fn back(cdp: &Cdp, session: Option<&str>) -> Result<(), String> {
+async fn back(cdp: &Cdp, session: Option<&str>) -> Result<(), &'static str> {
     let h = cdp.call("Page.getNavigationHistory", json!({}), session).await?;
     let previous = (h["currentIndex"].as_u64().and_then(|i| i.checked_sub(1)))
         .and_then(|i| h["entries"][i as usize]["id"].as_u64());
@@ -211,7 +209,7 @@ async fn back(cdp: &Cdp, session: Option<&str>) -> Result<(), String> {
 
 /// Points are clamped to the page; text is one key press per character, never
 /// one insert, so one-box-per-digit fields fill.
-async fn send_input(cdp: &Cdp, session: Option<&str>, vp: &Viewport, msg: PhoneMsg) -> Result<(), String> {
+async fn send_input(cdp: &Cdp, session: Option<&str>, vp: &Viewport, msg: PhoneMsg) -> Result<(), &'static str> {
     let mouse = |p: Value| cdp.call("Input.dispatchMouseEvent", p, session);
     let key = |p: Value| cdp.call("Input.dispatchKeyEvent", p, session);
     match msg {
@@ -259,7 +257,7 @@ async fn on_phone(cdp: &Cdp, ws: &mut WebSocket, tabs: &[Tab], view: &mut Option
             None => Ok(()),
         },
     };
-    done.err().map(|e| failed(&e))
+    done.err().map(failed)
 }
 
 async fn pump(
@@ -273,8 +271,7 @@ async fn pump(
     if !send_or_drop(ws, tabs_msg(tabs, view.as_ref())).await {
         return Exit::Failed("send");
     }
-    let mut ping = tokio::time::interval(PING_EVERY);
-    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut ping = ping_interval();
     let mut heard = true;
     loop {
         tokio::select! {
@@ -306,27 +303,27 @@ async fn pump(
 async fn run(port: u16, ws: &mut WebSocket) -> Exit {
     let url = match browser_ws_url(port).await {
         Ok(u) => u,
-        Err(e) => return Exit::NotRunning(category(&e)),
+        Err(e) => return Exit::NotRunning(e),
     };
     let (cdp, mut events) = match Cdp::connect(&url).await {
         Ok(c) => c,
-        Err(e) => return Exit::NotRunning(category(&e)),
+        Err(e) => return Exit::NotRunning(e),
     };
     // Discover first, so a tab change cannot fall between the snapshot and the
     // subscription; early events queue and are applied after the list is sent.
     if let Err(e) = cdp.call("Target.setDiscoverTargets", json!({"discover": true}), None).await {
-        return failed(&e);
+        return failed(e);
     }
     let listed = match cdp.call("Target.getTargets", json!({}), None).await {
         Ok(v) => v,
-        Err(e) => return failed(&e),
+        Err(e) => return failed(e),
     };
     let mut tabs: Vec<Tab> = listed["targetInfos"].as_array().map(|a| a.iter().filter_map(tab_of).collect()).unwrap_or_default();
     let mut view = None;
     if let Some(t) = initial_tab(&tabs, &page_order(port).await) {
         match start_view(&cdp, &t.id).await {
             Ok(v) => view = Some(v),
-            Err(e) => return failed(&e),
+            Err(e) => return failed(e),
         }
     }
     let exit = pump(&cdp, &mut events, ws, &mut tabs, &mut view).await;
@@ -356,11 +353,7 @@ pub async fn bridge(ctx: Arc<Ctx>, name: String, port: u16, mut ws: WebSocket) {
         }
     };
     if let Some((code, reason)) = close {
-        let _ = ws.send(Message::Close(Some(CloseFrame { code, reason: reason.into() }))).await;
-        // Wait for the phone's Close reply; dropping the socket with a frame
-        // unread can turn the close code into a plain 1006.
-        let drain = async { while let Some(Ok(_)) = ws.recv().await {} };
-        let _ = tokio::time::timeout(Duration::from_secs(1), drain).await;
+        close_and_drain(&mut ws, code, reason).await;
     }
     ctx.host.log.push(format!("browser close {name}"));
 }
@@ -369,8 +362,8 @@ pub async fn bridge(ctx: Arc<Ctx>, name: String, port: u16, mut ws: WebSocket) {
 mod tests {
     use super::*;
     use crate::collect::browser::MAP_FILE;
-    use crate::collect::cdp::fake::{fake_edge, FakeEdge};
-    use crate::collect::term::tests::{have_tmux, status_of, tempdir, Session, Ws};
+    use crate::collect::cdp::fake::{fake_browser, Call, FakeBrowser};
+    use crate::collect::term::tests::{eventually, have_tmux, status_of, tempdir, Session, Ws};
     use crate::http::serve::{serve, tests::cfg_for, Bound};
     use futures_util::{SinkExt, StreamExt};
     use serde_json::{json, Value};
@@ -380,7 +373,7 @@ mod tests {
     use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest, Message as WsMsg};
 
     const WAIT: Duration = Duration::from_secs(5);
-    const CANARIES: [&str; 4] = ["URL_CANARY", "TITLE_CANARY", "typed-text", "CANARY"];
+    const CANARIES: [&str; 2] = ["CANARY", "typed-text"];
     /// The only CDP methods cdash-agent may call.
     const ALLOWED: [&str; 13] = [
         "Target.getTargets", "Target.setDiscoverTargets", "Target.attachToTarget", "Target.detachFromTarget",
@@ -391,7 +384,7 @@ mod tests {
 
     struct Rig {
         b: Bound,
-        edge: FakeEdge,
+        fake: FakeBrowser,
         name: String,
         claude: PathBuf,
         work: PathBuf,
@@ -407,10 +400,10 @@ mod tests {
         let claude = tempdir(&format!("bb-{tag}"));
         let work = std::fs::canonicalize(tempdir(&format!("bbw-{tag}"))).unwrap();
         let s = Session::in_dir(&format!("bb-{tag}"), &work);
-        let edge = fake_edge(pages).await;
+        let fake = fake_browser(pages).await;
         let b = serve(cfg_for(claude.clone())).await.unwrap();
-        let rig = Rig { name: s.0.clone(), b, edge, claude, work, _s: s };
-        rig.remap(Some(rig.edge.port));
+        let rig = Rig { name: s.0.clone(), b, fake, claude, work, _s: s };
+        rig.remap(Some(rig.fake.port));
         Some(rig)
     }
 
@@ -475,10 +468,10 @@ mod tests {
         }
     }
 
-    async fn call_until(edge: &mut FakeEdge, method: &str) -> (Value, Option<String>) {
+    async fn call_until(fake: &mut FakeBrowser, method: &str) -> (Value, Option<String>) {
         tokio::time::timeout(WAIT, async {
             loop {
-                let (m, p, s) = edge.calls.recv().await.expect("fake browser gone");
+                let (m, p, s) = fake.calls.recv().await.expect("fake browser gone");
                 if m == method {
                     return (p, s);
                 }
@@ -489,22 +482,12 @@ mod tests {
     }
 
     /// Everything the bridge calls until it has been quiet for `settle`.
-    async fn drain_calls(edge: &mut FakeEdge, settle: Duration) -> Vec<(String, Value, Option<String>)> {
+    async fn drain_calls(fake: &mut FakeBrowser, settle: Duration) -> Vec<(String, Value, Option<String>)> {
         let mut out = Vec::new();
-        while let Ok(Some(c)) = tokio::time::timeout(settle, edge.calls.recv()).await {
+        while let Ok(Some(c)) = tokio::time::timeout(settle, fake.calls.recv()).await {
             out.push(c);
         }
         out
-    }
-
-    async fn eventually(what: &str, mut f: impl FnMut() -> bool) {
-        for _ in 0..50 {
-            if f() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        panic!("never happened: {what}");
     }
 
     fn frame_event(session: &str, data: &str, ack_id: u64, w: f64, h: f64) -> Value {
@@ -530,8 +513,8 @@ mod tests {
     async fn refusals_happen_before_upgrade() {
         let Some(r) = rig("refuse", &[]).await else { return };
         let q = format!("name={}", r.name);
-        assert_eq!(status_of(connect(r.b.addr, &q, Some("https://evil.example")).await), 403);
-        assert_eq!(status_of(connect(r.b.addr, "name=other", None).await), 400);
+        assert_eq!(status_of(connect(r.b.addr, &q, Some("https://CANARY.example")).await), 403);
+        assert_eq!(status_of(connect(r.b.addr, "name=other-CANARY", None).await), 400);
         assert_eq!(status_of(connect(r.b.addr, "name=cdash-missing", None).await), 404);
         r.remap(None);
         assert_eq!(status_of(connect(r.b.addr, &q, None).await), 404, "a session in an unmapped folder");
@@ -539,6 +522,7 @@ mod tests {
         for line in ["browser refused: origin", "browser refused: name", "browser refused: session", "browser refused: mapping"] {
             assert!(log.iter().any(|l| l == line), "missing {line:?} in {log:?}");
         }
+        r.assert_no_canary();
     }
 
     #[tokio::test]
@@ -548,14 +532,14 @@ mod tests {
         let tabs = text(&mut ws).await;
         assert_eq!(tabs["active"], "P1");
         assert_eq!(tabs["tabs"], json!([{"id": "P1", "title": "A", "origin": "https://a.example"}]));
-        let (p, s) = call_until(&mut r.edge, "Page.startScreencast").await;
+        let (p, s) = call_until(&mut r.fake, "Page.startScreencast").await;
         assert_eq!((p["format"].as_str(), p["quality"].as_u64(), p["maxWidth"].as_u64(), s.as_deref()), (Some("jpeg"), Some(60), Some(1280), Some("S-P1")));
 
-        r.edge.events.send(frame_event("S-P1", "SlBFRw==", 7, 1000.0, 600.0)).unwrap();
+        r.fake.events.send(frame_event("S-P1", "SlBFRw==", 7, 1000.0, 600.0)).unwrap();
         let meta = text(&mut ws).await;
-        assert_eq!(meta, json!({"frame": {"deviceWidth": 1000.0, "deviceHeight": 600.0, "offsetTop": 0.0, "pageScaleFactor": 1.0}}));
+        assert_eq!(meta, json!({"frame": {"deviceWidth": 1000.0, "deviceHeight": 600.0}}));
         assert_eq!(next_msg(&mut ws).await, WsMsg::binary(b"JPEG".to_vec()));
-        let (p, s) = call_until(&mut r.edge, "Page.screencastFrameAck").await;
+        let (p, s) = call_until(&mut r.fake, "Page.screencastFrameAck").await;
         assert_eq!((p["sessionId"].as_u64(), s.as_deref()), (Some(7), Some("S-P1")));
     }
 
@@ -564,16 +548,16 @@ mod tests {
         let Some(mut r) = rig("badframe", &[("P1", "https://a.example/", "A")]).await else { return };
         let mut ws = r.open().await;
         text(&mut ws).await;
-        call_until(&mut r.edge, "Page.startScreencast").await;
+        call_until(&mut r.fake, "Page.startScreencast").await;
         for (i, (w, h)) in [(0.0, 600.0), (1000.0, -1.0)].into_iter().enumerate() {
-            r.edge.events.send(frame_event("S-P1", "QkFE", 100 + i as u64, w, h)).unwrap();
+            r.fake.events.send(frame_event("S-P1", "QkFE", 100 + i as u64, w, h)).unwrap();
         }
-        r.edge.events.send(frame_event("S-P1", "!!not base64!!", 102, 1000.0, 600.0)).unwrap();
-        r.edge.events.send(frame_event("S-OLD", "T0xE", 103, 1000.0, 600.0)).unwrap();
-        r.edge.events.send(frame_event("S-P1", "R09PRA==", 104, 1000.0, 600.0)).unwrap();
+        r.fake.events.send(frame_event("S-P1", "!!not base64!!", 102, 1000.0, 600.0)).unwrap();
+        r.fake.events.send(frame_event("S-OLD", "T0xE", 103, 1000.0, 600.0)).unwrap();
+        r.fake.events.send(frame_event("S-P1", "R09PRA==", 104, 1000.0, 600.0)).unwrap();
         assert_eq!(text(&mut ws).await["frame"]["deviceWidth"], 1000.0);
         assert_eq!(next_msg(&mut ws).await, WsMsg::binary(b"GOOD".to_vec()), "only the valid frame reaches the phone");
-        let acks: Vec<u64> = drain_calls(&mut r.edge, Duration::from_millis(300)).await.into_iter()
+        let acks: Vec<u64> = drain_calls(&mut r.fake, Duration::from_millis(300)).await.into_iter()
             .filter(|(m, ..)| m == "Page.screencastFrameAck").filter_map(|(_, p, _)| p["sessionId"].as_u64()).collect();
         assert_eq!(acks, vec![100, 101, 102, 104], "bad frames are acked so the stream keeps flowing; a stale session's frame is ignored");
     }
@@ -592,7 +576,7 @@ mod tests {
         let Some(r) = rig("gone", &[("P1", "https://a.example/", "A")]).await else { return };
         let mut ws = r.open().await;
         text(&mut ws).await;
-        r.edge.drop_socket.notify_one();
+        r.fake.drop_socket.notify_one();
         assert_eq!(close_of(&mut ws).await, (4003, "Browser closed".to_string()));
     }
 
@@ -627,35 +611,16 @@ mod tests {
 
         // A CDP call fails while streaming starts.
         let Some(r) = rig("canary-cdp", &[("P1", "https://a.example/", "A")]).await else { return };
-        r.edge.replies.lock().unwrap().insert("Page.startScreencast".into(), err(-32000));
+        r.fake.replies.lock().unwrap().insert("Page.startScreencast".into(), err(-32000));
         assert_eq!(close_of(&mut r.open().await).await, (1011, "Browser connection failed".to_string()));
         eventually("failure is logged", || r.log().contains(&format!("browser failed {}: protocol", r.name))).await;
-        r.assert_no_canary();
-
-        // Rejected Origin and name never reach the log.
-        let Some(r) = rig("canary-in", &[]).await else { return };
-        assert_eq!(status_of(connect(r.b.addr, &format!("name={}", r.name), Some("https://CANARY.example")).await), 403);
-        assert_eq!(status_of(connect(r.b.addr, "name=other-URL_CANARY", None).await), 400);
-        r.assert_no_canary();
-
-        // Cleanup calls fail when the phone leaves.
-        let Some(r) = rig("canary-clean", &[("P1", "https://a.example/", "A")]).await else { return };
-        {
-            let mut replies = r.edge.replies.lock().unwrap();
-            replies.insert("Page.stopScreencast".into(), err(-32000));
-            replies.insert("Target.detachFromTarget".into(), err(-32000));
-        }
-        let mut ws = r.open().await;
-        text(&mut ws).await;
-        ws.send(WsMsg::Close(None)).await.unwrap();
-        eventually("close is logged", || r.log().contains(&format!("browser close {}", r.name))).await;
         r.assert_no_canary();
     }
 
     #[tokio::test]
     async fn missing_cdp_method_closes_4004() {
         let Some(r) = rig("unsupported", &[("P1", "https://a.example/", "A")]).await else { return };
-        r.edge.replies.lock().unwrap().insert(
+        r.fake.replies.lock().unwrap().insert(
             "Page.startScreencast".into(),
             Some(json!({"error": {"code": -32601, "message": "URL_CANARY"}})),
         );
@@ -683,7 +648,7 @@ mod tests {
         for (tag, failing_cleanup) in [("detach", false), ("detach-fail", true)] {
             let Some(mut r) = rig(tag, &[("P1", "https://a.example/", "A")]).await else { return };
             if failing_cleanup {
-                r.edge.replies.lock().unwrap().insert(
+                r.fake.replies.lock().unwrap().insert(
                     "Page.stopScreencast".into(),
                     Some(json!({"error": {"code": -32000, "message": "URL_CANARY"}})),
                 );
@@ -691,14 +656,15 @@ mod tests {
             let mut ws = r.open().await;
             text(&mut ws).await;
             ws.send(WsMsg::Close(None)).await.unwrap();
-            eventually("the CDP socket closes", || r.edge.connections.load(Ordering::SeqCst) == 0).await;
-            let calls = drain_calls(&mut r.edge, Duration::from_millis(300)).await;
+            eventually("the CDP socket closes", || r.fake.connections.load(Ordering::SeqCst) == 0).await;
+            let calls = drain_calls(&mut r.fake, Duration::from_millis(300)).await;
             let find = |m: &str| calls.iter().find(|(c, ..)| c == m);
             assert_eq!(find("Page.stopScreencast").and_then(|c| c.2.clone()).as_deref(), Some("S-P1"), "{tag}");
             assert_eq!(find("Target.detachFromTarget").and_then(|c| c.1["sessionId"].as_str().map(str::to_string)).as_deref(), Some("S-P1"), "{tag}: detach even when stop failed");
             for (m, ..) in &calls {
                 assert!(ALLOWED.contains(&m.as_str()), "{m} is not an allowed CDP method");
             }
+            r.assert_no_canary();
         }
     }
 
@@ -711,7 +677,7 @@ mod tests {
         let tabs = text(&mut ws).await;
         assert_eq!(tabs["active"], "P1", "{tabs}");
         assert_eq!(tabs["tabs"].as_array().unwrap().len(), 2, "the browser's own page stays pickable");
-        let (p, _) = call_until(&mut r.edge, "Target.attachToTarget").await;
+        let (p, _) = call_until(&mut r.fake, "Target.attachToTarget").await;
         assert_eq!(p["targetId"], "P1");
     }
 
@@ -720,17 +686,15 @@ mod tests {
         let Some(mut r) = rig("nopages", &[]).await else { return };
         let mut ws = r.open().await;
         assert_eq!(text(&mut ws).await, json!({"tabs": [], "active": null}));
-        r.edge.events.send(page_event("Target.targetCreated", "P9", "https://z.example/")).unwrap();
+        r.fake.events.send(page_event("Target.targetCreated", "P9", "https://z.example/")).unwrap();
         assert_eq!(text(&mut ws).await, json!({"tabs": [{"id": "P9", "title": "T", "origin": "https://z.example"}], "active": null}));
-        let calls = drain_calls(&mut r.edge, Duration::from_millis(300)).await;
+        let calls = drain_calls(&mut r.fake, Duration::from_millis(300)).await;
         assert!(calls.iter().all(|(m, ..)| m != "Target.attachToTarget" && m != "Page.startScreencast"), "{calls:?}");
     }
 
     async fn send(ws: &mut Ws, v: Value) {
         ws.send(WsMsg::text(v.to_string())).await.unwrap();
     }
-
-    type Call = (String, Value, Option<String>);
 
     fn only<'a>(calls: &'a [Call], method: &str) -> Vec<&'a Call> {
         calls.iter().filter(|(m, ..)| m == method).collect()
@@ -743,11 +707,11 @@ mod tests {
         let mut r = rig(tag, pages).await?;
         let mut ws = r.open().await;
         text(&mut ws).await;
-        call_until(&mut r.edge, "Page.startScreencast").await;
-        r.edge.events.send(frame_event("S-P1", "SlBFRw==", 1, 1000.0, 600.0)).unwrap();
+        call_until(&mut r.fake, "Page.startScreencast").await;
+        r.fake.events.send(frame_event("S-P1", "SlBFRw==", 1, 1000.0, 600.0)).unwrap();
         text(&mut ws).await;
         next_msg(&mut ws).await;
-        drain_calls(&mut r.edge, SETTLE).await;
+        drain_calls(&mut r.fake, SETTLE).await;
         Some((r, ws))
     }
 
@@ -756,15 +720,15 @@ mod tests {
         let Some(mut r) = rig("noframe", &[("P1", "https://a.example/", "A")]).await else { return };
         let mut ws = r.open().await;
         text(&mut ws).await;
-        call_until(&mut r.edge, "Page.startScreencast").await;
+        call_until(&mut r.fake, "Page.startScreencast").await;
         send(&mut ws, json!({"tap": [5, 5]})).await;
-        let early = drain_calls(&mut r.edge, SETTLE).await;
+        let early = drain_calls(&mut r.fake, SETTLE).await;
         assert!(only(&early, "Input.dispatchMouseEvent").is_empty(), "{early:?}");
-        r.edge.events.send(frame_event("S-P1", "SlBFRw==", 1, 1000.0, 600.0)).unwrap();
+        r.fake.events.send(frame_event("S-P1", "SlBFRw==", 1, 1000.0, 600.0)).unwrap();
         text(&mut ws).await;
         next_msg(&mut ws).await;
         send(&mut ws, json!({"tap": [2000, -1]})).await;
-        let calls = drain_calls(&mut r.edge, SETTLE).await;
+        let calls = drain_calls(&mut r.fake, SETTLE).await;
         let mouse = only(&calls, "Input.dispatchMouseEvent");
         let kinds: Vec<_> = mouse.iter().map(|c| c.1["type"].as_str().unwrap()).collect();
         assert_eq!(kinds, ["mouseMoved", "mousePressed", "mouseReleased"]);
@@ -778,7 +742,7 @@ mod tests {
     async fn scroll_becomes_a_clamped_wheel_event() {
         let Some((mut r, mut ws)) = viewing("scroll", &[("P1", "https://a.example/", "A")]).await else { return };
         send(&mut ws, json!({"scroll": [-3, 700, 4, -25]})).await;
-        let calls = drain_calls(&mut r.edge, SETTLE).await;
+        let calls = drain_calls(&mut r.fake, SETTLE).await;
         let wheel = only(&calls, "Input.dispatchMouseEvent");
         assert_eq!(wheel.len(), 1);
         let p = &wheel[0].1;
@@ -789,7 +753,7 @@ mod tests {
     async fn text_becomes_key_presses() {
         let Some((mut r, mut ws)) = viewing("text", &[("P1", "https://a.example/", "A")]).await else { return };
         send(&mut ws, json!({"text": "a$"})).await;
-        let calls = drain_calls(&mut r.edge, SETTLE).await;
+        let calls = drain_calls(&mut r.fake, SETTLE).await;
         let keys: Vec<_> = only(&calls, "Input.dispatchKeyEvent").iter().map(|c| (c.1["type"].as_str().unwrap().to_string(), c.1["text"].as_str().map(str::to_string), c.1["windowsVirtualKeyCode"].as_u64())).collect();
         assert_eq!(keys, vec![
             ("keyDown".to_string(), Some("a".to_string()), Some(65)), ("keyUp".to_string(), None, Some(65)),
@@ -802,7 +766,7 @@ mod tests {
     async fn backspace_has_vk_8() {
         let Some((mut r, mut ws)) = viewing("bksp", &[("P1", "https://a.example/", "A")]).await else { return };
         send(&mut ws, json!({"key": "Backspace"})).await;
-        let calls = drain_calls(&mut r.edge, SETTLE).await;
+        let calls = drain_calls(&mut r.fake, SETTLE).await;
         let keys = only(&calls, "Input.dispatchKeyEvent");
         let seen: Vec<_> = keys.iter().map(|c| (c.1["type"].as_str().unwrap(), c.1["windowsVirtualKeyCode"].as_u64())).collect();
         assert_eq!(seen, [("rawKeyDown", Some(8)), ("keyUp", Some(8))]);
@@ -813,32 +777,32 @@ mod tests {
         let Some((mut r, mut ws)) = viewing("tabs", &[("P1", "https://a.example/", "A"), ("P2", "https://b.example/", "B")]).await else { return };
         send(&mut ws, json!({"tab": "nope"})).await;
         send(&mut ws, json!({"tab": "P1"})).await;
-        let none = drain_calls(&mut r.edge, SETTLE).await;
+        let none = drain_calls(&mut r.fake, SETTLE).await;
         assert!(none.is_empty(), "an unlisted tab and the tab already shown make no calls: {none:?}");
 
         send(&mut ws, json!({"tab": "P2"})).await;
         let tabs = text(&mut ws).await;
         assert_eq!(tabs["active"], "P2");
-        let calls = drain_calls(&mut r.edge, SETTLE).await;
+        let calls = drain_calls(&mut r.fake, SETTLE).await;
         let attach = only(&calls, "Target.attachToTarget");
         assert_eq!(attach.len(), 1);
         assert_eq!(attach[0].1["targetId"], "P2");
         assert_eq!(only(&calls, "Page.stopScreencast")[0].2.as_deref(), Some("S-P1"), "the old view is stopped");
 
-        r.edge.events.send(page_event("Target.targetCreated", "P3", "https://c.example/")).unwrap();
+        r.fake.events.send(page_event("Target.targetCreated", "P3", "https://c.example/")).unwrap();
         let tabs = text(&mut ws).await;
         assert_eq!((tabs["active"].clone(), tabs["tabs"].as_array().unwrap().len()), (json!("P2"), 3));
 
-        r.edge.events.send(frame_event("S-P2", "SlBFRw==", 2, 500.0, 300.0)).unwrap();
+        r.fake.events.send(frame_event("S-P2", "SlBFRw==", 2, 500.0, 300.0)).unwrap();
         text(&mut ws).await;
         next_msg(&mut ws).await;
-        r.edge.events.send(json!({"method": "Target.targetDestroyed", "params": {"targetId": "P2"}})).unwrap();
+        r.fake.events.send(json!({"method": "Target.targetDestroyed", "params": {"targetId": "P2"}})).unwrap();
         let tabs = text(&mut ws).await;
         assert_eq!(tabs["active"], Value::Null);
         assert_eq!(tabs["tabs"].as_array().unwrap().len(), 2);
-        drain_calls(&mut r.edge, SETTLE).await;
+        drain_calls(&mut r.fake, SETTLE).await;
         send(&mut ws, json!({"text": "x"})).await;
-        let after = drain_calls(&mut r.edge, SETTLE).await;
+        let after = drain_calls(&mut r.fake, SETTLE).await;
         assert!(after.is_empty(), "no input once the viewed tab is gone: {after:?}");
     }
 
@@ -847,7 +811,7 @@ mod tests {
         let Some((mut r, mut ws)) = viewing("back", &[("P1", "https://a.example/", "A")]).await else { return };
         send(&mut ws, json!({"nav": "back"})).await;
         send(&mut ws, json!({"nav": "reload"})).await;
-        let calls = drain_calls(&mut r.edge, SETTLE).await;
+        let calls = drain_calls(&mut r.fake, SETTLE).await;
         let nav = only(&calls, "Page.navigateToHistoryEntry");
         assert_eq!((nav.len(), nav[0].1["entryId"].as_u64(), nav[0].2.as_deref()), (1, Some(10), Some("S-P1")));
         assert_eq!(only(&calls, "Page.reload")[0].2.as_deref(), Some("S-P1"));
@@ -856,12 +820,12 @@ mod tests {
     #[tokio::test]
     async fn back_at_the_first_entry_does_nothing() {
         let Some((mut r, mut ws)) = viewing("back0", &[("P1", "https://a.example/", "A")]).await else { return };
-        r.edge.replies.lock().unwrap().insert(
+        r.fake.replies.lock().unwrap().insert(
             "Page.getNavigationHistory".into(),
             Some(json!({"result": {"currentIndex": 0, "entries": [{"id": 10}]}})),
         );
         send(&mut ws, json!({"nav": "back"})).await;
-        let calls = drain_calls(&mut r.edge, SETTLE).await;
+        let calls = drain_calls(&mut r.fake, SETTLE).await;
         assert_eq!(only(&calls, "Page.getNavigationHistory").len(), 1, "Back looked at the history: {calls:?}");
         assert!(only(&calls, "Page.navigateToHistoryEntry").is_empty(), "{calls:?}");
     }
@@ -871,26 +835,26 @@ mod tests {
         let Some((mut r, mut ws)) = viewing("stale", &[("P1", "https://a.example/", "A"), ("P2", "https://b.example/", "B")]).await else { return };
         send(&mut ws, json!({"tab": "P2"})).await;
         text(&mut ws).await;
-        drain_calls(&mut r.edge, SETTLE).await;
+        drain_calls(&mut r.fake, SETTLE).await;
 
         // A queued frame from the old session, then input: nothing.
-        r.edge.events.send(frame_event("S-P1", "T0xE", 50, 1000.0, 600.0)).unwrap();
+        r.fake.events.send(frame_event("S-P1", "T0xE", 50, 1000.0, 600.0)).unwrap();
         tokio::time::sleep(SETTLE).await;
         send(&mut ws, json!({"tap": [5, 5]})).await;
         // A frame for the new tab with an unusable size does not enable input either.
-        r.edge.events.send(frame_event("S-P2", "QkFE", 51, 0.0, 300.0)).unwrap();
+        r.fake.events.send(frame_event("S-P2", "QkFE", 51, 0.0, 300.0)).unwrap();
         tokio::time::sleep(SETTLE).await;
         send(&mut ws, json!({"text": "x"})).await;
-        let calls = drain_calls(&mut r.edge, SETTLE).await;
+        let calls = drain_calls(&mut r.fake, SETTLE).await;
         assert!(calls.iter().all(|(m, ..)| !m.starts_with("Input.")), "input reached the browser: {calls:?}");
         assert!(only(&calls, "Page.screencastFrameAck").iter().all(|c| c.2.as_deref() == Some("S-P2")), "the old session's frame is not acked");
 
         // Only a valid frame from the new tab sets the viewport, and clamping uses it.
-        r.edge.events.send(frame_event("S-P2", "SlBFRw==", 52, 500.0, 300.0)).unwrap();
+        r.fake.events.send(frame_event("S-P2", "SlBFRw==", 52, 500.0, 300.0)).unwrap();
         text(&mut ws).await;
         next_msg(&mut ws).await;
         send(&mut ws, json!({"tap": [9999, 9999]})).await;
-        let calls = drain_calls(&mut r.edge, SETTLE).await;
+        let calls = drain_calls(&mut r.fake, SETTLE).await;
         let mouse = only(&calls, "Input.dispatchMouseEvent");
         assert_eq!(mouse.len(), 3);
         for c in mouse {
@@ -901,17 +865,17 @@ mod tests {
     #[tokio::test]
     async fn closed_tab_can_be_replaced() {
         let Some((mut r, mut ws)) = viewing("closed", &[("P1", "https://a.example/", "A"), ("P2", "https://b.example/", "B")]).await else { return };
-        r.edge.events.send(json!({"method": "Target.targetDestroyed", "params": {"targetId": "P1"}})).unwrap();
+        r.fake.events.send(json!({"method": "Target.targetDestroyed", "params": {"targetId": "P1"}})).unwrap();
         assert_eq!(text(&mut ws).await["active"], Value::Null);
-        drain_calls(&mut r.edge, SETTLE).await;
+        drain_calls(&mut r.fake, SETTLE).await;
         send(&mut ws, json!({"nav": "back"})).await;
         send(&mut ws, json!({"nav": "reload"})).await;
-        let idle = drain_calls(&mut r.edge, SETTLE).await;
+        let idle = drain_calls(&mut r.fake, SETTLE).await;
         assert!(idle.is_empty(), "back/reload with no active tab: {idle:?}");
 
         send(&mut ws, json!({"tab": "P2"})).await;
         assert_eq!(text(&mut ws).await["active"], "P2");
-        let calls = drain_calls(&mut r.edge, SETTLE).await;
+        let calls = drain_calls(&mut r.fake, SETTLE).await;
         assert_eq!(only(&calls, "Target.attachToTarget")[0].1["targetId"], "P2");
         assert!(only(&calls, "Page.stopScreencast").is_empty() && only(&calls, "Target.detachFromTarget").is_empty(), "the destroyed session is not called: {calls:?}");
     }
@@ -919,18 +883,20 @@ mod tests {
     #[tokio::test]
     async fn non_page_targets_do_not_disturb_the_list() {
         let Some((r, mut ws)) = viewing("nonpage", &[("P1", "https://a.example/", "A")]).await else { return };
-        r.edge.events.send(json!({"method": "Target.targetCreated", "params": {"targetInfo": {"targetId": "W1", "type": "service_worker", "url": "https://a.example/sw.js"}}})).unwrap();
-        r.edge.events.send(json!({"method": "Target.targetDestroyed", "params": {"targetId": "W1"}})).unwrap();
-        r.edge.events.send(page_event("Target.targetInfoChanged", "P1", "https://a.example/next")).unwrap();
+        r.fake.events.send(json!({"method": "Target.targetCreated", "params": {"targetInfo": {"targetId": "W1", "type": "service_worker", "url": "https://a.example/sw.js"}}})).unwrap();
+        r.fake.events.send(json!({"method": "Target.targetDestroyed", "params": {"targetId": "W1"}})).unwrap();
+        r.fake.events.send(json!({"method": "Target.targetInfoChanged", "params": {"targetInfo": {"targetId": "P1", "type": "page", "url": "https://a.example/", "title": "A"}}})).unwrap();
+        r.fake.events.send(page_event("Target.targetInfoChanged", "P1", "https://a.example/next")).unwrap();
         let tabs = text(&mut ws).await;
         assert_eq!(tabs["tabs"].as_array().unwrap().len(), 1, "the first list update is P1's own: {tabs}");
+        assert_eq!(tabs["tabs"][0]["title"], "T", "an update that changes nothing shown is not sent: {tabs}");
         assert_eq!(tabs["active"], "P1");
     }
 
     #[tokio::test]
     async fn input_failures_never_expose_canaries() {
         let Some((r, mut ws)) = viewing("inputfail", &[("P1", "https://a.example/", "A")]).await else { return };
-        r.edge.replies.lock().unwrap().insert(
+        r.fake.replies.lock().unwrap().insert(
             "Input.dispatchKeyEvent".into(),
             Some(json!({"error": {"code": -32000, "message": "https://secret.example/?URL_CANARY typed-text"}})),
         );

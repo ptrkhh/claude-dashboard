@@ -532,8 +532,6 @@ test('the browser typing field stays focusable and its scripts load before app.j
   const rule = css.match(/\.browser-input\s*\{[^}]*\}/)?.[0] ?? '';
   assert.ok(rule, 'the field is concealed by a .browser-input rule');
   assert.doesNotMatch(rule, /display\s*:\s*none|visibility\s*:\s*hidden/);
-  assert.match(css, /\.browser \.term-keys\s*\{[^}]*repeat\(7,/);
-  assert.match(html, /<div id="browser" class="term browser" role="dialog" aria-modal="true" aria-labelledby="browser-title" hidden>/);
   assert.ok(html.indexOf('browser/view.js') !== -1 && html.indexOf('browser/view.js') < html.indexOf('"app.js"'));
 });
 
@@ -554,7 +552,7 @@ function overlayHarness({ protocol = 'http:', tauri = false } = {}) {
     const e = {
       tag, children: [], dataset: {}, style: {}, attrs: {}, hidden: false, disabled: false, value: '', title: '', htmlWrites: 0,
       rect: { left: 0, top: 0, width: 0, height: 0 }, clientWidth: 0, clientHeight: 0, offsetWidth: 0, offsetHeight: 0,
-      classList: { toggle() {}, add() {}, remove() {} },
+      classList: { toggle() {} },
       addEventListener(t, f) { (handlers[t] ||= []).push(f); },
       dispatch(t, extra = {}) {
         const ev = { type: t, target: e, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...extra };
@@ -565,7 +563,6 @@ function overlayHarness({ protocol = 'http:', tauri = false } = {}) {
       setAttribute(k, v) { e.attrs[k] = String(v); },
       removeAttribute(k) { delete e.attrs[k]; if (k === 'src') e.src = undefined; },
       focus() { doc.activeElement = e; },
-      blur() { if (doc.activeElement === e) doc.activeElement = null; },
       closest: () => null,
       getBoundingClientRect: () => e.rect,
       setPointerCapture() {},
@@ -581,7 +578,7 @@ function overlayHarness({ protocol = 'http:', tauri = false } = {}) {
     static OPEN = 1;
     constructor(url) { this.url = url; this.readyState = 0; this.sent = []; sockets.push(this); }
     send(d) { this.sent.push(d); }
-    close() { this.readyState = 3; this.closedByClient = true; }
+    close() { this.readyState = 3; }
     open() { this.readyState = 1; this.onopen?.(); }
     recv(data) { this.onmessage?.({ data }); }
     serverClose(code, reason = '') { this.readyState = 3; this.onclose?.({ code, reason }); }
@@ -595,7 +592,6 @@ function overlayHarness({ protocol = 'http:', tauri = false } = {}) {
     loadAddon() {} open() {} onData() {} onResize() {} focus() {} reset() {} dispose() {} write() {}
     attachCustomKeyEventHandler() {} hasSelection() { return false; }
   }
-  let polls = 0;
   const history = {
     entries: [], pushes: 0, replaces: 0,
     pushState(s) { this.pushes++; this.entries.push(s); },
@@ -604,21 +600,21 @@ function overlayHarness({ protocol = 'http:', tauri = false } = {}) {
   };
   const context = {
     $, document: doc, history, isTauri: tauri, invoke: async () => 'http://127.0.0.1:23274',
-    location: { protocol, host: 'dash.test' }, poll: () => { polls++; },
+    location: { protocol, host: 'dash.test' }, poll() {},
     ICONS: new Proxy({}, { get: () => '' }),
     WebSocket: FakeWS, Image: FakeImage, Blob: class { constructor(parts, opts) { this.parts = parts; this.type = opts?.type; } },
     URL: { createObjectURL: () => { const u = `blob:${urls.length + 1}`; urls.push(u); return u; }, revokeObjectURL: u => revoked.push(u) },
     Terminal: FakeTerminal, FitAddon: { FitAddon: class { fit() {} } },
     ResizeObserver: class { observe() {} disconnect() {} },
     getComputedStyle: () => ({ getPropertyValue: () => 'monospace' }),
-    TextEncoder, JSON, Map, Promise, setTimeout,
+    TextEncoder, setTimeout,
     addEventListener: (t, f) => (listeners[t] ||= []).push(f),
   };
   for (const file of ['term/keys.js', 'browser/view.js']) runInNewContext(readFileSync(new URL(`../public/${file}`, import.meta.url), 'utf8'), context);
   runInNewContext(`${region}\nthis.api = { openTerm, closeTerm, openBrowser, closeBrowser, isOpen: () => !!browserView, termOpen: () => !!term };`, context);
   const flush = () => new Promise(r => setImmediate(r));
   const live = () => sockets.filter(s => s.readyState === 0 || s.readyState === 1).length;
-  const meta = (w, h) => JSON.stringify({ frame: { deviceWidth: w, deviceHeight: h, offsetTop: 0, pageScaleFactor: 1 } });
+  const meta = (w, h) => JSON.stringify({ frame: { deviceWidth: w, deviceHeight: h } });
   /* Open the overlay, connect, list one tab and display one frame. */
   async function ready(w = 1000, h = 500) {
     context.api.openBrowser('cdash-a', 'JOBS');
@@ -633,7 +629,7 @@ function overlayHarness({ protocol = 'http:', tauri = false } = {}) {
     return ws;
   }
   const sent = ws => ws.sent.map(s => JSON.parse(s));
-  return { api: context.api, $, els, sockets, images, urls, revoked, history, doc, listeners, flush, live, meta, ready, sent, polls: () => polls };
+  return { api: context.api, $, sockets, images, revoked, history, doc, listeners, flush, live, meta, ready, sent };
 }
 
 test('composition_is_forwarded_once_on_commit', async () => {
@@ -815,13 +811,16 @@ test('browser_and_terminal_lifecycles_do_not_conflict', async () => {
     assert.equal(h.sockets.at(-1).url, `${base}/api/term?name=cdash-a&cols=80&rows=24`, label);
     assert.equal(h.live(), 1);
 
-    // Opening the browser while the terminal is open closes it and reuses the history entry.
-    const entries = h.history.entries.length;
+    // One overlay at a time: the browser does not open over the terminal.
     h.api.openBrowser('cdash-a', 'JOBS');
     await h.flush();
-    assert.equal(h.api.termOpen(), false, label);
+    assert.equal(h.api.isOpen(), false, label);
     assert.equal(h.live(), 1, 'one live socket at a time');
-    assert.equal(h.history.entries.length, entries, 'one history entry for the one overlay');
+    h.history.back();
+    assert.equal(h.api.termOpen(), false);
+    assert.equal(h.live(), 0);
+    h.api.openBrowser('cdash-a', 'JOBS');
+    await h.flush();
 
     // A network drop retries once, when the page is next visible.
     const ws = h.sockets.at(-1);

@@ -183,19 +183,10 @@ async fn embedded_asset(uri: OriginalUri) -> Response {
         ),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
-    // A CDN in front of the agent caches a silent .js/.css response at its edge,
-    // so after an upgrade the page kept the old app.js. Nothing here is cached;
-    // the page names its scripts and styles with this build's digest, so an
-    // upgrade fetches them under new URLs even past a cache that ignores us.
-    let headers = [(header::CONTENT_TYPE, content_type), (header::CACHE_CONTROL, "no-cache")];
-    if path == "index.html" {
-        let v = super::routes::build_id().map_or(env!("CARGO_PKG_VERSION"), |id| &id[..12]);
-        let html = String::from_utf8_lossy(body)
-            .replace(".js\"></script>", &format!(".js?v={v}\"></script>"))
-            .replace(".css\">", &format!(".css?v={v}\">"));
-        return (headers, html).into_response();
-    }
-    (headers, Body::from(body)).into_response()
+    // A cache in front of the agent (Cloudflare stores .js and .css by default
+    // when the origin says nothing) would keep serving the old UI after an
+    // upgrade.
+    ([(header::CONTENT_TYPE, content_type), (header::CACHE_CONTROL, "no-cache")], Body::from(body)).into_response()
 }
 
 /// What `serve` hands back. The address is the readiness signal — an in-process
@@ -417,20 +408,10 @@ pub(crate) mod tests {
         let mut cfg = cfg_for(tempdir("rebind"));
         cfg.port = addr.port();
         b.stop().await;
-        // The old listener must be gone, not just the accept loop parked. A
-        // parallel test's own socket can briefly hold the same port number, so
-        // AddrInUse is retried; a listener that was never released stays in use
-        // for the whole budget and still fails.
-        let mut last = None;
-        for _ in 0..100 {
-            match tokio::net::TcpListener::bind(addr).await {
-                Ok(_) => return,
-                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => last = Some(e),
-                Err(e) => panic!("rebind failed: {e}"),
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        panic!("port must be rebindable after stop: {last:?}");
+        // The old listener must be gone, not just the accept loop parked. Only
+        // a listener accepts, so another test's socket that briefly holds the
+        // same port number cannot pass for it.
+        assert!(tokio::net::TcpStream::connect(addr).await.is_err(), "nothing accepts on the port after stop");
     }
 
     /// `reqwest` used to be absent from this crate, which is why these helpers
