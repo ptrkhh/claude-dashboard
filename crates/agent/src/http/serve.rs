@@ -183,7 +183,19 @@ async fn embedded_asset(uri: OriginalUri) -> Response {
         ),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
-    ([(header::CONTENT_TYPE, content_type)], Body::from(body)).into_response()
+    // A CDN in front of the agent caches a silent .js/.css response at its edge,
+    // so after an upgrade the page kept the old app.js. Nothing here is cached;
+    // the page names its scripts and styles with this build's digest, so an
+    // upgrade fetches them under new URLs even past a cache that ignores us.
+    let headers = [(header::CONTENT_TYPE, content_type), (header::CACHE_CONTROL, "no-cache")];
+    if path == "index.html" {
+        let v = super::routes::build_id().map_or(env!("CARGO_PKG_VERSION"), |id| &id[..12]);
+        let html = String::from_utf8_lossy(body)
+            .replace(".js\"></script>", &format!(".js?v={v}\"></script>"))
+            .replace(".css\">", &format!(".css?v={v}\">"));
+        return (headers, html).into_response();
+    }
+    (headers, Body::from(body)).into_response()
 }
 
 /// What `serve` hands back. The address is the readiness signal — an in-process
