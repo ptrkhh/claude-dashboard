@@ -10,9 +10,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-/// One entry of `/api/sessions` `running[]`. Field names and shapes are the
-/// parity gate's contract — see the exemption list in the spec before changing
-/// any of them.
+/// One entry of `/api/sessions` `running[]`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Session {
     pub name: String,
@@ -30,6 +28,9 @@ pub struct Session {
     pub provider: Option<String>,
     #[serde(rename = "nativeTerminal", skip_serializing_if = "Option::is_none")]
     pub native_terminal: Option<bool>,
+    /// While this pane's folder maps to a live browser CDP port.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub browser: bool,
     #[serde(rename = "rcLink")]
     pub rc_link: Option<String>,
     #[serde(rename = "rcUnavailable", skip_serializing_if = "std::ops::Not::not")]
@@ -42,7 +43,7 @@ pub struct Session {
     pub cpu: Option<f32>,
     #[serde(rename = "rssKb")]
     pub rss_kb: u64,
-    /// Rust-only; Node has no such field. Exempted by name in the parity gate.
+    /// Milliseconds since the CPU sample was taken.
     #[serde(rename = "cpuSampleAgeMs")]
     pub cpu_sample_age_ms: u128,
     /// Node omitted this key entirely for pane sessions and set it to `true`
@@ -141,6 +142,7 @@ pub async fn external_sessions(
             variant: None,
             provider: None,
             native_terminal: None,
+            browser: false,
             rc_unavailable: false,
             rc_link: sess
                 .bridge_session_id

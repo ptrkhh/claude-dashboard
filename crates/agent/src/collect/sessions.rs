@@ -107,7 +107,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
                 display_name: None, name: p.name.clone(), dir: p.path.clone(), pid: p.pid,
                 uptime_sec: ((now / 1000.0 - p.created as f64).round() as i64).max(0),
                 model: Some("Terminal".into()), effort: None, variant: None,
-                provider: Some("terminal".into()), native_terminal: None,
+                provider: Some("terminal".into()), native_terminal: None, browser: false,
                 rc_link: None, rc_unavailable: true,
                 git: git.as_deref().map(parse_git_status), working: false, last_message: None, sid: None,
                 cpu: cpu.cpu, rss_kb: cpu.rss_kb, cpu_sample_age_ms: cpu.cpu_sample_age_ms, external: false,
@@ -122,7 +122,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
                 name: p.name.clone(), dir: s.dir, pid: p.pid,
                 uptime_sec: ((now / 1000.0 - p.created as f64).round() as i64).max(0),
                 model: s.model_label.or(s.model).or_else(|| Some("OpenCode".into())), effort: None, variant: s.variant,
-                provider: Some("opencode".into()), native_terminal: Some(s.native_terminal),
+                provider: Some("opencode".into()), native_terminal: Some(s.native_terminal), browser: false,
                 rc_link: super::opencode::link(ctx, &p.name).await, rc_unavailable: s.rc_unavailable,
                 git: git.as_deref().map(parse_git_status), working: s.working, last_message: s.last_message, sid: s.sid,
                 cpu: cpu.cpu, rss_kb: cpu.rss_kb, cpu_sample_age_ms: cpu.cpu_sample_age_ms, external: false,
@@ -138,7 +138,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
                 uptime_sec: ((now / 1000.0 - p.created as f64).round() as i64).max(0),
                 model: s.model_label.or(s.model).or_else(|| Some("Codex".into())), effort: s.effort, variant: None,
                 provider: Some("codex".into()),
-                native_terminal: Some(s.native_terminal),
+                native_terminal: Some(s.native_terminal), browser: false,
                 rc_link: super::codex::link(ctx, &p.name).await,
                 rc_unavailable: s.rc_unavailable,
                 git: git.as_deref().map(parse_git_status), working: s.working,
@@ -218,7 +218,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             effort: meta.effort.clone(),
             variant: None,
             provider: None,
-            native_terminal: None,
+            native_terminal: None, browser: false,
             rc_unavailable: false,
             rc_link,
             git: git_out.as_deref().map(parse_git_status),
@@ -230,6 +230,15 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             cpu_sample_age_ms: cpu_state.cpu_sample_age_ms,
             external: false,
         });
+    }
+
+    // Keyed by the pane's own path (the one /api/browser resolves), not a
+    // provider's saved dir.
+    let dirs: Vec<&str> = panes.iter().map(|p| p.path.as_str()).collect();
+    let flags = super::browser::browser_flags(&ctx.claude_dir, &dirs).await;
+    let live: HashSet<&str> = panes.iter().zip(flags).filter(|(_, on)| *on).map(|(p, _)| p.name.as_str()).collect();
+    for row in &mut running {
+        row.browser = live.contains(row.name.as_str());
     }
 
     let pane_pids: HashSet<i32> = panes.iter().map(|p| p.pid).collect();
@@ -711,7 +720,7 @@ mod tests {
             r#"{"customTitle":"[Claude] proj · renamed"}"#,
         )
         .unwrap();
-        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000|/proj");
+        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000||/proj");
         let ctx = ctx_with_path(d, path);
 
         let r = collect_sessions(&ctx, RESUMABLE_MAX).await;
@@ -766,6 +775,29 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn the_browser_flag_follows_the_pane_path_not_the_provider_dir() {
+        let port = super::super::browser::tests::serve_version(
+            serde_json::json!({"webSocketDebuggerUrl": "ws://localhost:1/devtools/browser/fake"}),
+        )
+        .await;
+        let d = tempdir("browser-flag");
+        std::fs::write(d.join(super::super::browser::MAP_FILE), format!(r#"{{"/proj":{port}}}"#)).unwrap();
+        let root = d.join("cdash-opencode");
+        std::fs::create_dir_all(&root).unwrap();
+        let state = serde_json::json!({"sid":"ses_live", "dir":"/saved", "pid":4242, "native_terminal":true});
+        std::fs::write(root.join("cdash-test-1200-abc.json"), state.to_string()).unwrap();
+        std::fs::write(root.join("cdash-test-1200-abc.native"), state.to_string()).unwrap();
+        let path = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000||/proj\ncdash-test-1200-def|4243|1785050001||/other");
+        let ctx = ctx_with_path(d, path);
+        *ctx.opencode_threads.lock().await = Some((std::time::Instant::now(), serde_json::from_value(serde_json::json!([])).unwrap()));
+
+        let r = collect_sessions(&ctx, RESUMABLE_MAX).await;
+        assert_eq!(r.running[0].dir, "/saved", "the card shows the provider's saved dir");
+        assert!(r.running[0].browser, "the flag follows the pane path /proj");
+        assert!(!r.running[1].browser, "an unmapped pane has no flag");
+    }
+
     #[test]
     fn a_pane_session_omits_the_external_key_entirely() {
         // Node set `external` only on external sessions; a pane entry has no
@@ -773,11 +805,12 @@ mod tests {
         let s = Session {
             display_name: None,
             name: "x".into(), dir: "/x".into(), pid: 1, uptime_sec: 0,
-            model: None, effort: None, variant: None, provider: None, native_terminal: None, rc_link: None, rc_unavailable: false, git: None, working: false,
+            model: None, effort: None, variant: None, provider: None, native_terminal: None, browser: false, rc_link: None, rc_unavailable: false, git: None, working: false,
             last_message: None, sid: None, cpu: None, rss_kb: 0,
             cpu_sample_age_ms: 0, external: false,
         };
         let j = serde_json::to_string(&s).unwrap();
         assert!(!j.contains("external"));
+        assert!(!j.contains("browser"), "an unflagged row omits the key");
     }
 }

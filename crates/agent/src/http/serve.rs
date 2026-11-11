@@ -37,6 +37,7 @@ crate::guarded_routes! {
     get "/api/browse" => routes::get_browse,
     get "/api/hostinfo" => routes::get_hostinfo,
     get "/api/term" => routes::get_term,
+    get "/api/browser" => routes::get_browser,
     get "/api/models" => routes::get_models,
     post "/api/favorites" => routes::post_favorites,
     post "/api/pin" => routes::post_pin,
@@ -164,6 +165,10 @@ async fn embedded_asset(uri: OriginalUri) -> Response {
             "text/javascript; charset=utf-8",
             include_bytes!("../../../../public/term/keys.js"),
         ),
+        "browser/view.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("../../../../public/browser/view.js"),
+        ),
         "vendor/xterm.js" => (
             "text/javascript; charset=utf-8",
             include_bytes!("../../../../public/vendor/xterm.js"),
@@ -178,7 +183,10 @@ async fn embedded_asset(uri: OriginalUri) -> Response {
         ),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
-    ([(header::CONTENT_TYPE, content_type)], Body::from(body)).into_response()
+    // A cache in front of the agent (Cloudflare stores .js and .css by default
+    // when the origin says nothing) would keep serving the old UI after an
+    // upgrade.
+    ([(header::CONTENT_TYPE, content_type), (header::CACHE_CONTROL, "no-cache")], Body::from(body)).into_response()
 }
 
 /// What `serve` hands back. The address is the readiness signal — an in-process
@@ -400,10 +408,10 @@ pub(crate) mod tests {
         let mut cfg = cfg_for(tempdir("rebind"));
         cfg.port = addr.port();
         b.stop().await;
-        // The old listener must be gone, not just the accept loop parked.
-        tokio::net::TcpListener::bind(addr)
-            .await
-            .expect("port must be rebindable after stop");
+        // The old listener must be gone, not just the accept loop parked. Only
+        // a listener accepts, so another test's socket that briefly holds the
+        // same port number cannot pass for it.
+        assert!(tokio::net::TcpStream::connect(addr).await.is_err(), "nothing accepts on the port after stop");
     }
 
     /// `reqwest` used to be absent from this crate, which is why these helpers

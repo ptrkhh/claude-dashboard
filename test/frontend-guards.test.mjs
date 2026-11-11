@@ -505,6 +505,385 @@ test('pin keeps keyboard focus unless the user focuses something else while savi
       poll: () => { polledFocus = document.activeElement; },
       toast: message => { assert.fail(message); },
     });
-    await click({ target: { closest: selector => selector === '[data-term]' || selector === '[data-copy]' ? null : el } });
+    await click({ target: { closest: selector => selector === '[data-term]' || selector === '[data-browser]' || selector === '[data-copy]' ? null : el } });
     assert.equal(polledFocus, moveFocus ? other : el);
   }});
+
+test('only sessions with a live browser get the Browser button', () => {
+  const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const card = src.slice(src.indexOf('function runningCard('), src.indexOf('\n}\n', src.indexOf('function runningCard(')) + 2);
+  const context = { esc: s => s, effortLabel: s => s, gitBadge: () => '', copyIdBtn: () => '', fmtUp: () => '', armedKill: null, ICONS: new Proxy({}, { get: () => '' }) };
+  runInNewContext(`${card}; this.runningCard = runningCard;`, context);
+  const row = { name: 'cdash-a', dir: '/x/JOBS', working: false };
+  assert.match(context.runningCard({ ...row, browser: true }), /data-browser="cdash-a"/);
+  assert.doesNotMatch(context.runningCard(row), /data-browser/);
+});
+
+test('running cards put Open in Claude on its own row and the other actions below', () => {
+  const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const card = src.slice(src.indexOf('function runningCard('), src.indexOf('\n}\n', src.indexOf('function runningCard(')) + 2);
+  const context = { esc: s => s, effortLabel: s => s, gitBadge: () => '', copyIdBtn: sid => sid ? '<button data-copy>' : '', fmtUp: () => '', armedKill: null, ICONS: new Proxy({}, { get: () => '' }) };
+  runInNewContext(`${card}; this.runningCard = runningCard;`, context);
+  const rows = html => [...html.matchAll(/<div class="actions-row">([\s\S]*?)<\/div>/g)].map(m => m[1]);
+  const row = { name: 'cdash-a', dir: '/x/JOBS', working: false, sid: 's1', browser: true, rcLink: 'https://claude.ai/code/session_x' };
+  const [main, rest] = rows(context.runningCard(row));
+  assert.match(main, /Open in Claude/);
+  assert.doesNotMatch(main, /data-term|data-browser|data-copy|data-kill/);
+  assert.match(rest, /data-term=[\s\S]*data-browser=[\s\S]*data-copy[\s\S]*data-kill=/, 'Terminal, Browser, Copy ID, Close in that order');
+  assert.match(rows(context.runningCard({ ...row, rcLink: null }))[0], /Waiting for link/, 'a pending link keeps the first row');
+  assert.equal(rows(context.runningCard({ ...row, provider: 'terminal' })).length, 1, 'a bare terminal has no Claude row');
+});
+
+test('the browser typing field stays focusable and its scripts load before app.js', () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  const input = html.match(/<input id="browser-input"[^>]*>/)?.[0] ?? '';
+  assert.match(input, /type="password"/);
+  assert.match(input, /autocomplete="off"/);
+  assert.match(input, /autocapitalize="off"/);
+  assert.match(input, /spellcheck="false"/);
+  assert.match(input, /aria-label="Remote browser typing"/);
+  assert.doesNotMatch(input, /\bhidden\b/, 'a hidden input cannot take focus');
+  const rule = css.match(/\.browser-input\s*\{[^}]*\}/)?.[0] ?? '';
+  assert.ok(rule, 'the field is concealed by a .browser-input rule');
+  assert.doesNotMatch(rule, /display\s*:\s*none|visibility\s*:\s*hidden/);
+  assert.ok(html.indexOf('browser/view.js') !== -1 && html.indexOf('browser/view.js') < html.indexOf('"app.js"'));
+});
+
+/* A fake DOM, WebSocket, Image and history around the real Terminal and Browser
+   sections of app.js, so the two overlays run against each other. */
+function overlayHarness({ protocol = 'http:', tauri = false } = {}) {
+  const src = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const start = src.indexOf('/* ---------- Terminal: ');
+  const end = src.indexOf('let modelDirTimer;');
+  assert.ok(start !== -1 && end > start, 'the Terminal and Browser sections are found');
+  const region = src.slice(start, end);
+  const listeners = {};
+  const sockets = [], images = [], urls = [], revoked = [];
+  const doc = { hidden: false, activeElement: null, documentElement: {}, addEventListener: (t, f) => (listeners[`doc:${t}`] ||= []).push(f) };
+  function makeEl(tag) {
+    const handlers = {};
+    let text = '';
+    const e = {
+      tag, children: [], dataset: {}, style: {}, attrs: {}, hidden: false, disabled: false, value: '', title: '', htmlWrites: 0,
+      rect: { left: 0, top: 0, width: 0, height: 0 }, clientWidth: 0, clientHeight: 0, offsetWidth: 0, offsetHeight: 0,
+      classList: { toggle() {} },
+      addEventListener(t, f) { (handlers[t] ||= []).push(f); },
+      dispatch(t, extra = {}) {
+        const ev = { type: t, target: e, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...extra };
+        for (const f of handlers[t] || []) f(ev);
+        return ev;
+      },
+      appendChild(c) { e.children.push(c); return c; },
+      append(...cs) { e.children.push(...cs); },
+      setAttribute(k, v) { e.attrs[k] = String(v); },
+      removeAttribute(k) { delete e.attrs[k]; if (k === 'src') e.src = undefined; },
+      focus() { doc.activeElement = e; },
+      closest: () => null,
+      getBoundingClientRect: () => e.rect,
+      setPointerCapture() {},
+    };
+    Object.defineProperty(e, 'textContent', { get: () => text, set: v => { text = String(v); if (text === '') e.children = []; } });
+    Object.defineProperty(e, 'innerHTML', { get: () => '', set: () => { e.htmlWrites++; } });
+    return e;
+  }
+  doc.createElement = makeEl;
+  const els = {};
+  const $ = sel => (els[sel] ||= makeEl('div'));
+  class FakeWS {
+    static OPEN = 1;
+    constructor(url) { this.url = url; this.readyState = 0; this.sent = []; sockets.push(this); }
+    send(d) { this.sent.push(d); }
+    close() { this.readyState = 3; }
+    open() { this.readyState = 1; this.onopen?.(); }
+    recv(data) { this.onmessage?.({ data }); }
+    serverClose(code, reason = '') { this.readyState = 3; this.onclose?.({ code, reason }); }
+  }
+  class FakeImage {
+    constructor() { images.push(this); this.done = new Promise((res, rej) => { this.resolve = res; this.reject = rej; }); }
+    decode() { return this.done; }
+  }
+  class FakeTerminal {
+    cols = 80; rows = 24; textarea = { setAttribute() {} };
+    loadAddon() {} open() {} onData() {} onResize() {} focus() {} reset() {} dispose() {} write() {}
+    attachCustomKeyEventHandler() {} hasSelection() { return false; }
+  }
+  const history = {
+    entries: [], pushes: 0, replaces: 0,
+    pushState(s) { this.pushes++; this.entries.push(s); },
+    replaceState(s) { this.replaces++; this.entries[this.entries.length - 1] = s; },
+    back() { this.entries.pop(); for (const f of listeners.popstate || []) f({}); },
+  };
+  const context = {
+    $, document: doc, history, isTauri: tauri, invoke: async () => 'http://127.0.0.1:23274',
+    location: { protocol, host: 'dash.test' }, poll() {},
+    ICONS: new Proxy({}, { get: () => '' }),
+    WebSocket: FakeWS, Image: FakeImage, Blob: class { constructor(parts, opts) { this.parts = parts; this.type = opts?.type; } },
+    URL: { createObjectURL: () => { const u = `blob:${urls.length + 1}`; urls.push(u); return u; }, revokeObjectURL: u => revoked.push(u) },
+    Terminal: FakeTerminal, FitAddon: { FitAddon: class { fit() {} } },
+    ResizeObserver: class { observe() {} disconnect() {} },
+    getComputedStyle: () => ({ getPropertyValue: () => 'monospace' }),
+    TextEncoder, setTimeout,
+    addEventListener: (t, f) => (listeners[t] ||= []).push(f),
+  };
+  for (const file of ['term/keys.js', 'browser/view.js']) runInNewContext(readFileSync(new URL(`../public/${file}`, import.meta.url), 'utf8'), context);
+  runInNewContext(`${region}\nthis.api = { openTerm, closeTerm, openBrowser, closeBrowser, isOpen: () => !!browserView, termOpen: () => !!term };`, context);
+  const flush = () => new Promise(r => setImmediate(r));
+  const live = () => sockets.filter(s => s.readyState === 0 || s.readyState === 1).length;
+  const meta = (w, h) => JSON.stringify({ frame: { deviceWidth: w, deviceHeight: h } });
+  /* Open the overlay, connect, list one tab and display one frame. */
+  async function ready(w = 1000, h = 500) {
+    context.api.openBrowser('cdash-a', 'JOBS');
+    await flush();
+    const ws = sockets.at(-1);
+    ws.open();
+    ws.recv(JSON.stringify({ tabs: [{ id: 'T1', title: 'A', origin: 'https://a.example' }], active: 'T1' }));
+    ws.recv(meta(w, h));
+    ws.recv(new ArrayBuffer(4));
+    images.at(-1).resolve();
+    await flush();
+    return ws;
+  }
+  const sent = ws => ws.sent.map(s => JSON.parse(s));
+  return { api: context.api, $, sockets, images, revoked, history, doc, listeners, flush, live, meta, ready, sent };
+}
+
+test('composition_is_forwarded_once_on_commit', async () => {
+  const h = overlayHarness();
+  const ws = await h.ready();
+  const input = h.$('#browser-input');
+  assert.equal(input.disabled, false, 'a displayed frame pair enables typing');
+
+  // Compose, commit, and a browser's trailing duplicate commit event.
+  input.dispatch('compositionstart');
+  input.value = 'に';
+  input.dispatch('input', { inputType: 'insertCompositionText', data: 'に', isComposing: true });
+  assert.equal(input.value, 'に', 'the composing text is not reset');
+  input.dispatch('compositionend', { data: '日本' });
+  input.dispatch('input', { inputType: 'insertCompositionText', data: '日本', isComposing: false });
+  input.dispatch('input', { inputType: 'insertText', data: '日本' });
+  assert.deepEqual(h.sent(ws), [{ text: '日本' }]);
+  assert.notEqual(input.value, '日本', 'cleared after forwarding');
+
+  // A canceled composition sends nothing and clears the field.
+  input.dispatch('compositionstart');
+  input.value = 'x';
+  input.dispatch('input', { inputType: 'insertCompositionText', data: 'x', isComposing: true });
+  input.dispatch('compositionend', { data: '' });
+  assert.deepEqual(h.sent(ws), [{ text: '日本' }]);
+  assert.notEqual(input.value, 'x');
+
+  // After the duplicate window, the same text typed again is real input.
+  await new Promise(r => setTimeout(r, 5));
+  input.dispatch('input', { inputType: 'insertText', data: '日本' });
+  assert.deepEqual(h.sent(ws).at(-1), { text: '日本' });
+
+  // Enter is one key, prevented, and its line-break input is not a second one.
+  const before = ws.sent.length;
+  const enter = input.dispatch('keydown', { key: 'Enter', keyCode: 13, isComposing: false });
+  input.dispatch('input', { inputType: 'insertLineBreak', data: null });
+  assert.equal(enter.defaultPrevented, true);
+  assert.deepEqual(h.sent(ws).slice(before), [{ key: 'Enter' }]);
+  input.dispatch('keydown', { key: 'Enter', keyCode: 229, isComposing: true });
+  assert.equal(ws.sent.length, before + 1, 'Enter inside a composition is not forwarded');
+  await new Promise(r => setTimeout(r, 5));
+  input.dispatch('input', { inputType: 'deleteContentBackward', data: null });
+  assert.deepEqual(h.sent(ws).at(-1), { key: 'Backspace' });
+
+  // Closing mid-composition clears the field and the composition.
+  input.dispatch('compositionstart');
+  input.value = 'に';
+  h.api.closeBrowser();
+  assert.equal(input.value, '');
+  assert.equal(h.api.isOpen(), false);
+});
+
+test('tab_labels_are_text', async () => {
+  const h = overlayHarness();
+  h.api.openBrowser('cdash-a', 'JOBS');
+  await h.flush();
+  const ws = h.sockets.at(-1);
+  ws.open();
+  const evil = '<img src=x onerror=URL_CANARY>';
+  ws.recv(JSON.stringify({ tabs: [
+    { id: 'T1', title: evil, origin: 'https://a.example' },
+    { id: 'T2', title: 'No origin', origin: null },
+    { id: 'T3', title: '', origin: 'http://b.example:8080' },
+  ], active: 'T1' }));
+  const strip = h.$('#browser-tabs');
+  const lines = t => t.children.map(c => c.textContent);
+  const [one, two, three] = strip.children;
+  assert.equal(strip.children.length, 3);
+  assert.deepEqual(lines(one), [evil, 'a.example'], 'page title on top, site below without https://');
+  assert.deepEqual(lines(two), ['No origin', 'Browser page']);
+  assert.deepEqual(lines(three), ['http://b.example:8080', 'http://b.example:8080'], 'http and ports stay visible; no title shows the site');
+  assert.deepEqual(strip.children.map(t => [t.dataset.tab, t.attrs.role, t.attrs['aria-selected']]), [['T1', 'tab', 'true'], ['T2', 'tab', 'false'], ['T3', 'tab', 'false']]);
+  for (const t of [one, two, three, ...one.children, ...two.children]) assert.equal(t.htmlWrites, 0, 'labels are assigned as text, never as HTML');
+
+  ws.recv(JSON.stringify({ tabs: [{ id: 'T2', title: 'No origin', origin: null }], active: null }));
+  assert.deepEqual(strip.children.map(t => t.attrs['aria-selected']), ['false'], 'nothing is highlighted');
+  assert.equal(h.$('#browser-status').textContent, 'Tab closed. Pick a tab.');
+  assert.equal(h.$('#browser-input').disabled, true);
+
+  // Tapping a tab asks the agent; input stays off until its frame pair is shown.
+  strip.dispatch('click', { target: { closest: () => strip.children[0] } });
+  assert.deepEqual(h.sent(ws), [{ tab: 'T2' }]);
+});
+
+test('a browser with no tabs yet says so', async () => {
+  const h = overlayHarness();
+  h.api.openBrowser('cdash-a', 'JOBS');
+  await h.flush();
+  const ws = h.sockets.at(-1);
+  ws.open();
+  ws.recv(JSON.stringify({ tabs: [], active: null }));
+  assert.equal(h.$('#browser-status').textContent, 'No tabs open yet. Pick one when it appears.');
+});
+
+test('frame_pairing_survives_switch_and_reconnect', async () => {
+  const h = overlayHarness();
+  h.api.openBrowser('cdash-a', 'JOBS');
+  await h.flush();
+  const ws = h.sockets.at(-1);
+  ws.open();
+  const list = active => JSON.stringify({ tabs: [{ id: 'T1', title: 'A', origin: 'https://a.example' }, { id: 'T2', title: 'B', origin: 'https://b.example' }], active });
+  const input = h.$('#browser-input'), screen = h.$('#browser-screen');
+  ws.recv(list('T1'));
+
+  // Frame A is still decoding when the target switches; finishing it must not restore input.
+  ws.recv(h.meta(800, 600));
+  ws.recv(new ArrayBuffer(4));
+  assert.equal(input.disabled, true, 'no pair is displayed yet');
+  ws.recv(list('T2'));
+  h.images[0].resolve();
+  await h.flush();
+  assert.equal(input.disabled, true, 'a stale decode never enables input');
+  assert.equal(screen.src, undefined);
+  assert.ok(h.revoked.includes('blob:1'), 'the stale frame URL is revoked');
+
+  // Frame B has other dimensions; taps use B's metadata and the image rect, not the stage.
+  ws.recv(h.meta(1000, 500));
+  ws.recv(new ArrayBuffer(4));
+  h.images[1].resolve();
+  await h.flush();
+  assert.equal(input.disabled, false);
+  assert.equal(screen.src, 'blob:2');
+  screen.rect = { left: 10, top: 20, width: 500, height: 250 };
+  h.$('#browser-stage').rect = { left: 0, top: 0, width: 600, height: 900 };
+  const stage = h.$('#browser-stage');
+  const tap = (x, y) => { stage.dispatch('pointerdown', { pointerId: 1, clientX: x, clientY: y }); stage.dispatch('pointerup', { pointerId: 1, clientX: x, clientY: y }); };
+  tap(260, 145);
+  assert.deepEqual(h.sent(ws).at(-1), { tap: [500, 250] });
+  const taps = () => h.sent(ws).filter(m => m.tap).length;
+  tap(5, 145);
+  tap(300, 400);
+  assert.equal(taps(), 1, 'a tap outside the image (letterbox, stage padding) is dropped');
+
+  // A new frame replaces the old one and revokes its URL.
+  ws.recv(h.meta(1000, 500));
+  ws.recv(new ArrayBuffer(4));
+  h.images[2].resolve();
+  await h.flush();
+  assert.ok(h.revoked.includes('blob:2'));
+
+  // Reconnect: the old socket's late frames are ignored, input waits for a new pair.
+  ws.serverClose(1006);
+  assert.equal(input.disabled, true);
+  assert.equal(h.$('#browser-reconnect').hidden, false);
+  assert.ok(h.revoked.includes('blob:3'), 'closing revokes the displayed frame URL');
+  h.$('#browser-reconnect').dispatch('click');
+  await h.flush();
+  const ws2 = h.sockets.at(-1);
+  assert.notEqual(ws2, ws);
+  ws2.open();
+  ws2.recv(list('T1'));
+  ws.recv(h.meta(1000, 500));
+  ws.recv(new ArrayBuffer(4));
+  assert.equal(h.images.length, 3, 'a late frame on the old socket never starts a decode');
+  ws2.recv(h.meta(400, 300));
+  ws2.recv(new ArrayBuffer(4));
+  assert.equal(input.disabled, true);
+  h.images[3].resolve();
+  await h.flush();
+  assert.equal(input.disabled, false);
+  tap(260, 145);
+  assert.deepEqual(h.sent(ws2).at(-1), { tap: [200, 150] }, 'taps use the new pair, 400x300 over a 500x250 image');
+  h.api.closeBrowser();
+  assert.ok(h.revoked.includes('blob:4'));
+});
+
+test('browser_and_terminal_lifecycles_do_not_conflict', async () => {
+  for (const [label, opts, base] of [
+    ['http', {}, 'ws://dash.test'],
+    ['https', { protocol: 'https:' }, 'wss://dash.test'],
+    ['tauri', { tauri: true }, 'ws://127.0.0.1:23274'],
+  ]) {
+    const h = overlayHarness(opts);
+    const opener = h.$('#opener');
+    h.doc.activeElement = opener;
+
+    h.api.openBrowser('cdash-a', 'JOBS');
+    await h.flush();
+    assert.equal(h.sockets.at(-1).url, `${base}/api/browser?name=cdash-a`, label);
+    assert.equal(h.live(), 1);
+    h.sockets.at(-1).open();
+    h.history.back(); // Android Back
+    assert.equal(h.api.isOpen(), false, label);
+    assert.equal(h.live(), 0);
+    assert.equal(h.doc.activeElement, opener, 'focus returns to where the overlay was opened');
+    assert.equal(h.$('#browser').hidden, true);
+
+    h.api.openTerm('cdash-a', 'JOBS');
+    await h.flush();
+    assert.equal(h.sockets.at(-1).url, `${base}/api/term?name=cdash-a&cols=80&rows=24`, label);
+    assert.equal(h.live(), 1);
+
+    // One overlay at a time: the browser does not open over the terminal.
+    h.api.openBrowser('cdash-a', 'JOBS');
+    await h.flush();
+    assert.equal(h.api.isOpen(), false, label);
+    assert.equal(h.live(), 1, 'one live socket at a time');
+    h.history.back();
+    assert.equal(h.api.termOpen(), false);
+    assert.equal(h.live(), 0);
+    h.api.openBrowser('cdash-a', 'JOBS');
+    await h.flush();
+
+    // A network drop retries once, when the page is next visible.
+    const ws = h.sockets.at(-1);
+    ws.open();
+    ws.serverClose(1006);
+    assert.equal(h.live(), 0);
+    h.doc.hidden = false;
+    for (const f of h.listeners['doc:visibilitychange'] || []) f();
+    await h.flush();
+    assert.equal(h.live(), 1, 'visibility retry reconnects once');
+    for (const f of h.listeners['doc:visibilitychange'] || []) f();
+    await h.flush();
+    assert.equal(h.live(), 1, 'and does not stack a second socket');
+
+    // 4004 offers no reconnect and no retry.
+    const ws4 = h.sockets.at(-1);
+    ws4.open();
+    ws4.serverClose(4004, 'raw server text');
+    assert.equal(h.$('#browser-status').textContent, 'Browser view unsupported');
+    assert.equal(h.$('#browser-reconnect').hidden, true);
+    for (const f of h.listeners['doc:visibilitychange'] || []) f();
+    await h.flush();
+    assert.equal(h.live(), 0, 'no automatic retry after 4004');
+
+    // Fixed texts, never the server's own words.
+    for (const [code, text] of [[4002, 'Browser not running'], [4003, 'Browser closed'], [1011, 'Browser connection failed']]) {
+      h.$('#browser-reconnect').dispatch('click');
+      await h.flush();
+      const s = h.sockets.at(-1);
+      s.open();
+      s.serverClose(code, 'URL_CANARY');
+      assert.equal(h.$('#browser-status').textContent, text);
+      assert.equal(h.$('#browser-reconnect').hidden, false);
+    }
+    h.history.back();
+    assert.equal(h.api.isOpen(), false);
+    assert.equal(h.live(), 0);
+  }
+});

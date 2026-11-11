@@ -280,6 +280,43 @@ pub async fn get_term(
     Ok(ws.on_upgrade(move |socket| bridge(ctx, name, cols, rows, socket)))
 }
 
+/// A session's browser tab over a WebSocket. Every check runs before the
+/// upgrade; the browser sees only a failed handshake, so each refusal logs its
+/// fixed category. Nothing the caller sent (Origin, name) is ever logged.
+pub async fn get_browser(
+    State(ctx): State<Arc<Ctx>>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    let refuse = |category: &str, status: StatusCode, message: &str| {
+        ctx.host.log.push(format!("browser refused: {category}"));
+        ApiError { status, message: message.into() }
+    };
+    let h = |k: axum::http::HeaderName| headers.get(k).and_then(|v| v.to_str().ok());
+    let public = std::env::var("CDASH_PUBLIC_URL").ok();
+    if !origin_allowed(h(axum::http::header::ORIGIN), h(axum::http::header::HOST), public.as_deref()) {
+        return Err(refuse("origin", StatusCode::FORBIDDEN, "origin not allowed"));
+    }
+    let name = q.get("name").cloned().unwrap_or_default();
+    if assert_kill_name(&name).is_err() {
+        return Err(refuse("name", StatusCode::BAD_REQUEST, "bad session name"));
+    }
+    // The pane's own path, the one /api/sessions used to show the button.
+    let panes = ctx
+        .runner
+        .run("tmux", &["list-panes", "-a", "-F", crate::parse::tmux::PANE_FORMAT], "tmux list-panes")
+        .await;
+    let Some(dir) = crate::parse::tmux::parse_tmux_panes(&panes).into_iter().find(|p| p.name == name).map(|p| p.path) else {
+        return Err(refuse("session", StatusCode::NOT_FOUND, "no such session"));
+    };
+    let map = crate::collect::browser::read_port_map(&ctx.claude_dir).await;
+    let Some(port) = crate::collect::browser::port_for(&map, &dir) else {
+        return Err(refuse("mapping", StatusCode::NOT_FOUND, "no browser for this session"));
+    };
+    Ok(ws.on_upgrade(move |socket| crate::collect::browser_bridge::bridge(ctx, name, port, socket)))
+}
+
 pub async fn post_purge(
     State(ctx): State<Arc<Ctx>>,
     Json(body): Json<SidBody>,
@@ -618,6 +655,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ui_assets_are_never_cached() {
+        // A cache in front of the agent must not keep an old app.js after an upgrade.
+        let b = serve(cfg_for(tempdir("asset-cache"))).await.unwrap();
+        for path in ["/", "/app.js", "/style.css"] {
+            let res = reqwest::get(format!("http://{}{path}", b.addr)).await.unwrap();
+            assert_eq!(res.headers().get("cache-control").map(|v| v.to_str().unwrap()), Some("no-cache"), "{path}");
+        }
+    }
+
+    #[tokio::test]
     async fn terminal_assets_are_embedded() {
         let b = serve(cfg_for(tempdir("term-assets"))).await.unwrap();
         for (path, needle) in [
@@ -625,6 +672,7 @@ mod tests {
             ("/vendor/addon-fit.js", "FitAddon"),
             ("/vendor/xterm.css", ".xterm"),
             ("/term/keys.js", "cdashKeys"),
+            ("/browser/view.js", "cdashBrowser"),
         ] {
             let body = reqwest_get(&format!("http://{}{path}", b.addr)).await;
             assert!(body.contains(needle), "{path} is served");
