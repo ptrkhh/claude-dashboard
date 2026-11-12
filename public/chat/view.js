@@ -9,6 +9,14 @@
   let c = null;    // the open chat
   let wired = false;
 
+  /* What the composer offers: 'send' while idle, 'stop' while a turn runs or
+     a message is still on its way, 'off' when typing would go nowhere useful. */
+  function composerMode(state, hasPending) {
+    if (state.waiting || state.ended || state.unreadable) return 'off';
+    return state.working || hasPending ? 'stop' : 'send';
+  }
+  const pending = s => s.mine.some(m => m.seq == null && (m.status === 'sending' || m.status === 'sent'));
+
   function el(tag, cls, text) {
     const n = document.createElement(tag);
     if (cls) n.className = cls;
@@ -40,6 +48,45 @@
       if (b && c) showTools(b.dataset.tools);
     });
     $('#chat-sheet-close').addEventListener('click', () => $('#chat-sheet').close());
+    log.addEventListener('click', e => {
+      const b = e.target.closest('[data-edit],[data-again]');
+      if (!b || !c) return;
+      const cid = b.dataset.edit ?? b.dataset.again;
+      const m = c.state.mine.find(x => x.cid === cid);
+      if (!m) return;
+      c.state.mine = c.state.mine.filter(x => x !== m);
+      if (b.dataset.edit !== undefined) toBox(m.text);
+      else submitText(m.text);
+      schedule();
+    });
+    $('#chat-held').addEventListener('click', e => {
+      const b = e.target.closest('[data-op]');
+      if (!b || !c) return;
+      const h = c.state.held.find(x => x.id === b.dataset.id);
+      if (!h || !sendFrame({ t: 'held', op: b.dataset.op === 'now' ? 'now' : 'remove', id: h.id })) return;
+      if (b.dataset.op === 'edit') toBox(h.text);
+    });
+    $('#chat-banner').addEventListener('click', e => {
+      if (e.target.closest('[data-open-term]') && c) c.opts.openTerm(c.opts.name, c.opts.title);
+    });
+    const input = $('#chat-input');
+    $('#chat-form').addEventListener('submit', e => {
+      e.preventDefault();
+      if (!c) return;
+      const text = input.value.trim();
+      const mode = composerMode(c.state, pending(c.state));
+      if (mode === 'off') return;
+      if (!text) { if (mode === 'stop') sendFrame({ t: 'stop' }); return; }
+      if (submitText(text)) { input.value = ''; grow(); renderComposer(); }
+    });
+    input.addEventListener('keydown', e => {
+      // Enter inserts a newline on touch keyboards; a hardware keyboard sends.
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && matchMedia('(pointer: fine)').matches) {
+        e.preventDefault();
+        $('#chat-form').requestSubmit();
+      }
+    });
+    input.addEventListener('input', () => { grow(); if (c) renderComposer(); });
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden && c && !c.ws && !c.done) { clearTimeout(c.retryTimer); connect(); }
     });
@@ -114,6 +161,35 @@
     };
   }
 
+  function sendFrame(f) {
+    if (c?.ws?.readyState !== WebSocket.OPEN) { c?.opts.toast?.('Not connected'); return false; }
+    c.ws.send(JSON.stringify(f));
+    return true;
+  }
+
+  function submitText(text) {
+    const cid = crypto.randomUUID();
+    if (!sendFrame({ t: 'send', cid, text })) return false;
+    cdashChatStore.addMine(c.state, cid, text);
+    c.follow = true;
+    schedule();
+    return true;
+  }
+
+  function toBox(text) {
+    const input = $('#chat-input');
+    input.value = input.value ? input.value + '\n' + text : text;
+    grow();
+    input.focus();
+    renderComposer();
+  }
+
+  function grow() {
+    const input = $('#chat-input');
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, innerHeight * 0.4) + 'px';
+  }
+
   function retry(x) {
     x.link = navigator.onLine === false ? 'Offline' : 'Reconnecting…';
     schedule();
@@ -135,7 +211,23 @@
     if (r.kind === 'user') {
       const n = el('div', 'chat-user chat-' + r.status);
       n.append(el('div', 'chat-bubble', r.text));
-      if (r.status !== 'sent') n.append(el('div', 'chat-meta', STATUS[r.status] + (r.error ? ': ' + r.error : '')));
+      if (r.status !== 'sent') {
+        const meta = el('div', 'chat-meta', STATUS[r.status] + (r.error ? ': ' + r.error : ''));
+        if (r.cid && ['unconfirmed', 'returned', 'refused'].includes(r.status)) {
+          // Nothing is ever resent on its own: the owner decides.
+          const edit = el('button', '', 'Edit');
+          edit.type = 'button';
+          edit.dataset.edit = r.cid;
+          meta.append(edit);
+          if (r.status === 'unconfirmed') {
+            const again = el('button', '', 'Send again');
+            again.type = 'button';
+            again.dataset.again = r.cid;
+            meta.append(again);
+          }
+        }
+        n.append(meta);
+      }
       return n;
     }
     if (r.kind === 'tools') {
@@ -163,7 +255,8 @@
     const log = $('#chat-log');
     const height = log.scrollHeight;
     const top = log.scrollTop;
-    const rows = cdashChatStore.rows(x.state);
+    // Held messages live in the list above the composer, with their controls.
+    const rows = cdashChatStore.rows(x.state).filter(r => !(r.kind === 'user' && r.status === 'held'));
     x.rows = rows;
     const keep = new Set();
     let prev = null;
@@ -193,6 +286,37 @@
     $('#chat-jump').hidden = x.follow;
     renderStatus();
     renderBanner();
+    renderHeld();
+    renderComposer();
+  }
+
+  function renderHeld() {
+    const box = $('#chat-held');
+    box.textContent = '';
+    for (const h of c.state.held) {
+      const item = el('div', 'chat-held-item');
+      item.append(el('span', 'chat-held-text', h.text));
+      for (const [op, label] of [['now', 'Send now'], ['edit', 'Edit'], ['remove', 'Remove']]) {
+        const b = el('button', '', label);
+        b.type = 'button';
+        b.dataset.op = op;
+        b.dataset.id = h.id;
+        item.append(b);
+      }
+      box.append(item);
+    }
+  }
+
+  function renderComposer() {
+    const s = c.state;
+    const input = $('#chat-input');
+    const go = $('#chat-go');
+    const mode = c.done ? 'off' : composerMode(s, pending(s));
+    const stop = mode === 'stop' && !input.value.trim();
+    input.disabled = go.disabled = mode === 'off';
+    input.placeholder = s.working ? 'Queue a message…' : 'Message…';
+    go.textContent = stop ? 'Stop' : 'Send';
+    go.classList.toggle('stop', stop);
   }
 
   function renderStatus() {
@@ -205,8 +329,25 @@
 
   function renderBanner() {
     const b = $('#chat-banner');
-    b.textContent = c.link;
-    b.hidden = !c.link;
+    const s = c.state;
+    const [text, term] = c.link ? [c.link, false]
+      : s.ended || c.done ? ['Session ended.', false]
+      : s.unreadable ? ['Chat cannot read this session. Use Terminal.', true]
+      : s.waiting ? ['This session is waiting for an answer.', true]
+      : ['', false];
+    const sig = text + term;
+    if (b.dataset.sig === sig) return;
+    b.dataset.sig = sig;
+    b.textContent = '';
+    b.hidden = !text;
+    if (!text) return;
+    b.append(el('span', '', text));
+    if (term) {
+      const open = el('button', 'chat-bar-btn', 'Open Terminal');
+      open.type = 'button';
+      open.dataset.openTerm = '';
+      b.append(open);
+    }
   }
 
   function showTools(key) {
@@ -226,6 +367,7 @@
   }
 
   g.cdashChat = {
+    composerMode,
     open,
     close,
     isOpen: () => !!c,

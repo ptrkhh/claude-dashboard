@@ -524,3 +524,16 @@ test('the chat view never builds markup from conversation text', () => {
   assert.ok(uses.length > 0 && uses.every(u => /cdashMd\.render\(|=\s*''/.test(u)), uses.join('\n'));
   assert.ok(!/insertAdjacentHTML|document\.write|eval\(/.test(view));
 });
+test('the composer follows the session: send, stop, or off', async () => {
+  globalThis.document = undefined;                              // the helper must not touch the DOM
+  await import('../public/chat/store.js');
+  await import('../public/chat/view.js');
+  const mode = globalThis.cdashChat.composerMode;
+  const st = o => ({ working: false, waiting: false, ended: false, unreadable: false, ...o });
+  assert.equal(mode(st({}), false), 'send');
+  assert.equal(mode(st({ working: true }), false), 'stop');
+  assert.equal(mode(st({}), true), 'stop', 'a message still sending can be stopped');
+  assert.equal(mode(st({ waiting: true, working: true }), false), 'off');
+  assert.equal(mode(st({ ended: true }), false), 'off');
+  assert.equal(mode(st({ unreadable: true }), false), 'off');
+});
