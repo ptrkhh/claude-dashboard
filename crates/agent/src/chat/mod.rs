@@ -4,6 +4,7 @@
 
 pub mod queue;
 pub mod tap;
+pub mod tmux_io;
 pub mod wire;
 
 /// Largest chat message, in bytes, after sanitizing.

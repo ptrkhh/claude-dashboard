@@ -20,6 +20,12 @@ pub struct SessionFile {
     pub started_at: Option<f64>,
     #[serde(rename = "bridgeSessionId")]
     pub bridge_session_id: Option<String>,
+    /// `busy`, `idle`, `waiting` or `shell` on Claude Code 2.1.322; absent on
+    /// older versions. Chat's working / waiting signal.
+    pub status: Option<String>,
+    /// `dialog open` or `input needed` while `status` is `waiting`.
+    #[serde(rename = "waitingFor")]
+    pub waiting_for: Option<String>,
 }
 
 fn session_path(claude_dir: &Path, pid: i32) -> PathBuf {
@@ -99,7 +105,7 @@ mod tests {
         let d = claude_dir("sess");
         std::fs::write(
             d.join("sessions/4242.json"),
-            r#"{"sessionId":"abc","cwd":"/x","name":"api","entrypoint":"cli","startedAt":1700000000000,"bridgeSessionId":"session_z"}"#,
+            r#"{"sessionId":"abc","cwd":"/x","name":"api","entrypoint":"cli","startedAt":1700000000000,"bridgeSessionId":"session_z","status":"waiting","waitingFor":"dialog open"}"#,
         )
         .unwrap();
         let s = session_file_for(&d, 4242).await.unwrap();
@@ -108,6 +114,8 @@ mod tests {
         assert_eq!(s.name.as_deref(), Some("api"));
         assert_eq!(s.entrypoint.as_deref(), Some("cli"));
         assert_eq!(s.started_at, Some(1_700_000_000_000.0));
+        assert_eq!(s.status.as_deref(), Some("waiting"));
+        assert_eq!(s.waiting_for.as_deref(), Some("dialog open"));
     }
 
     #[tokio::test]
