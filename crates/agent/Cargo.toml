@@ -18,7 +18,7 @@ serde_json = "1"
 sysinfo = "=0.38.4"
 rustix = { version = "1", features = ["fs", "termios", "pty", "process"] }
 libc = "0.2"
-tokio = { version = "1", features = ["process", "time", "rt", "rt-multi-thread", "macros", "fs", "io-util", "io-std", "net"] }
+tokio = { version = "1", features = ["process", "time", "rt", "rt-multi-thread", "macros", "fs", "io-util", "io-std", "net", "sync"] }
 time = { version = "0.3", features = ["formatting", "local-offset"] }
 axum = { version = "0.8.9", features = ["ws"] }
 subtle = "2.6.1"
