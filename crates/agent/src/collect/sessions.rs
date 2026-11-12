@@ -208,18 +208,22 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             None => None,
         };
 
+        let uptime_sec = ((now / 1000.0 - p.created as f64).round() as i64).max(0);
+        // No link by the end of the launch's link-poll window: Remote Control
+        // is not coming, so say so instead of "Waiting for link" forever.
+        let rc_window = (super::spawn::RC_POLL_INTERVAL * super::spawn::RC_POLL_ATTEMPTS).as_secs() as i64;
         running.push(Session {
             display_name,
             name: p.name.clone(),
             dir: p.path.clone(),
             pid: p.pid,
-            uptime_sec: ((now / 1000.0 - p.created as f64).round() as i64).max(0),
+            uptime_sec,
             model: meta.model.clone(),
             effort: meta.effort.clone(),
             variant: None,
             provider: None,
             native_terminal: None,
-            rc_unavailable: false,
+            rc_unavailable: rc_link.is_none() && uptime_sec > rc_window,
             rc_link,
             git: git_out.as_deref().map(parse_git_status),
             working,
@@ -645,6 +649,20 @@ mod tests {
         assert_eq!((t.provider.as_deref(), t.model.as_deref()), (Some("terminal"), Some("Terminal")));
         assert!(t.rc_link.is_none() && t.rc_unavailable && t.sid.is_none());
         assert!(!t.chat);
+    }
+
+    #[tokio::test]
+    async fn a_claude_pane_with_no_link_after_the_poll_window_reports_remote_control_unavailable() {
+        let d = tempdir("rc-unavailable");
+        std::fs::write(d.join("history.jsonl"), "").unwrap();
+        std::fs::write(d.join("sessions/4242.json"), r#"{"sessionId":"s-9","cwd":"/proj"}"#).unwrap();
+        let old = fake_tmux(&d, "cdash-test-1200-abc|4242|1785050000||/proj");      // created long ago
+        let r = collect_sessions(&ctx_with_path(d.clone(), old), RESUMABLE_MAX).await;
+        assert!(r.running[0].rc_unavailable && r.running[0].rc_link.is_none() && r.running[0].chat);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let young = fake_tmux(&d, &format!("cdash-test-1200-abc|4242|{now}||/proj"));
+        let r = collect_sessions(&ctx_with_path(d, young), RESUMABLE_MAX).await;
+        assert!(!r.running[0].rc_unavailable, "still inside the window: keep waiting");
     }
 
     #[tokio::test]
