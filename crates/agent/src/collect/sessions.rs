@@ -125,7 +125,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
                 provider: Some("opencode".into()), native_terminal: Some(s.native_terminal),
                 rc_link: super::opencode::link(ctx, &p.name).await, rc_unavailable: s.rc_unavailable,
                 git: git.as_deref().map(parse_git_status), working: s.working, last_message: s.last_message, sid: s.sid,
-                cpu: cpu.cpu, rss_kb: cpu.rss_kb, cpu_sample_age_ms: cpu.cpu_sample_age_ms, external: false, chat: false,
+                cpu: cpu.cpu, rss_kb: cpu.rss_kb, cpu_sample_age_ms: cpu.cpu_sample_age_ms, external: false, chat: s.chat_sock.is_some(),
             });
             continue;
         }
@@ -144,7 +144,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
                 git: git.as_deref().map(parse_git_status), working: s.working,
                 last_message: s.last_message, sid: s.sid,
                 cpu: cpu.cpu, rss_kb: cpu.rss_kb, cpu_sample_age_ms: cpu.cpu_sample_age_ms,
-                external: false, chat: false,
+                external: false, chat: s.native_terminal && s.chat_sock.is_some(),
             });
             continue;
         }
@@ -710,6 +710,12 @@ mod tests {
         assert!(response.running[0].working);
         assert_eq!(response.running[0].variant.as_deref(), Some("deep"));
         assert_eq!(response.running[0].rc_link.as_deref(), Some("https://claude.ai/code/session_test"));
+        assert!(serde_json::to_value(&response.running[0]).unwrap().get("chat").is_none(), "no socket, no chat");
+        let mut with_chat = state.clone();
+        with_chat["chat_sock"] = "/tmp/x/chat.sock".into();
+        std::fs::write(root.join("cdash-test-1200-abc.native"), with_chat.to_string()).unwrap();
+        let chatty = collect_sessions(&ctx, RESUMABLE_MAX).await;
+        assert_eq!(serde_json::to_value(&chatty.running[0]).unwrap()["chat"], true);
         assert_eq!(response.resumable.len(), 1);
         assert_eq!(response.resumable[0].sid, "ses_saved");
         assert_eq!(response.resumable[0].variant.as_deref(), Some("deep"));
@@ -760,7 +766,12 @@ mod tests {
             let card = serde_json::to_value(&response.running[0]).unwrap();
             assert_eq!(card.get("rcUnavailable"), unavailable.then_some(&serde_json::Value::Bool(true)));
             assert!(card.get("rc_unavailable").is_none());
+            assert!(card.get("chat").is_none(), "no socket, no chat");
         }
+        state["chat_sock"] = "/tmp/x/chat.sock".into();
+        std::fs::write(root.join("cdash-test-1200-abc.native"), state.to_string()).unwrap();
+        let card = serde_json::to_value(&collect_sessions(&ctx, RESUMABLE_MAX).await.running[0]).unwrap();
+        assert_eq!(card["chat"], true);
         let _ = std::fs::remove_dir_all(d);
     }
 

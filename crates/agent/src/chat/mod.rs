@@ -4,6 +4,7 @@
 
 pub mod claude;
 pub mod hub;
+pub mod native;
 pub mod queue;
 pub mod tap;
 pub mod tmux_io;
@@ -33,13 +34,26 @@ pub async fn hub_for(ctx: &Arc<Ctx>, name: &str) -> Result<hub::Hub, Refused> {
         return Err(no_chat());
     }
     // Same order as `collect_sessions`: OpenCode, then Codex, else Claude.
-    if crate::collect::opencode::snapshot(ctx, name, pid).await.is_some()
-        || crate::collect::codex::snapshot(ctx, name, pid).await.is_some()
-    {
-        return Err(Refused::BadRequest("chat for this tool is not available yet".into()));
-    }
-    let (engine, rx) = claude::start(Arc::clone(ctx), name.to_string(), pid);
-    let hub = hub::Hub::spawn("claude", engine, rx, Arc::clone(&ctx.host.log), name.to_string());
+    let restart = || Refused::BadRequest("restart this session to enable chat".into());
+    let native = if let Some(s) = crate::collect::opencode::snapshot(ctx, name, pid).await {
+        Some(("opencode", s.chat_sock.ok_or_else(restart)?))
+    } else if let Some(s) = crate::collect::codex::snapshot(ctx, name, pid).await {
+        // A legacy (non-native) Codex pane has no supervisor to talk to.
+        Some(("codex", s.chat_sock.filter(|_| s.native_terminal).ok_or_else(restart)?))
+    } else {
+        None
+    };
+    let log = Arc::clone(&ctx.host.log);
+    let hub = match native {
+        Some((tool, sock)) => {
+            let (engine, rx) = native::start(sock.into(), Arc::clone(&log), name.to_string());
+            hub::Hub::spawn(tool, engine, rx, log, name.to_string())
+        }
+        None => {
+            let (engine, rx) = claude::start(Arc::clone(ctx), name.to_string(), pid);
+            hub::Hub::spawn("claude", engine, rx, log, name.to_string())
+        }
+    };
     chats.insert(name.to_string(), hub.clone());
     Ok(hub)
 }
