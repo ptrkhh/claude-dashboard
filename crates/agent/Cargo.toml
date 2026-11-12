@@ -32,3 +32,7 @@ reqwest = { version = "0.13.4", default-features = false, features = ["rustls", 
 
 tokio-tungstenite = "0.29"
 futures-util = "0.3"
+
+[dev-dependencies]
+# Paused clock for the chat hub timing tests; no new crate.
+tokio = { version = "1", features = ["test-util"] }
