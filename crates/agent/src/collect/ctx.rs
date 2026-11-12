@@ -43,6 +43,8 @@ pub struct Ctx {
     /// Set once at boot when `CDASH_AUTH` includes `password`. A `OnceLock`
     /// because `Ctx` is shared behind an `Arc` by the time the policy exists.
     pub password: std::sync::OnceLock<crate::auth::login::PasswordState>,
+    /// One hub per chatted pane, started by the first `/api/chat` for it.
+    pub chats: tokio::sync::Mutex<HashMap<String, crate::chat::hub::Hub>>,
 }
 
 impl Ctx {
@@ -70,6 +72,7 @@ impl Ctx {
             opencode_threads: tokio::sync::Mutex::new(None),
             codex_threads: tokio::sync::Mutex::new(None),
             password: std::sync::OnceLock::new(),
+            chats: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
 

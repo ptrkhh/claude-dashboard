@@ -37,6 +37,7 @@ crate::guarded_routes! {
     get "/api/browse" => routes::get_browse,
     get "/api/hostinfo" => routes::get_hostinfo,
     get "/api/term" => routes::get_term,
+    get "/api/chat" => routes::get_chat,
     get "/api/models" => routes::get_models,
     post "/api/favorites" => routes::post_favorites,
     post "/api/pin" => routes::post_pin,

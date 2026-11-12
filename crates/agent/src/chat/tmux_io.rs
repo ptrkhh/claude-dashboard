@@ -83,14 +83,24 @@ pub(crate) mod tests {
     pub(crate) fn stub_tmux(dir: &std::path::Path, answer: &str, exit: i32) -> String {
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let p = bin.join("tmux");
+        let src = dir.join("tmux.src");
         std::fs::write(
-            &p,
+            &src,
             format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}/tmux-args'\necho '{answer}'\nexit {exit}\n", dir.display()),
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Written by a child and renamed into place: a write fd held in this
+        // process can leak into another test's fork and make exec fail with
+        // ETXTBSY, and a rename never disturbs a stub that is running.
+        #[allow(clippy::disallowed_types)] // test-only fixture setup
+        let ok = std::process::Command::new("sh")
+            .args(["-c", "cp \"$1\" \"$2.new\" && chmod 755 \"$2.new\" && mv -f \"$2.new\" \"$2\"", "sh"])
+            .arg(&src)
+            .arg(bin.join("tmux"))
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
         bin.to_string_lossy().into_owned()
     }
 

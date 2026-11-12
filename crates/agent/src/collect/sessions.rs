@@ -110,7 +110,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
                 provider: Some("terminal".into()), native_terminal: None,
                 rc_link: None, rc_unavailable: true,
                 git: git.as_deref().map(parse_git_status), working: false, last_message: None, sid: None,
-                cpu: cpu.cpu, rss_kb: cpu.rss_kb, cpu_sample_age_ms: cpu.cpu_sample_age_ms, external: false,
+                cpu: cpu.cpu, rss_kb: cpu.rss_kb, cpu_sample_age_ms: cpu.cpu_sample_age_ms, external: false, chat: false,
             });
             continue;
         }
@@ -125,7 +125,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
                 provider: Some("opencode".into()), native_terminal: Some(s.native_terminal),
                 rc_link: super::opencode::link(ctx, &p.name).await, rc_unavailable: s.rc_unavailable,
                 git: git.as_deref().map(parse_git_status), working: s.working, last_message: s.last_message, sid: s.sid,
-                cpu: cpu.cpu, rss_kb: cpu.rss_kb, cpu_sample_age_ms: cpu.cpu_sample_age_ms, external: false,
+                cpu: cpu.cpu, rss_kb: cpu.rss_kb, cpu_sample_age_ms: cpu.cpu_sample_age_ms, external: false, chat: false,
             });
             continue;
         }
@@ -144,7 +144,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
                 git: git.as_deref().map(parse_git_status), working: s.working,
                 last_message: s.last_message, sid: s.sid,
                 cpu: cpu.cpu, rss_kb: cpu.rss_kb, cpu_sample_age_ms: cpu.cpu_sample_age_ms,
-                external: false,
+                external: false, chat: false,
             });
             continue;
         }
@@ -229,6 +229,7 @@ pub async fn collect_sessions(ctx: &Arc<Ctx>, limit: usize) -> SessionsResponse 
             rss_kb: cpu_state.rss_kb,
             cpu_sample_age_ms: cpu_state.cpu_sample_age_ms,
             external: false,
+            chat: true,
         });
     }
 
@@ -643,6 +644,7 @@ mod tests {
         let t = &r.running[0];
         assert_eq!((t.provider.as_deref(), t.model.as_deref()), (Some("terminal"), Some("Terminal")));
         assert!(t.rc_link.is_none() && t.rc_unavailable && t.sid.is_none());
+        assert!(!t.chat);
     }
 
     #[tokio::test]
@@ -667,6 +669,7 @@ mod tests {
             r.running[0].rc_link.as_deref(),
             Some("https://claude.ai/code/session_pane")
         );
+        assert!(r.running[0].chat);
     }
 
     #[tokio::test]
@@ -775,7 +778,7 @@ mod tests {
             name: "x".into(), dir: "/x".into(), pid: 1, uptime_sec: 0,
             model: None, effort: None, variant: None, provider: None, native_terminal: None, rc_link: None, rc_unavailable: false, git: None, working: false,
             last_message: None, sid: None, cpu: None, rss_kb: 0,
-            cpu_sample_age_ms: 0, external: false,
+            cpu_sample_age_ms: 0, external: false, chat: false,
         };
         let j = serde_json::to_string(&s).unwrap();
         assert!(!j.contains("external"));

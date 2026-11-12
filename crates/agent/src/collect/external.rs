@@ -49,6 +49,9 @@ pub struct Session {
     /// for external ones. `skip_serializing_if` reproduces that exactly.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub external: bool,
+    /// The agent can serve `/api/chat` for this card. Omitted when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub chat: bool,
 }
 
 fn basename(p: &str) -> String {
@@ -153,6 +156,7 @@ pub async fn external_sessions(
             rss_kb: usage.rss_kb,
             cpu_sample_age_ms: usage.cpu_sample_age_ms,
             external: true,
+            chat: false,
         });
     }
     out

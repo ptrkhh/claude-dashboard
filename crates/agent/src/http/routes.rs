@@ -280,6 +280,38 @@ pub async fn get_term(
     Ok(ws.on_upgrade(move |socket| bridge(ctx, name, cols, rows, socket)))
 }
 
+/// A session's conversation over a WebSocket. Same checks and order as
+/// `get_term`; every refusal happens before the upgrade and is logged.
+pub async fn get_chat(
+    State(ctx): State<Arc<Ctx>>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    let h = |k: axum::http::HeaderName| headers.get(k).and_then(|v| v.to_str().ok());
+    let origin = h(axum::http::header::ORIGIN);
+    let public = std::env::var("CDASH_PUBLIC_URL").ok();
+    if !origin_allowed(origin, h(axum::http::header::HOST), public.as_deref()) {
+        ctx.host.log.push(format!("chat refused: origin {origin:?}"));
+        return Err(ApiError { status: StatusCode::FORBIDDEN, message: "origin not allowed".into() });
+    }
+    let name = q.get("name").cloned().unwrap_or_default();
+    if let Err(e) = assert_kill_name(&name) {
+        ctx.host.log.push(format!("chat refused: {}", e.0));
+        return Err(e.into());
+    }
+    let hub = match crate::chat::hub_for(&ctx, &name).await {
+        Ok(hub) => hub,
+        Err(Refused::BadRequest(m) | Refused::Failed(m)) => {
+            ctx.host.log.push(format!("chat refused {name}: {m}"));
+            return Err(ApiError { status: StatusCode::CONFLICT, message: m });
+        }
+    };
+    let after = q.get("after").and_then(|a| a.parse::<u64>().ok());
+    let epoch = q.get("epoch").cloned();
+    Ok(ws.on_upgrade(move |socket| crate::chat::ws::serve(ctx, hub, name, after, epoch, socket)))
+}
+
 pub async fn post_purge(
     State(ctx): State<Arc<Ctx>>,
     Json(body): Json<SidBody>,
