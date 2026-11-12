@@ -1,0 +1,32 @@
+{"type":"system","subtype":"bridge_status","uuid":"s0","parentUuid":null}
+{"type":"user","uuid":"u1","parentUuid":"s0","isSidechain":false,"promptSource":"typed","message":{"role":"user","content":"run the tests"}}
+{"type":"attachment","uuid":"a1","parentUuid":"u1","attachment":{"type":"hook_additional_context","content":["x"]}}
+{"type":"assistant","uuid":"k1","parentUuid":"a1","isSidechain":false,"message":{"id":"msg_1","role":"assistant","content":[{"type":"thinking","thinking":"","signature":"sig"}]}}
+{"type":"assistant","uuid":"k2","parentUuid":"k1","isSidechain":false,"message":{"id":"msg_1","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"npm test"}}]}}
+{"type":"user","uuid":"r1","parentUuid":"k2","isSidechain":false,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text","text":"12 passed"}],"is_error":false}]}}
+{"type":"assistant","uuid":"k3","parentUuid":"r1","isSidechain":false,"message":{"id":"msg_2","role":"assistant","content":[{"type":"text","text":"All **green**."}]}}
+{"type":"system","subtype":"stop_hook_summary","uuid":"s1","parentUuid":"k3"}
+{"type":"system","subtype":"turn_duration","durationMs":7773,"uuid":"s2","parentUuid":"s1"}
+{"type":"user","uuid":"b1","parentUuid":"s2","isSidechain":false,"message":{"role":"user","content":"<bash-input> echo hi</bash-input>"}}
+{"type":"user","uuid":"b2","parentUuid":"b1","isSidechain":false,"message":{"role":"user","content":"<bash-stdout>hi</bash-stdout><bash-stderr></bash-stderr>"}}
+{"type":"user","uuid":"n1","parentUuid":"b2","isSidechain":false,"promptSource":"system","message":{"role":"user","content":"<task-notification>\n<task-id>x</task-id>"}}
+{"type":"user","uuid":"u2","parentUuid":"n1","isSidechain":false,"promptSource":"typed","message":{"role":"user","content":"slow job"}}
+{"type":"assistant","uuid":"k4","parentUuid":"u2","isSidechain":false,"message":{"id":"msg_3","role":"assistant","content":[{"type":"tool_use","id":"toolu_2","name":"Bash","input":{"command":"make"}}]}}
+{"type":"queue-operation","operation":"enqueue","content":"also update README"}
+{"type":"queue-operation","operation":"dequeue"}
+{"type":"user","uuid":"u3","parentUuid":"k4","isSidechain":false,"promptSource":"queued","message":{"role":"user","content":"also update README"}}
+{"type":"user","uuid":"r2","parentUuid":"k4","isSidechain":false,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","content":"The user doesn't want to proceed with this tool use.","is_error":true}]}}
+{"type":"user","uuid":"i1","parentUuid":"r2","isSidechain":false,"interruptedMessageId":"msg_3","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}
+{"type":"assistant","uuid":"k5","parentUuid":"i1","isSidechain":false,"message":{"id":"msg_4","role":"assistant","content":[{"type":"text","text":"README updated."}]}}
+{"type":"system","subtype":"turn_duration","durationMs":1042,"uuid":"s3","parentUuid":"k5"}
+{"type":"user","uuid":"u4","parentUuid":"s3","isSidechain":false,"promptSource":"typed","message":{"role":"user","content":"handed back"}}
+{"type":"user","uuid":"u5","parentUuid":"s3","isSidechain":false,"promptSource":"typed","message":{"role":"user","content":"second try"}}
+{"type":"assistant","uuid":"k6","parentUuid":"u5","isSidechain":false,"message":{"id":"msg_5","role":"assistant","content":[{"type":"tool_use","id":"toolu_3","name":"Bash","input":{"command":"make"}}]}}
+{"type":"queue-operation","operation":"enqueue","content":"use -j4"}
+{"type":"user","uuid":"r3","parentUuid":"k6","isSidechain":false,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_3","content":"Command was moved to the background","is_error":false}]}}
+{"type":"queue-operation","operation":"remove","content":"use -j4","reason":"absorbed_mid_turn"}
+{"type":"attachment","uuid":"q1","parentUuid":"r3","attachment":{"type":"queued_command","prompt":"use -j4","commandMode":"prompt","origin":{"kind":"human"}}}
+{"type":"assistant","uuid":"x1","parentUuid":"q1","isSidechain":true,"message":{"id":"msg_s","role":"assistant","content":[{"type":"text","text":"subagent chatter"}]}}
+{"type":"user","uuid":"m1","parentUuid":"q1","isSidechain":false,"isMeta":true,"message":{"role":"user","content":"Caveat: local command"}}
+{"type":"api-request-blob","body":"x"}
+not json at all
