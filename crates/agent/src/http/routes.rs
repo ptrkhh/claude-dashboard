@@ -650,6 +650,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chat_assets_are_embedded() {
+        let b = serve(cfg_for(tempdir("chat-assets"))).await.unwrap();
+        for (path, marker) in [("/chat/md.js", "cdashMd"), ("/chat/store.js", "cdashChatStore"), ("/chat/view.js", "cdashChat")] {
+            assert!(reqwest_get(&format!("http://{}{path}", b.addr)).await.contains(marker), "{path}");
+        }
+    }
+
+    #[tokio::test]
     async fn terminal_assets_are_embedded() {
         let b = serve(cfg_for(tempdir("term-assets"))).await.unwrap();
         for (path, needle) in [
