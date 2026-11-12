@@ -2,6 +2,7 @@
 //! tool's own record and types into it. See
 //! `docs/superpowers/specs/2026-11-12-chat-core-design.md`.
 
+pub mod queue;
 pub mod tap;
 pub mod wire;
 
