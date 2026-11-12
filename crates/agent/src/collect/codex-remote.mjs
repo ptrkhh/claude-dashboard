@@ -187,6 +187,28 @@ async function replayHistory(codex, threadId, remoteSid, emit, submitted = new S
   } while (cursor);
 }
 
+// Chat's view of one app-server notification, in the shapes the worker sends
+// Remote Control. Prompts typed in the native TUI arrive here too.
+// ponytail: mirrors the worker's inline shaping; fold the two together when the worker is next reworked.
+function chatMessages(m, sid) {
+  const p = m.params || {};
+  let out = [];
+  if (m.method === 'item/started' && p.item) out = toolMessages(p.item, false);
+  else if (m.method === 'item/completed' && p.item) {
+    const item = p.item;
+    if (item.type === 'userMessage') {
+      const content = (item.content || []).filter(b => b.type === 'text').map(b => ({ type: 'text', text: b.text }));
+      if (content.length) out = [{ type: 'user', message: { id: item.id, role: 'user', content } }];
+    } else if (item.type === 'agentMessage') {
+      out = [{ type: 'assistant', message: { id: item.id, role: 'assistant', content: [{ type: 'text', text: item.text }] } }];
+    } else out = toolMessages(item);
+  } else if (m.method === 'turn/completed') {
+    const status = p.turn?.status;
+    out = [{ type: 'result', subtype: status === 'interrupted' ? 'interrupted' : status === 'completed' ? 'success' : 'error_during_execution' }];
+  }
+  return out.map(msg => ({ ...msg, uuid: messageUuid('cdash-chat', sid, p.turnId ?? p.turn?.id, msg.message?.id ?? 'result') }));
+}
+
 let stop = () => {};
 function fatal(e) { console.error(`Codex bridge: ${e.message}${e.cause ? ` (${e.cause.code || e.cause.message})` : ''}`); stop(); setTimeout(() => process.exit(1), 5000).unref(); process.exitCode = 1; }
 
@@ -422,6 +444,20 @@ async function worker() {
 
 async function nativeLauncher(statePath, state, script) {
   const dir = await mkdtemp(join(tmpdir(), 'cdash-codex-native-'));
+  const resuming = Boolean(state.sid);
+  const { ChatFeed } = await import(new URL('./chat-feed.mjs', import.meta.url));
+  // Dashboard chat: the agent connects to this feed's socket. It lives as
+  // long as the pane, independent of Remote Control.
+  const feed = new ChatFeed({
+    send: async (text, { steer }) => {
+      const input = [{ type: 'text', text, text_elements: [] }];
+      const clientUserMessageId = randomUUID();
+      if (steer && control.turnId) await control.call('turn/steer', { threadId: state.sid, expectedTurnId: control.turnId, input, clientUserMessageId });
+      else await control.call('turn/start', { threadId: state.sid, input, effort: state.effort, clientUserMessageId });
+    },
+    stop: async () => { if (control?.turnId) await control.call('turn/interrupt', { threadId: state.sid, turnId: control.turnId }); },
+  });
+  let replayed = null; // live chat messages held back while history replays, so history comes first
   // Codex's Unix listener fails its socket-parent check on every Android path
   // (/ and /data are unreadable to apps), so Android uses token-guarded loopback.
   const loopback = process.platform === 'android';
@@ -443,6 +479,7 @@ async function nativeLauncher(statePath, state, script) {
         }
         catch { /* the backend may already have exited */ }
       }
+      feed.close();
       tui?.kill('SIGTERM');
       killGroup(runner);
       control?.close();
@@ -494,6 +531,15 @@ async function nativeLauncher(statePath, state, script) {
   };
   control = new Codex(async m => {
     const p = m.params || {};
+    if (state.sid) {
+      const chat = chatMessages(m, state.sid);
+      if (replayed) replayed.push(...chat); else for (const msg of chat) feed.accept(msg);
+    }
+    if (m.method === 'item/agentMessage/delta') feed.delta(p.itemId, p.delta);
+    if (m.method === 'turn/started') feed.setState({ working: true });
+    if (m.method === 'turn/completed') feed.setState({ working: false, waiting: false });
+    if (m.id != null && m.method) feed.setState({ waiting: true }); // a server request: an approval or a question
+    if (m.method === 'serverRequest/resolved') feed.setState({ waiting: false });
     if (m.method === 'thread/settings/updated') {
       state.model = p.threadSettings.model;
       state.effort = p.threadSettings.effort;
@@ -520,8 +566,22 @@ async function nativeLauncher(statePath, state, script) {
   state.working = Boolean(control.turnId);
   // Naming persists an empty thread, so both clients can immediately resume it.
   await control.call('thread/name/set', { threadId: state.sid, name: state.display_name });
+  state.chat_sock = await feed.listen(dir);
   await atomic(statePath, JSON.stringify(state));
   await saveNative();
+  feed.setState({ working: state.working });
+  if (resuming) {
+    // Not awaited: the TUI must not wait for history.
+    replayed = [];
+    replayHistory(control, state.sid, 'cdash-chat', async msg => feed.accept(msg))
+      .catch(e => log.write(`${new Date().toISOString()} chat history replay failed: ${e.message}\n`).catch(() => {}))
+      .finally(() => {
+        const live = replayed;
+        replayed = null;
+        for (const msg of live) feed.accept(msg);
+        feed.ready();
+      });
+  } else feed.ready();
   tui = spawn('codex', ['resume', '--remote', loopback ? endpoint : `unix://${socket}`, ...(loopback ? ['--remote-auth-token-env', 'CDASH_CODEX_TOKEN'] : []), '-c', 'tui.fullscreen_transcript=true', '-c', 'tui.alternate_screen="always"', state.sid], {
     cwd: state.dir, env: { ...codexEnv(), CDASH_CODEX_TOKEN: process.env.CDASH_CODEX_TOKEN }, stdio: 'inherit',
   });
