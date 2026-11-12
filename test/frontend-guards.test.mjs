@@ -95,7 +95,7 @@ test('localStorage is reached only through the guarded store wrapper', () => {
   }
 });
 
-test('the send bar is gone: the terminal replaced it', () => {
+test('the old send bar stays gone: chat is a view, not a key-injecting bar', () => {
   // It typed one line into the pane and could not operate anything that
   // needs arrow keys (/mcp menus), which is why the terminal replaced it.
   const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
@@ -103,6 +103,7 @@ test('the send bar is gone: the terminal replaced it', () => {
   assert.ok(!app.includes('/api/keys'), 'app.js no longer posts to /api/keys');
   assert.ok(!app.includes('send-input'), 'no send input is rendered');
   assert.ok(!/\.send[\s{.:-]/.test(css), 'no .send styles remain');
+  assert.ok(!app.includes('send-keys'), 'the browser never names terminal keys');
 });
 
 test('legacy Codex sessions do not offer unsupported terminal controls', () => {
@@ -505,7 +506,7 @@ test('pin keeps keyboard focus unless the user focuses something else while savi
       poll: () => { polledFocus = document.activeElement; },
       toast: message => { assert.fail(message); },
     });
-    await click({ target: { closest: selector => selector === '[data-term]' || selector === '[data-copy]' ? null : el } });
+    await click({ target: { closest: selector => selector === '[data-term]' || selector === '[data-copy]' || selector === '[data-chat]' ? null : el } });
     assert.equal(polledFocus, moveFocus ? other : el);
   }});
 test('chat scripts load before app.js and the chat markup exists', () => {
@@ -536,4 +537,29 @@ test('the composer follows the session: send, stop, or off', async () => {
   assert.equal(mode(st({ waiting: true, working: true }), false), 'off');
   assert.equal(mode(st({ ended: true }), false), 'off');
   assert.equal(mode(st({ unreadable: true }), false), 'off');
+});
+
+function runningCardWith(ICONS) {
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const code = app.slice(app.indexOf('const copyIdBtn ='), app.indexOf('let lastRes ='));
+  const context = { esc: s => String(s || ''), ICONS, gitBadge: () => '', fmtUp: () => '', armedKill: null };
+  runInNewContext(`${code}; this.card = runningCard;`, context);
+  return context.card;
+}
+test('cards offer Chat as the primary action where the agent says chat works', () => {
+  const card = runningCardWith({});
+  const base = { name: 'cdash-a', dir: '/p/proj', uptimeSec: 60, working: false, model: 'opus', sid: 's1', rcLink: 'https://claude.ai/code/x' };
+  const withChat = card({ ...base, chat: true });
+  assert.match(withChat, /<button class="action primary" type="button" data-chat="cdash-a" data-title="proj">/);
+  assert.match(withChat, /<a class="action" href="https:\/\/claude\.ai\/code\/x"/, 'Open in Claude stays, no longer primary');
+  assert.match(withChat, /data-term="cdash-a"/);
+  const without = card({ ...base });
+  assert.ok(!without.includes('data-chat='));
+  assert.match(without, /<a class="action primary" href=/);
+  assert.ok(!card({ ...base, chat: false, external: true }).includes('data-chat='));
+});
+test('a Claude card whose link never came says so instead of waiting', () => {
+  const html = runningCardWith({ spinner: '' })({ name: 'cdash-a', dir: '/p/proj', uptimeSec: 90, working: false, model: 'opus', chat: true, rcUnavailable: true });
+  assert.match(html, /Claude link unavailable/);
+  assert.ok(!html.includes('Waiting for link'));
 });

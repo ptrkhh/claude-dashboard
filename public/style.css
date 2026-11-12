@@ -704,3 +704,15 @@ button, input, select { font: inherit; }
   max-height: 40vh; overflow-y: auto;
 }
 .chat-call-result.error { border-color: var(--danger); }
+
+/* Wide windows: the dashboard folds into a narrow left column and chat sits on
+   the right. ponytail: the narrow launcher rules are duplicated from the
+   560px block; move both to a container query if a third copy appears. */
+@media (min-width: 900px) {
+  body.chat-open .app { width: 400px; max-width: 400px; margin: 0; }
+  body.chat-open .chat { left: 420px; border-left: 1px solid var(--border); }
+  body.chat-open .grid { grid-template-columns: 1fr; }
+  body.chat-open .cb-dir-wrap { flex-basis: 100%; }
+  body.chat-open .cb-select { flex: 1 1 auto; }
+  body.chat-open .cb-launch { flex: 1 1 100%; padding: 12px; }
+}
