@@ -1,5 +1,5 @@
 {
-  "name": "claude-dashboard",
+  "name": "rc-dashboard",
   "private": true,
   "type": "module",
   "scripts": {

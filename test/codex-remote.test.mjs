@@ -16,7 +16,7 @@ test('Codex launcher uses the saved animal name even when display names repeat',
 require('node:fs').writeFileSync(process.env.CDASH_CHECK_ARGS, JSON.stringify(process.argv.slice(2)));
 `, { mode: 0o700 });
   const state = join(dir, 'state.json'), argsPath = join(dir, 'args.json');
-  const display_name = '[Codex] claude-dashboard · elephant';
+  const display_name = '[Codex] rc-dashboard · elephant';
   for (const name of ['cdash-first', 'cdash-second']) {
     await mkdir(join(dir, 'controls', name), { recursive: true });
     await writeFile(state, JSON.stringify({ dir, display_name, model_label: 'GPT Check' }));

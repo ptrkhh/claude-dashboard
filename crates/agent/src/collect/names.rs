@@ -45,8 +45,8 @@ mod tests {
         for (i, animal) in ANIMALS.iter().enumerate() {
             let sid = format!("01234567-1234-4234-8234-{i:012x}");
             assert_eq!(
-                session_name("Codex", "/git/claude-dashboard", &sid),
-                format!("[Codex] claude-dashboard · {animal}")
+                session_name("Codex", "/git/rc-dashboard", &sid),
+                format!("[Codex] rc-dashboard · {animal}")
             );
             let duplicate = format!("01234567-1234-4234-8234-{:012x}", i + 32);
             assert_eq!(
