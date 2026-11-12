@@ -167,7 +167,7 @@ else {
 
 // A supervisor over a fake OpenCode server that also serves the chat feed's
 // reads (messages, forms, permissions) and records prompts and interrupts.
-async function fixture(t) {
+async function fixture(t, { flakyMessages = false } = {}) {
   const { readFileSync, existsSync } = await import('node:fs');
   const { rename } = await import('node:fs/promises');
   const dir = await mkdtemp(join(tmpdir(), 'cdash-oc-chat-'));
@@ -187,6 +187,7 @@ else {
  if(path==='/api/event'){res.writeHead(200,{'content-type':'text/event-stream'});res.write('data: {"type":"server.connected","data":{}}\\n\\n');streams.add(res);req.on('close',()=>streams.delete(res));return;}
  if(path==='/api/session/active')return send(res,{data:{}});
  if(path==='/api/session'&&req.method==='POST')return send(res,{data:{id:'ses_fixture'}});
+ if(path==='/api/session/ses_fixture/message'&&process.env.CDASH_TEST_FLAKY&&!fs.existsSync(process.env.CDASH_TEST_FLAKY)){fs.writeFileSync(process.env.CDASH_TEST_FLAKY,'1');return send(res,{data:'broken'});}
  if(path==='/api/session/ses_fixture/message')return send(res,{data:[{id:'msg_u',type:'user',text:'hello'},{id:'msg_a',type:'assistant',time:{completed:1},content:[{type:'text',text:'hi there'}]}],cursor:{}});
  if(path.endsWith('/form')||path.endsWith('/permission'))return send(res,{data:[]});
  if(path.endsWith('/prompt'))return send(res,{data:{id:body.id,sessionID:'ses_fixture',type:'user'}});
@@ -198,7 +199,7 @@ else {
 `, { mode: 0o700 });
   await writeFile(join(dir, 'claude'), `#!${process.execPath}\nprocess.exit(1);`, { mode: 0o700 });
   const child = spawn(process.execPath, [resolve('crates/agent/src/collect/opencode-remote.mjs'), '--state', state, '--name', 'cdash-fixture'], {
-    cwd: dir, env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, CDASH_TEST_LOG: log, CDASH_TEST_MARKER: marker }, stdio: ['pipe', 'pipe', 'pipe'],
+    cwd: dir, env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, CDASH_TEST_LOG: log, CDASH_TEST_MARKER: marker, ...(flakyMessages && { CDASH_TEST_FLAKY: join(dir, 'failed-once') }) }, stdio: ['pipe', 'pipe', 'pipe'],
   });
   let output = '';
   child.stdout.on('data', b => { output += b; });
@@ -251,4 +252,14 @@ test('the supervisor serves chat: history, send as steering, and stop', { timeou
   await until(() => c.lines.some(l => l.t === 'state' && l.working === true));
   c.close();
   assert.ok(!String(f.output()).includes('"t":"'), 'no feed frame leaked onto the TUI');
+});
+
+test('one failed history read neither leaves chat connecting forever nor freezes it', { timeout: 20000 }, async t => {
+  const f = await fixture(t, { flakyMessages: true });
+  await f.wait(() => f.native()?.chat_sock);
+  const c = await client(f.native().chat_sock, { after: 0, epoch: null });
+  await until(() => c.lines.some(l => l.t === 'ready'));
+  await until(() => c.lines.filter(l => l.t === 'ev').length >= 2, 10000);
+  assert.deepEqual(c.lines.filter(l => l.t === 'ev').map(l => l.ev.message.content[0].text), ['hello', 'hi there']);
+  c.close();
 });

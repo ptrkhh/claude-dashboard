@@ -19,7 +19,9 @@ pub const PAGE_MAX: usize = 200;
 /// A sent message the session's record never showed is reported after this.
 pub const CONFIRM_AFTER: Duration = Duration::from_secs(10);
 /// How long after a Stop the hub looks for a prompt Claude handed back.
-pub const STOP_SETTLE: Duration = Duration::from_secs(1);
+/// Transcript writes were seen up to 2.2 s late; an interrupt marker that
+/// lands inside this window proves the prompt was taken, not handed back.
+pub const STOP_SETTLE: Duration = Duration::from_millis(2500);
 const TICK: Duration = Duration::from_millis(250);
 
 /// What an engine reports about its session.
@@ -309,6 +311,7 @@ impl<E: Engine> Actor<E> {
             let text = ev["text"].as_str().unwrap_or_default();
             if let Some(p) = self.pending.iter_mut().find(|p| p.uuid.is_none() && !p.exempt && p.text == text) {
                 p.exempt = true;
+                ev["cid"] = json!(p.cid);
             }
         }
         self.append(ev);
@@ -327,13 +330,20 @@ impl<E: Engine> Actor<E> {
                 }
                 None
             }
-            ClientFrame::Held { op, id } => {
-                if let Some(h) = self.queue.take(&id) {
-                    if op == HeldOp::Now {
-                        let steer = self.working;
-                        let a = self.deliver(&h.cid, &h.text, steer).await;
-                        self.broadcast(a);
+            ClientFrame::Held { op: HeldOp::Remove, id } => {
+                self.queue.take(&id);
+                None
+            }
+            ClientFrame::Held { op: HeldOp::Now, id } => {
+                if let Some(e) = self.refusal() {
+                    // Kept in the queue: Enter into a dialog would answer it.
+                    if let Some(h) = self.queue.list().iter().find(|h| h.id == id) {
+                        self.broadcast(ack(&h.cid, "refused", Some(e)));
                     }
+                } else if let Some(h) = self.queue.take(&id) {
+                    let steer = self.working;
+                    let a = self.deliver(&h.cid, &h.text, steer).await;
+                    self.broadcast(a);
                 }
                 None
             }
@@ -346,22 +356,32 @@ impl<E: Engine> Actor<E> {
             Ok(t) => t,
             Err(e) => return ack(&cid, "refused", Some(e)),
         };
-        if self.ended {
-            return ack(&cid, "refused", Some("session ended"));
-        }
-        if self.unreadable {
-            return ack(&cid, "refused", Some("cannot read this session; use Terminal"));
-        }
-        if self.waiting {
-            return ack(&cid, "refused", Some("answer in Terminal first"));
-        }
-        if self.working {
+        if self.working && !self.ended && !self.unreadable && !self.waiting {
             let id = self.queue.hold(cid.clone(), text);
             let mut a = ack(&cid, "held", None);
             a["id"] = json!(id);
             return a;
         }
+        if let Some(e) = self.refusal() {
+            return ack(&cid, "refused", Some(e));
+        }
         self.deliver(&cid, &text, false).await
+    }
+
+    /// Why nothing may be typed into the session right now, if anything.
+    fn refusal(&self) -> Option<&'static str> {
+        if self.ended {
+            Some("session ended")
+        } else if self.unreadable {
+            Some("cannot read this session; use Terminal")
+        } else if self.waiting {
+            Some("answer in Terminal first")
+        } else if self.stopped_at.is_some() && self.pending.iter().any(|p| !p.exempt) {
+            // A paste now could join a prompt Claude is handing back.
+            Some("stopping; send again in a moment")
+        } else {
+            None
+        }
     }
 
     async fn deliver(&mut self, cid: &str, text: &str, steer: bool) -> Value {
@@ -668,4 +688,54 @@ mod tests {
         assert_eq!((ack["status"].as_str(), ack["error"].as_str()), (Some("refused"), Some("cannot read this session; use Terminal")));
         assert!(calls.lock().unwrap().is_empty());
     }
+    #[tokio::test]
+    async fn send_now_never_types_into_a_dialog_or_an_unreadable_session() {
+        let (hub, tx, calls) = rig();
+        let mut sub = hub.subscribe(None, None).await.unwrap();
+        tx.send(EngineMsg::Status { working: true, waiting: false }).await.unwrap();
+        settle().await;
+        hub.command(send("c1", "held")).await;
+        tx.send(EngineMsg::Status { working: false, waiting: true }).await.unwrap();
+        settle().await;
+        hub.command(ClientFrame::Held { op: HeldOp::Now, id: "h1".into() }).await;
+        tx.send(EngineMsg::Unreadable).await.unwrap();
+        settle().await;
+        hub.command(ClientFrame::Held { op: HeldOp::Now, id: "h1".into() }).await;
+        assert!(calls.lock().unwrap().is_empty(), "Enter in a permission dialog would approve it");
+        let f = frames(&mut sub);
+        assert!(f.iter().any(|x| x["t"] == "ack" && x["cid"] == "c1" && x["status"] == "refused" && x["error"] == "answer in Terminal first"));
+        let state = f.iter().rev().find(|x| x["t"] == "state").unwrap();
+        assert_eq!(state["held"][0]["id"], "h1", "still held, not lost");
+    }
+    #[tokio::test]
+    async fn a_message_claude_queued_carries_its_client_id() {
+        let (hub, tx, _) = rig();
+        let mut sub = hub.subscribe(None, None).await.unwrap();
+        tx.send(EngineMsg::Status { working: true, waiting: false }).await.unwrap();
+        settle().await;
+        hub.command(send("c1", "later")).await;
+        hub.command(ClientFrame::Held { op: HeldOp::Now, id: "h1".into() }).await;
+        tx.send(EngineMsg::Ev(json!({"type":"cdash","subtype":"queued","text":"later"}))).await.unwrap();
+        settle().await;
+        let f = frames(&mut sub);
+        assert!(f.iter().any(|x| x["ev"]["subtype"] == "queued" && x["ev"]["cid"] == "c1"));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn nothing_is_pasted_while_a_stopped_prompt_may_still_be_handed_back() {
+        let (hub, tx, calls) = rig();
+        hub.command(send("c1", "first")).await;
+        tx.send(EngineMsg::Status { working: true, waiting: false }).await.unwrap();
+        tx.send(EngineMsg::Ev(prompt("u1", "first"))).await.unwrap();
+        settle().await;
+        hub.command(ClientFrame::Stop).await;
+        tx.send(EngineMsg::Status { working: false, waiting: false }).await.unwrap();
+        settle().await;
+        let early = ack_of(hub.command(send("c2", "second")).await);
+        assert_eq!((early["status"].as_str(), early["error"].as_str()), (Some("refused"), Some("stopping; send again in a moment")));
+        assert!(STOP_SETTLE >= Duration::from_millis(2500), "transcript writes were seen up to 2.2 s late");
+        tokio::time::sleep(STOP_SETTLE + Duration::from_millis(300)).await;
+        assert_eq!(ack_of(hub.command(send("c3", "third")).await)["status"], "sent");
+        assert_eq!(*calls.lock().unwrap(), ["send:first:false", "stop", "clear:first", "send:third:false"]);
+    }
+
 }

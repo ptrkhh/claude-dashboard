@@ -408,18 +408,35 @@ async function supervise(statePath, name) {
       event: async m => feed.accept(m.type === 'result' && lastExecution === 'session.execution.interrupted' ? { ...m, subtype: 'interrupted' } : m),
       state: async status => feed.setState({ working: status === 'running', waiting: status === 'requires_action' }),
     };
-    const bridge = new (class extends RemoteBridge {
+    class ChatBridge extends RemoteBridge {
       async nativeEvent(event) {
         if (event.type?.startsWith('session.execution.')) lastExecution = event.type;
         return super.nativeEvent(event);
       }
-    })(client, sink, chatState, async () => {});
+    }
     state.chat_sock = await feed.listen(chatDir);
     await saveNative();
-    // Resolves after the first reconcile, which is the history replay. A
-    // failing feed must not stop the pane.
-    bridge.connect(events.signal, error => { log.write('chat feed: ' + error.message + '\n').catch(() => {}); })
-      .then(() => feed.ready(), () => {});
+    // A bridge stops for good after one failed operation, so chat replaces it
+    // after a pause; the feed drops what the new one replays. connect()
+    // resolves after the first reconcile (the history replay). A failing feed
+    // must not stop the pane, nor leave chat connecting forever.
+    const startChat = () => {
+      if (closing) return;
+      const own = new AbortController();
+      events.signal.addEventListener('abort', () => own.abort(), { once: true });
+      let failed = false;
+      const restart = error => {
+        if (failed) return;
+        failed = true;
+        own.abort();
+        log.write('chat feed: ' + error.message + '\n').catch(() => {});
+        feed.ready();
+        if (!closing) setTimeout(startChat, 2000).unref();
+      };
+      new ChatBridge(client, sink, chatState, async () => {}).connect(own.signal, restart)
+        .then(() => feed.ready(), error => restart(error));
+    };
+    startChat();
     let updates = Promise.resolve();
     const enqueue = operation => { updates = updates.then(operation).catch(() => {}); };
     void client.subscribe(event => enqueue(async () => {

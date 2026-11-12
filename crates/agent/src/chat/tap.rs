@@ -21,6 +21,11 @@ struct Rec {
     sidechain: Option<bool>,
     #[serde(rename = "isMeta", default)]
     meta: Option<bool>,
+    /// The summary written after compaction: context for the model, not a prompt.
+    #[serde(rename = "isCompactSummary", default)]
+    compact: Option<bool>,
+    #[serde(rename = "isVisibleInTranscriptOnly", default)]
+    transcript_only: Option<bool>,
     #[serde(rename = "promptSource")]
     source: Option<String>,
     operation: Option<String>,
@@ -60,12 +65,12 @@ impl Tap {
 
     pub fn feed(&mut self, line: &str) -> Vec<Value> {
         let Ok(r) = serde_json::from_str::<Rec>(line) else { return Vec::new() };
-        if r.sidechain == Some(true) || r.meta == Some(true) {
+        if [r.sidechain, r.meta, r.compact, r.transcript_only].contains(&Some(true)) {
             return Vec::new();
         }
         let out = match r.kind.as_str() {
             "queue-operation" => match (r.operation.as_deref(), r.content.as_ref().and_then(Value::as_str)) {
-                (Some("enqueue"), Some(text)) => vec![json!({"type":"cdash","subtype":"queued","text":text})],
+                (Some("enqueue"), Some(text)) if !injected(text) => vec![json!({"type":"cdash","subtype":"queued","text":text})],
                 _ => Vec::new(),
             },
             "attachment" => steer(&r).into_iter().collect(),
@@ -108,9 +113,7 @@ impl Tap {
             let stderr = between(t, "<bash-stderr>", "</bash-stderr>").unwrap_or("");
             return vec![json!({"type":"cdash","subtype":"shell_output","uuid":r.uuid,"stdout":stdout,"stderr":stderr})];
         }
-        if r.source.as_deref() == Some("system")
-            || ["<task-notification>", "<system-reminder>", "<local-command-"].iter().any(|p| t.starts_with(p))
-        {
+        if r.source.as_deref() == Some("system") || injected(t) {
             return Vec::new();
         }
         let prompt = match between(t, "<command-name>", "</command-name>") {
@@ -133,6 +136,12 @@ impl Tap {
         out.push(prompt_event(r.uuid.as_deref(), &prompt, if queued { "queued" } else { "typed" }));
         out
     }
+}
+
+/// Text tools inject for the model's benefit; never shown as a user message.
+fn injected(text: &str) -> bool {
+    let t = text.trim_start();
+    ["<task-notification>", "<system-reminder>", "<local-command-"].iter().any(|p| t.starts_with(p))
 }
 
 fn prompt_event(uuid: Option<&str>, text: &str, src: &str) -> Value {

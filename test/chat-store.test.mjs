@@ -74,3 +74,12 @@ test('turn ends, shell commands and both prompt content shapes are understood', 
   assert.deepEqual(S.rows(s).map(r => [r.kind, r.text ?? r.command]), [['user', 'block form'], ['shell', 'echo hi'], ['note', 'Stopped']]);
   assert.equal(S.rows(s)[1].stdout, 'hi');
 });
+test('a message Claude queued shows once, as queued, until Claude takes it', () => {
+  let s = feed([hello()]);
+  S.addMine(s, 'c1', 'later');
+  s = S.apply(s, { t: 'ack', cid: 'c1', status: 'sent' });
+  s = S.apply(s, ev(1, { type: 'cdash', subtype: 'queued', text: 'later', cid: 'c1' }));
+  assert.deepEqual(S.rows(s).map(r => [r.text, r.status]), [['later', 'queued']]);
+  s = S.apply(s, ev(2, prompt('q1', 'later', { src: 'steer', cid: 'c1' })));
+  assert.deepEqual(S.rows(s).map(r => [r.text, r.status]), [['later', 'sent']]);
+});

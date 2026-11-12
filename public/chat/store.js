@@ -38,6 +38,11 @@
         : s.mine.find(x => x.seq == null && x.text === text);  // the ack may have been lost across a reconnect
       if (m) { m.seq = seq; m.status = 'sent'; }
     }
+    // Claude queued my message: the queued row stands in for my own until it is taken.
+    if (ev.type === 'cdash' && ev.subtype === 'queued' && ev.cid) {
+      const m = s.mine.find(x => x.cid === ev.cid);
+      if (m) m.seq = seq;
+    }
     if (ev.type === 'assistant' && ev.message?.id) s.streams.delete(ev.message.id);
     if (ev.type === 'result') s.streams.clear();
   }

@@ -30,3 +30,5 @@
 {"type":"user","uuid":"m1","parentUuid":"q1","isSidechain":false,"isMeta":true,"message":{"role":"user","content":"Caveat: local command"}}
 {"type":"api-request-blob","body":"x"}
 not json at all
+{"type":"queue-operation","operation":"enqueue","content":"<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>"}
+{"type":"user","uuid":"cs1","parentUuid":"q1","isSidechain":false,"isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context."}}

@@ -292,6 +292,7 @@
 
   function renderHeld() {
     const box = $('#chat-held');
+    const off = c.done || composerMode(c.state, false) === 'off';
     box.textContent = '';
     for (const h of c.state.held) {
       const item = el('div', 'chat-held-item');
@@ -301,6 +302,7 @@
         b.type = 'button';
         b.dataset.op = op;
         b.dataset.id = h.id;
+        b.disabled = op === 'now' && off; // never typed into a dialog or a session chat cannot read
         item.append(b);
       }
       box.append(item);
