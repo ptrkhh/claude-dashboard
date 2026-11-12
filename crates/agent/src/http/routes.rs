@@ -650,6 +650,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn assets_are_revalidated_so_a_new_build_is_never_mixed_with_an_old_one() {
+        let b = serve(cfg_for(tempdir("asset-cache"))).await.unwrap();
+        let url = format!("http://{}/style.css", b.addr);
+        let first = reqwest::get(&url).await.unwrap();
+        assert_eq!(first.headers()["cache-control"], "no-cache", "proxies and browsers must ask before reusing");
+        let etag = first.headers()["etag"].to_str().unwrap().to_string();
+        assert!(etag.starts_with('"') && etag.len() > 10, "{etag}");
+        let again = reqwest::Client::new().get(&url).header("if-none-match", &etag).send().await.unwrap();
+        assert_eq!(again.status(), 304);
+        assert!(again.bytes().await.unwrap().is_empty());
+        let other = reqwest::Client::new().get(&url).header("if-none-match", "\"stale\"").send().await.unwrap();
+        assert_eq!(other.status(), 200);
+    }
+
+    #[tokio::test]
     async fn chat_assets_are_embedded() {
         let b = serve(cfg_for(tempdir("chat-assets"))).await.unwrap();
         for (path, marker) in [("/chat/md.js", "cdashMd"), ("/chat/store.js", "cdashChatStore"), ("/chat/view.js", "cdashChat")] {

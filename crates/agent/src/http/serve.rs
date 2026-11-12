@@ -103,8 +103,11 @@ impl Config {
     }
 }
 
-/// Serve an asset included in the agent binary.
-async fn embedded_asset(uri: OriginalUri) -> Response {
+/// Serve an asset included in the agent binary. `no-cache` plus a content
+/// ETag makes every cache in between (browser, Cloudflare) ask before reusing
+/// a copy, so a page from a new build never runs with an old stylesheet, and
+/// an unchanged asset costs a 304.
+async fn embedded_asset(uri: OriginalUri, req: axum::http::HeaderMap) -> Response {
     let path = uri.0.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
     // ponytail: fixed asset list must track public/; generate it in build.rs if it grows.
@@ -191,7 +194,13 @@ async fn embedded_asset(uri: OriginalUri) -> Response {
         ),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
-    ([(header::CONTENT_TYPE, content_type)], Body::from(body)).into_response()
+    use sha2::{Digest, Sha256};
+    let etag = format!("\"{}\"", &format!("{:x}", Sha256::digest(body))[..32]);
+    if req.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) == Some(etag.as_str()) {
+        return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response();
+    }
+    let headers = [(header::CONTENT_TYPE, content_type.to_string()), (header::CACHE_CONTROL, "no-cache".into()), (header::ETAG, etag)];
+    (headers, Body::from(body)).into_response()
 }
 
 /// What `serve` hands back. The address is the readiness signal — an in-process
