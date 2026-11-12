@@ -11,7 +11,7 @@
 
 After one-time setup, your everyday coding loop can happen entirely from RC Dashboard and Claude, without opening a terminal.
 
-[Download RC Dashboard](https://github.com/ptrkhh/claude-dashboard/releases/latest) · [Which setup?](#which-setup-do-i-need) · [Run on this device](#run-on-this-device) · [Run on a server](#run-on-a-server) · [Keep it private](#keep-it-private) · [Technical reference](#technical-reference)
+[Download RC Dashboard](https://github.com/ptrkhh/rc-dashboard/releases/latest) · [Which setup?](#which-setup-do-i-need) · [Run on this device](#run-on-this-device) · [Run on a server](#run-on-a-server) · [Keep it private](#keep-it-private) · [Technical reference](#technical-reference)
 
 ## Get Claude going from the screen in your hand.
 
@@ -51,7 +51,7 @@ Use the dashboard in your browser, on your desktop, or in the Android app. Runni
 
 The app and the agent run on the same computer or phone, and your sessions run there too. Choose this to use RC Dashboard on the machine you code on.
 
-1. [Download the app for your platform](https://github.com/ptrkhh/claude-dashboard/releases/latest): a Windows `.exe`, a macOS `.dmg`, a Linux AppImage, or the Android APK.
+1. [Download the app for your platform](https://github.com/ptrkhh/rc-dashboard/releases/latest): a Windows `.exe`, a macOS `.dmg`, a Linux AppImage, or the Android APK.
 2. On the machine where your projects live, install tmux and Claude Code, and [sign in for Remote Control](https://code.claude.com/docs/en/remote-control#requirements).
 3. Open RC Dashboard. Linux and macOS desktop apps start the agent with the app. On Windows and Android, follow the one-time setup prompt for WSL or F-Droid Termux.
 4. Choose a project and tap **Launch**, or tap **Resume** on a previous session.
@@ -138,7 +138,7 @@ To check a built image without CLI credentials or published ports, run `bash scr
 Use this on a Linux host you manage yourself, without a container.
 
 1. On the host, install tmux and Claude Code, and [sign in for Remote Control](https://code.claude.com/docs/en/remote-control#requirements). Node.js 22 or later is needed for conversation summaries.
-2. Download `cdash-agent-linux-x86_64` or `cdash-agent-linux-aarch64` from the [latest release](https://github.com/ptrkhh/claude-dashboard/releases/latest), make it executable, and run it. From a source checkout, `cargo run -p cdash-agent` does the same.
+2. Download `cdash-agent-linux-x86_64` or `cdash-agent-linux-aarch64` from the [latest release](https://github.com/ptrkhh/rc-dashboard/releases/latest), make it executable, and run it. From a source checkout, `cargo run -p cdash-agent` does the same.
 
        chmod +x cdash-agent-linux-x86_64
        ./cdash-agent-linux-x86_64
