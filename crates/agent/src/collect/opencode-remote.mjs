@@ -1,6 +1,7 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { stat, readFile, writeFile, rename, readdir, mkdir, open, rm } from 'node:fs/promises';
+import { stat, readFile, writeFile, rename, readdir, mkdir, open, rm, mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { isAbsolute, resolve, join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { OpenCode, startServer, normalizeModels } from './opencode-api.mjs';
@@ -349,7 +350,7 @@ async function supervise(statePath, name) {
   const controlDir = join(root, 'controls', name);
   await mkdir(controlDir, { recursive: true, mode: 0o700 });
   const log = await open(join(controlDir, 'native.log'), 'a', 0o600);
-  let client, tui, runner, retry, closing = false, cleanup;
+  let client, tui, runner, retry, closing = false, cleanup, feed, chatDir;
   let saved = Promise.resolve();
   const saveNative = () => { const data = JSON.stringify(state); saved = saved.then(() => atomic(nativePath, data)); return saved; };
   const events = new AbortController();
@@ -358,9 +359,11 @@ async function supervise(statePath, name) {
     closing = true; clearTimeout(retry); events.abort();
     cleanup = (async () => {
       if (client && state.sid) await client.request(`/api/session/${encodeURIComponent(state.sid)}/interrupt`, { method: 'POST', body: {} }).catch(() => {});
+      feed?.close();
       tui?.kill('SIGTERM');
       stopGroup(runner);
       await client?.close();
+      if (chatDir) await rm(chatDir, { recursive: true, force: true });
       await saved.catch(() => {});
       await rm(statePath.replace(/\.json$/, '.link'), { force: true });
       await log.close();
@@ -386,6 +389,37 @@ async function supervise(statePath, name) {
     }
     state.pid = process.pid; state.native_terminal = true; state.working = false; state.rc_unavailable = false;
     await atomic(statePath, JSON.stringify(state)); await saveNative();
+    // Dashboard chat. Its own state object, so the worker's file is never
+    // touched; the `dash:` prefix differs from the sink's sid on purpose, so
+    // emitHistory still echoes chat's own prompts. OpenCode takes one delivery
+    // mode (steer) whether or not a turn is running, so `steer` is not consulted.
+    const { ChatFeed } = await import(new URL('./chat-feed.mjs', import.meta.url));
+    chatDir = await mkdtemp(join(tmpdir(), 'cdash-opencode-'));
+    const chatState = { sid: state.sid, model: state.model, remote_inputs: {} };
+    feed = new ChatFeed({
+      send: (text, { cid }) => submitPrompt(client, chatState, 'dash:' + cid, text, async () => {}),
+      stop: () => client.request('/api/session/' + encodeURIComponent(state.sid) + '/interrupt', { method: 'POST', body: {} }),
+    });
+    // The bridge reports a stopped turn as a failed one; chat must tell them
+    // apart so a stop from any door holds the queue.
+    let lastExecution = '';
+    const sink = {
+      sid: 'cdash-chat',
+      event: async m => feed.accept(m.type === 'result' && lastExecution === 'session.execution.interrupted' ? { ...m, subtype: 'interrupted' } : m),
+      state: async status => feed.setState({ working: status === 'running', waiting: status === 'requires_action' }),
+    };
+    const bridge = new (class extends RemoteBridge {
+      async nativeEvent(event) {
+        if (event.type?.startsWith('session.execution.')) lastExecution = event.type;
+        return super.nativeEvent(event);
+      }
+    })(client, sink, chatState, async () => {});
+    state.chat_sock = await feed.listen(chatDir);
+    await saveNative();
+    // Resolves after the first reconcile, which is the history replay. A
+    // failing feed must not stop the pane.
+    bridge.connect(events.signal, error => { log.write('chat feed: ' + error.message + '\n').catch(() => {}); })
+      .then(() => feed.ready(), () => {});
     let updates = Promise.resolve();
     const enqueue = operation => { updates = updates.then(operation).catch(() => {}); };
     void client.subscribe(event => enqueue(async () => {
