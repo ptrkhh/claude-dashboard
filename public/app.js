@@ -142,12 +142,15 @@ function buildDropdown(el, label, items, initial, onChange = () => {}) {
   });
   document.addEventListener('click', e => { if (isOpen() && !el.contains(e.target)) close(); });
   const setItems = (items, fallback, reset = false) => {
+    const wasOpen = isOpen(), activeValue = opts[active]?.dataset.value, scrollTop = menu.scrollTop;
     entries = choices(items);
     if (reset || !entries.some(i => i.value === value)) value = fallback ?? entries[0]?.value ?? '';
     current.textContent = text();
     menu.innerHTML = optionsHtml(entries, value);
     opts = [...menu.querySelectorAll('li')];
-    close();
+    const highlighted = opts.findIndex(o => o.dataset.value === activeValue);
+    setActive(wasOpen ? (highlighted >= 0 ? highlighted : Math.max(0, opts.findIndex(o => o.dataset.value === value))) : -1);
+    menu.scrollTop = scrollTop;
   };
   setItems(items, initial);
   const setLabel = label => { trigger.setAttribute('aria-label', label); el.querySelector('.cb-lead').textContent = label; };
@@ -164,9 +167,28 @@ function latestModels(models) {
   }
   return [...families.values()].map(entry => entry.model);
 }
+function launchModels(models) {
+  const catalog = new Map(models.map(model => [model.value, model]));
+  return [
+    ...MODELS.map(model => catalog.get(model.value) || model),
+    ...latestModels(models.filter(model => model.value.startsWith('codex:'))),
+    ...models.filter(model => model.value.startsWith('opencode:')),
+  ];
+}
 let modelChoices = MODELS;
 const modelCatalogs = new Map();
-const modelDD = buildDropdown($('#model'), 'Model', [...MODELS, TERMINAL], 'sonnet', updateEfforts);
+// Stored catalogs are immediately usable, but always revalidated in the background.
+try {
+  for (const [dir, models] of JSON.parse(store.get('cdash-model-catalogs') || '[]').slice(-32)) {
+    if (typeof dir !== 'string' || !Array.isArray(models) || !models.every(m =>
+      m && typeof m.value === 'string' && typeof m.label === 'string' &&
+      ['model', 'defaultEffort', 'defaultVariant'].every(k => m[k] === undefined || typeof m[k] === 'string') &&
+      ['efforts', 'variants'].every(k => m[k] === undefined || (Array.isArray(m[k]) && m[k].every(v => typeof v === 'string'))))) continue;
+    modelCatalogs.set(dir, { at: 0, models, loading: null });
+  }
+} catch { /* corrupt or unavailable storage: discover normally */ }
+modelChoices = launchModels(modelCatalogs.get($('#dir').value.trim())?.models || []);
+const modelDD = buildDropdown($('#model'), 'Model', [...modelChoices, TERMINAL], 'sonnet', updateEfforts);
 const effortDD = buildDropdown($('#effort'), 'Effort', EFFORTS.map(value => ({ value, label: effortLabel(value) })), 'medium');
 let effortModel = modelDD.value;
 function updateEfforts() {
@@ -185,20 +207,16 @@ let modelsGeneration = -1;
 async function refreshModels(g, dir = $('#dir').value.trim()) {
   if (g !== gen || (dir && !dir.startsWith('/'))) return;
   if (modelsGeneration !== g) {
-    modelsGeneration = g; modelCatalogs.clear(); modelChoices = MODELS;
-    modelDD.setItems([...modelChoices, TERMINAL], 'sonnet'); updateEfforts();
+    modelsGeneration = g; modelChoices = MODELS;
+    // Replace entries so a superseded request cannot clear a new request's loading state.
+    for (const [key, entry] of modelCatalogs) modelCatalogs.set(key, { at: 0, models: entry.models, loading: null });
   }
   const key = dir || '';
   let entry = modelCatalogs.get(key);
   const active = () => g === gen && $('#dir').value.trim() === key;
   const apply = models => {
     if (!active()) return;
-    const catalog = new Map(models.map(model => [model.value, model]));
-    modelChoices = [
-      ...MODELS.map(model => catalog.get(model.value) || model),
-      ...latestModels(models.filter(model => model.value.startsWith('codex:'))),
-      ...models.filter(model => model.value.startsWith('opencode:')),
-    ];
+    modelChoices = launchModels(models);
     modelDD.setItems([...modelChoices, TERMINAL], 'sonnet'); updateEfforts();
   };
   if (entry?.loading) return entry.loading;
@@ -213,6 +231,7 @@ async function refreshModels(g, dir = $('#dir').value.trim()) {
       const models = await api(`/api/models${dir ? `?dir=${encodeURIComponent(dir)}` : ''}`);
       if (g !== gen || modelCatalogs.get(key) !== entry) return;
       entry.models = models; entry.at = Date.now(); apply(models);
+      store.set('cdash-model-catalogs', JSON.stringify([...modelCatalogs].filter(([, entry]) => entry.models).map(([dir, entry]) => [dir, entry.models])));
     } catch (err) {
       if (g === gen && modelCatalogs.get(key) === entry) {
         entry.at = Date.now();

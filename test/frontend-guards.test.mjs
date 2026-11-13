@@ -297,7 +297,7 @@ test('project model loads do not let stale responses replace the active project 
     $: selector => selector === '#dir' ? dir : {},
     buildDropdown: (_el, _label, _items, initial) => ({ value: initial, setItems() {}, setLabel() {} }),
     api: path => { calls.push(path); return new Promise((resolve, reject) => pending.push({ resolve, reject })); },
-    toast() {}, renderResumable() {},
+    toast() {}, renderResumable() {}, store: { get() {}, set() {} },
   };
   runInNewContext(`${code}; this.refresh = refreshModels; this.catalogs = modelCatalogs; this.values = () => modelChoices.map(model => model.value);`, context);
   const first = context.refresh(1, '/a');
@@ -373,7 +373,7 @@ test('refreshing a project catalog preserves its selected OpenCode model', async
   const pending = [], dropdowns = [], dir = { value: '/project' };
   const context = {
     TERMINAL: { value: 'terminal', label: 'Terminal' }, MODELS: [{ value: 'sonnet', label: 'Claude' }], EFFORTS: ['medium'], effortLabel: String, gen: 1,
-    Date: { now: () => now }, $: selector => selector === '#dir' ? dir : {}, toast() {},
+    Date: { now: () => now }, $: selector => selector === '#dir' ? dir : {}, toast() {}, store: { get() {}, set() {} },
     buildDropdown: (_el, _label, _items, initial) => {
       const dd = { value: initial, setLabel() {}, setItems(items, fallback) { if (!items.some(item => item.value === this.value)) this.value = fallback; } };
       dropdowns.push(dd); return dd;
