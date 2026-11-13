@@ -7,3 +7,4 @@ pub mod disk;
 pub mod sample;
 pub mod battery;
 pub mod init;
+pub mod keepalive;

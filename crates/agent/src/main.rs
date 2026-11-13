@@ -107,6 +107,7 @@ async fn run_agent() {
             if !missing.is_empty() {
                 println!("missing: {}", missing.join(", "));
             }
+            cdash_agent::host::keepalive::spawn(std::sync::Arc::clone(&b.ctx.runner));
             // The task inside `serve` owns the accept loop; park here.
             std::future::pending::<()>().await;
         }
