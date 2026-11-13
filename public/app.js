@@ -27,6 +27,7 @@ const ICONS = {
   play: `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15a1 1 0 0 0 1.5.87l12-7.5a1 1 0 0 0 0-1.74l-12-7.5A1 1 0 0 0 7 4.5z"/></svg>`,
   external: svg('<path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/>'),
   terminal: svg('<path d="M4 17l6-5-6-5"/><path d="M12 19h8"/>'),
+  chat: svg('<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1.1-4.6A8 8 0 1 1 21 12z"/>'),
   x: svg('<path d="M18 6 6 18"/><path d="M6 6l12 12"/>'),
   download: svg('<path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/>'),
   refresh: svg('<path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/>'),
@@ -322,12 +323,15 @@ function runningCard(r) {
     : `<span class="chip">${r.external ? 'external' : 'resumed'}</span>`;
   const peek = r.lastMessage
     ? `<div class="peek" onclick="this.classList.toggle('open')"><span class="peek-text">${esc(r.lastMessage)}</span></div>` : '';
+  // Chat leads where the agent can serve it; Open in Claude stays beside it.
+  const chatBtn = r.chat
+    ? `<button class="action primary" type="button" data-chat="${esc(r.name)}" data-title="${esc(r.dir.split('/').pop())}">${ICONS.chat}<span>Chat</span></button>` : '';
   const rc = r.provider === 'terminal' ? ''
     : r.rcLink
-    ? `<a class="action primary" href="${esc(r.rcLink)}" target="_blank" rel="noopener">${ICONS.external}<span>Open in Claude</span></a>`
+    ? `<a class="${r.chat ? 'action' : 'action primary'}" href="${esc(r.rcLink)}" target="_blank" rel="noopener">${ICONS.external}<span>Open in Claude</span></a>`
     : r.external
       ? '<span class="action pending">No Claude link · run /remote-control in original terminal</span>'
-      : r.nativeTerminal && r.rcUnavailable
+      : r.rcUnavailable
         ? '<span class="action pending">Claude link unavailable · use Terminal</span>'
         : `<span class="action pending">${ICONS.spinner}<span>Waiting for link…</span></span>`;
   const kill = r.external ? ''
@@ -351,11 +355,12 @@ function runningCard(r) {
         <span class="time">${fmtUp(r.uptimeSec)}</span>
       </div>
       ${peek}
-      <div class="actions">${rc}${termBtn}${copyIdBtn(r.sid)}${kill}</div>
+      <div class="actions actions-stack">${[chatBtn + rc, termBtn + copyIdBtn(r.sid) + kill].filter(Boolean).map(row => `<div class="actions-row">${row}</div>`).join('')}</div>
     </div>`;
 }
 
 let lastRes = [];
+let lastRunning = []; // the last poll's running cards, for the chat header's Claude link
 let lastPinned = [];
 // A session resumes only with its own provider's models: a Claude transcript and
 // a Codex thread cannot stand in for each other. Everything shown is concrete
@@ -486,6 +491,7 @@ function render(d) {
     if (!container.querySelector('.session')) container.innerHTML = `<div class="empty">No ${container.id === 'pinned' ? 'pinned' : 'resumable'} sessions</div>`;
   }
   lastRes = d.resumable;
+  lastRunning = d.running;
   lastPinned = d.pinned || [];
   // Same rule for the pickers: re-rendering would snap an open menu shut.
   if (!document.activeElement?.closest('.pick-dd') && !$('.pick-dd .cb-menu:not([hidden])')) renderResumable();
@@ -499,6 +505,8 @@ document.body.addEventListener('click', async e => {
   if (t) { openTerm(t.dataset.term, t.dataset.title); return; }
   const c = e.target.closest('[data-copy]');
   if (c) { copyText(c.dataset.copy); return; }
+  const ch = e.target.closest('[data-chat]');
+  if (ch) { openChat(ch.dataset.chat, ch.dataset.title); return; }
   const el = e.target.closest('[data-kill],[data-resume],[data-purge],[data-more],[data-pin]');
   if (!el) return;
   try {
@@ -598,11 +606,14 @@ document.addEventListener('keydown', e => {
    fullscreen renderer instead. */
 let term = null; // { name, xterm, fit, ro, ws, ctrl, retry } while the overlay is open
 
-async function termUrl(name, cols, rows) {
-  const q = `/api/term?name=${encodeURIComponent(name)}&cols=${cols}&rows=${rows}`;
-  // The webview cannot proxy a WebSocket through invoke, so it dials the agent.
+// The webview cannot proxy a WebSocket through invoke, so it dials the agent.
+async function wsUrl(q) {
   if (isTauri) return (await invoke('agent_base')).replace(/^http/, 'ws') + q;
   return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${q}`;
+}
+
+function termUrl(name, cols, rows) {
+  return wsUrl(`/api/term?name=${encodeURIComponent(name)}&cols=${cols}&rows=${rows}`);
 }
 
 function termStatus(text, reconnect) {
@@ -729,6 +740,42 @@ $('#term-keys').addEventListener('pointerdown', e => {
 });
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden && term?.retry && !term.ws) termConnect();
+});
+
+/* ---------- Chat: the session's conversation, through the agent only ----------
+   Full screen on narrow windows (polling pauses, as under Terminal); beside the
+   dashboard's narrow column on wide ones (polling continues). */
+const wide = matchMedia('(min-width: 900px)');
+let chatFull = false;
+
+function openChat(name, title) {
+  const already = cdashChat.isOpen();
+  cdashChat.open({
+    name, title, wsUrl, toast,
+    rcLink: lastRunning.find(r => r.name === name)?.rcLink || null,
+    openTerm: (n, t) => openTerm(n, t),
+  });
+  document.body.classList.add('chat-open');
+  chatFull = !wide.matches;
+  // Switching cards replaces the entry, so back always leaves chat in one step.
+  history[already ? 'replaceState' : 'pushState']({ chat: name }, '');
+}
+
+function closeChat() {
+  if (!cdashChat.isOpen()) return;
+  cdashChat.close();
+  document.body.classList.remove('chat-open');
+  chatFull = false;
+  poll(); // the poll paused while a full-screen chat was open
+}
+
+$('#chat-close').innerHTML = ICONS.x;
+$('#chat-close').addEventListener('click', () => history.back()); // popstate closes it
+addEventListener('popstate', () => { if (!history.state?.chat) closeChat(); });
+wide.addEventListener('change', () => {
+  if (!cdashChat.isOpen()) return;
+  chatFull = !wide.matches;
+  if (!chatFull) poll();
 });
 
 let modelDirTimer;
@@ -890,7 +937,7 @@ function arm(delay = cdashBackoff.delay(bk)) {
 }
 
 async function tick() {
-  if (term) return; // paused under the terminal; closeTerm() restarts it
+  if (term || chatFull) return; // paused under the terminal or a full-screen chat; closing restarts it
   const g = gen;
   // Skip background polls, but never the first one. An Android WebView is
   // hidden until its activity resumes, and `visibilitychange` can fire before

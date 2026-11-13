@@ -179,7 +179,7 @@ async fn write_all(fd: &AsyncFd<OwnedFd>, mut b: &[u8]) -> io::Result<()> {
 /// sends no FIN, so without this `recv` waits forever and the `tmux attach`
 /// child leaks; a peer that answers nothing for one full interval is gone.
 /// Short under test so a silent client is caught within the test's patience.
-const PING_EVERY: std::time::Duration =
+pub(crate) const PING_EVERY: std::time::Duration =
     std::time::Duration::from_secs(if cfg!(test) { 2 } else { 30 });
 
 enum Ended {
@@ -194,7 +194,7 @@ enum Ended {
 /// would then block the ping arm too, leaving the bridge and `tmux attach`
 /// alive until TCP itself gives up. Whether the send failed or timed out, the
 /// peer is gone.
-async fn send_or_drop(ws: &mut WebSocket, msg: Message) -> bool {
+pub(crate) async fn send_or_drop(ws: &mut WebSocket, msg: Message) -> bool {
     matches!(
         tokio::time::timeout(PING_EVERY, ws.send(msg)).await,
         Ok(Ok(()))

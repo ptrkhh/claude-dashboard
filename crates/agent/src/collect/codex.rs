@@ -93,6 +93,9 @@ pub struct CodexSession {
     pub effort: Option<String>,
     pub model: Option<String>,
     pub model_label: Option<String>,
+    /// The supervisor's chat socket; absent for panes started before chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_sock: Option<String>,
 }
 
 fn root(ctx: &Ctx) -> PathBuf {
@@ -256,6 +259,13 @@ pub async fn launch(
         &base.join("claude-remote.mjs"),
         include_str!("claude-remote.mjs"),
         &format!(".{name}.remote.tmp"),
+    )
+    .await
+    .map_err(|e| Refused::Failed(e.to_string()))?;
+    write_atomic(
+        &base.join("chat-feed.mjs"),
+        include_str!("chat-feed.mjs"),
+        &format!(".{name}.feed.tmp"),
     )
     .await
     .map_err(|e| Refused::Failed(e.to_string()))?;
@@ -575,12 +585,21 @@ mod tests {
         let s = saved_state(&dir);
         assert_eq!(std::fs::read_to_string(root(&ctx).join("claude-remote.mjs")).unwrap(), include_str!("claude-remote.mjs"));
         assert_eq!(std::fs::read_to_string(root(&ctx).join("bridge.mjs")).unwrap(), include_str!("codex-remote.mjs"));
+        assert_eq!(std::fs::read_to_string(root(&ctx).join("chat-feed.mjs")).unwrap(), include_str!("chat-feed.mjs"));
         assert_eq!(s.display_name.as_deref(), Some(display_name));
         assert_eq!((s.model.as_deref(), s.effort.as_deref()), (Some("gpt-b"), Some("high")));
         assert_eq!(s.model_label.as_deref(), Some("GPT B"));
         assert_eq!(s.sid.as_deref(), Some(SID), "the thread being resumed must survive");
         assert_eq!(serde_json::to_value(&s).unwrap()["native_terminal"], true);
         assert!(std::fs::read_to_string(dir.join("tmux-args")).unwrap().contains("CDASH_CODEX_AGENT="));
+    }
+
+    #[test]
+    fn a_native_state_names_its_chat_socket_when_the_supervisor_serves_one() {
+        let with: CodexSession = serde_json::from_str(r#"{"dir":"/p","pid":1,"sid":"s","chat_sock":"/tmp/x/chat.sock"}"#).unwrap();
+        assert_eq!(with.chat_sock.as_deref(), Some("/tmp/x/chat.sock"));
+        let without: CodexSession = serde_json::from_str(r#"{"dir":"/p","pid":1,"sid":"s"}"#).unwrap();
+        assert_eq!(without.chat_sock, None);
     }
 
     #[tokio::test]

@@ -95,7 +95,7 @@ test('localStorage is reached only through the guarded store wrapper', () => {
   }
 });
 
-test('the send bar is gone: the terminal replaced it', () => {
+test('the old send bar stays gone: chat is a view, not a key-injecting bar', () => {
   // It typed one line into the pane and could not operate anything that
   // needs arrow keys (/mcp menus), which is why the terminal replaced it.
   const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
@@ -103,6 +103,7 @@ test('the send bar is gone: the terminal replaced it', () => {
   assert.ok(!app.includes('/api/keys'), 'app.js no longer posts to /api/keys');
   assert.ok(!app.includes('send-input'), 'no send input is rendered');
   assert.ok(!/\.send[\s{.:-]/.test(css), 'no .send styles remain');
+  assert.ok(!app.includes('send-keys'), 'the browser never names terminal keys');
 });
 
 test('legacy Codex sessions do not offer unsupported terminal controls', () => {
@@ -505,6 +506,70 @@ test('pin keeps keyboard focus unless the user focuses something else while savi
       poll: () => { polledFocus = document.activeElement; },
       toast: message => { assert.fail(message); },
     });
-    await click({ target: { closest: selector => selector === '[data-term]' || selector === '[data-copy]' ? null : el } });
+    await click({ target: { closest: selector => selector === '[data-term]' || selector === '[data-copy]' || selector === '[data-chat]' ? null : el } });
     assert.equal(polledFocus, moveFocus ? other : el);
   }});
+test('chat scripts load before app.js and the chat markup exists', () => {
+  const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const at = s => html.indexOf(s);
+  for (const f of ['chat/md.js', 'chat/store.js', 'chat/view.js']) {
+    assert.ok(at(`<script src="${f}"></script>`) > 0 && at(`<script src="${f}"></script>`) < at('<script src="app.js"></script>'), f);
+  }
+  for (const id of ['chat', 'chat-log', 'chat-held', 'chat-form', 'chat-input', 'chat-go', 'chat-banner', 'chat-jump', 'chat-sheet'])
+    assert.ok(html.includes(`id="${id}"`), id);
+  assert.ok(/id="chat"[^>]*\shidden/.test(html), 'chat starts hidden');
+});
+test('the chat view never builds markup from conversation text', () => {
+  const view = readFileSync(new URL('../public/chat/view.js', import.meta.url), 'utf8');
+  const uses = view.match(/\.innerHTML\s*=[^;]*;/g) || [];
+  assert.ok(uses.length > 0 && uses.every(u => /cdashMd\.render\(|=\s*''/.test(u)), uses.join('\n'));
+  assert.ok(!/insertAdjacentHTML|document\.write|eval\(/.test(view));
+});
+test('the composer follows the session: send, stop, or off', async () => {
+  globalThis.document = undefined;                              // the helper must not touch the DOM
+  await import('../public/chat/store.js');
+  await import('../public/chat/view.js');
+  const mode = globalThis.cdashChat.composerMode;
+  const st = o => ({ working: false, waiting: false, ended: false, unreadable: false, ...o });
+  assert.equal(mode(st({}), false), 'send');
+  assert.equal(mode(st({ working: true }), false), 'stop');
+  assert.equal(mode(st({}), true), 'stop', 'a message still sending can be stopped');
+  assert.equal(mode(st({ waiting: true, working: true }), false), 'off');
+  assert.equal(mode(st({ ended: true }), false), 'off');
+  assert.equal(mode(st({ unreadable: true }), false), 'off');
+});
+
+function runningCardWith(ICONS) {
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const code = app.slice(app.indexOf('const copyIdBtn ='), app.indexOf('let lastRes ='));
+  const context = { esc: s => String(s || ''), ICONS, gitBadge: () => '', fmtUp: () => '', armedKill: null };
+  runInNewContext(`${code}; this.card = runningCard;`, context);
+  return context.card;
+}
+test('cards offer Chat as the primary action where the agent says chat works', () => {
+  const card = runningCardWith({});
+  const base = { name: 'cdash-a', dir: '/p/proj', uptimeSec: 60, working: false, model: 'opus', sid: 's1', rcLink: 'https://claude.ai/code/x' };
+  const withChat = card({ ...base, chat: true });
+  assert.match(withChat, /<button class="action primary" type="button" data-chat="cdash-a" data-title="proj">/);
+  assert.match(withChat, /<a class="action" href="https:\/\/claude\.ai\/code\/x"/, 'Open in Claude stays, no longer primary');
+  assert.match(withChat, /data-term="cdash-a"/);
+  const without = card({ ...base });
+  assert.ok(!without.includes('data-chat='));
+  assert.match(without, /<a class="action primary" href=/);
+  assert.ok(!card({ ...base, chat: false, external: true }).includes('data-chat='));
+});
+test('a Claude card whose link never came says so instead of waiting', () => {
+  const html = runningCardWith({ spinner: '' })({ name: 'cdash-a', dir: '/p/proj', uptimeSec: 90, working: false, model: 'opus', chat: true, rcUnavailable: true });
+  assert.match(html, /Claude link unavailable/);
+  assert.ok(!html.includes('Waiting for link'));
+});
+test('running cards put Chat and Open in Claude on one row and the session tools on the next', () => {
+  const card = runningCardWith({});
+  const rows = html => [...html.matchAll(/<div class="actions-row">(.*?)<\/div>/gs)].map(m => m[1]);
+  const full = rows(card({ name: 'cdash-a', dir: '/p/proj', sid: 's1', chat: true, rcLink: 'https://claude.ai/code/x' }));
+  assert.equal(full.length, 2);
+  assert.match(full[0], /data-chat="cdash-a".*Open in Claude/s);
+  assert.ok(!/data-term=|data-copy=|data-kill=/.test(full[0]));
+  assert.ok(/data-term=/.test(full[1]) && /data-copy=/.test(full[1]) && /data-kill=/.test(full[1]));
+  assert.equal(rows(card({ name: 'cdash-t', dir: '/p', provider: 'terminal' })).length, 1, 'a bare terminal has no empty row');
+});

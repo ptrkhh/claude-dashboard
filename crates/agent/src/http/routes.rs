@@ -280,6 +280,38 @@ pub async fn get_term(
     Ok(ws.on_upgrade(move |socket| bridge(ctx, name, cols, rows, socket)))
 }
 
+/// A session's conversation over a WebSocket. Same checks and order as
+/// `get_term`; every refusal happens before the upgrade and is logged.
+pub async fn get_chat(
+    State(ctx): State<Arc<Ctx>>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    let h = |k: axum::http::HeaderName| headers.get(k).and_then(|v| v.to_str().ok());
+    let origin = h(axum::http::header::ORIGIN);
+    let public = std::env::var("CDASH_PUBLIC_URL").ok();
+    if !origin_allowed(origin, h(axum::http::header::HOST), public.as_deref()) {
+        ctx.host.log.push(format!("chat refused: origin {origin:?}"));
+        return Err(ApiError { status: StatusCode::FORBIDDEN, message: "origin not allowed".into() });
+    }
+    let name = q.get("name").cloned().unwrap_or_default();
+    if let Err(e) = assert_kill_name(&name) {
+        ctx.host.log.push(format!("chat refused: {}", e.0));
+        return Err(e.into());
+    }
+    let hub = match crate::chat::hub_for(&ctx, &name).await {
+        Ok(hub) => hub,
+        Err(Refused::BadRequest(m) | Refused::Failed(m)) => {
+            ctx.host.log.push(format!("chat refused {name}: {m}"));
+            return Err(ApiError { status: StatusCode::CONFLICT, message: m });
+        }
+    };
+    let after = q.get("after").and_then(|a| a.parse::<u64>().ok());
+    let epoch = q.get("epoch").cloned();
+    Ok(ws.on_upgrade(move |socket| crate::chat::ws::serve(ctx, hub, name, after, epoch, socket)))
+}
+
 pub async fn post_purge(
     State(ctx): State<Arc<Ctx>>,
     Json(body): Json<SidBody>,
@@ -615,6 +647,29 @@ mod tests {
             }
         }
         b.stop().await;
+    }
+
+    #[tokio::test]
+    async fn assets_are_revalidated_so_a_new_build_is_never_mixed_with_an_old_one() {
+        let b = serve(cfg_for(tempdir("asset-cache"))).await.unwrap();
+        let url = format!("http://{}/style.css", b.addr);
+        let first = reqwest::get(&url).await.unwrap();
+        assert_eq!(first.headers()["cache-control"], "no-cache", "proxies and browsers must ask before reusing");
+        let etag = first.headers()["etag"].to_str().unwrap().to_string();
+        assert!(etag.starts_with('"') && etag.len() > 10, "{etag}");
+        let again = reqwest::Client::new().get(&url).header("if-none-match", &etag).send().await.unwrap();
+        assert_eq!(again.status(), 304);
+        assert!(again.bytes().await.unwrap().is_empty());
+        let other = reqwest::Client::new().get(&url).header("if-none-match", "\"stale\"").send().await.unwrap();
+        assert_eq!(other.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn chat_assets_are_embedded() {
+        let b = serve(cfg_for(tempdir("chat-assets"))).await.unwrap();
+        for (path, marker) in [("/chat/md.js", "cdashMd"), ("/chat/store.js", "cdashChatStore"), ("/chat/view.js", "cdashChat")] {
+            assert!(reqwest_get(&format!("http://{}{path}", b.addr)).await.contains(marker), "{path}");
+        }
     }
 
     #[tokio::test]

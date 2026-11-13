@@ -195,6 +195,20 @@ Your code, tools, and environment stay on that host. Keep it on and reachable wh
 
 External sessions without a Claude link show instructions instead of a waiting spinner. Run `/remote-control` in that session's original terminal to enable Remote Control; the card shows **Open in Claude** once the CLI publishes its link.
 
+## Chat
+
+**Chat** opens a running session's conversation inside the dashboard. It talks only to `cdash-agent` on the host, so it works when claude.ai is unreachable and for accounts without Remote Control. It is available for Claude Code, Codex and OpenCode sessions the dashboard started. **Terminal** and **Open in Claude** stay on every card, and all three can be used on one session at the same time: a prompt typed in any of them shows in the others.
+
+- Claude Code replies arrive one finished block at a time, not word by word. Codex streams text while it is written.
+- Each tool call is one line; tap it for the command, input, output and any error.
+- A message sent while the session works is held by the dashboard and listed above the composer with **Send now**, **Edit** and **Remove**. When a turn ends on its own, the next held message goes out, one per turn.
+- **Stop** interrupts the running turn. After a stop, from any door, held messages stay held until you choose what to do with each. A Claude Code prompt stopped before any reply is marked not sent and its text can be edited.
+- When the session waits for an answer (a permission, a question, a plan approval), chat says so and points to Terminal.
+- Chat reconnects on its own and catches up without gaps or repeats. Held messages live in the agent's memory; if the agent restarts, the device that wrote them shows them as not sent.
+- Codex and OpenCode sessions started before upgrading need a restart before **Chat** appears on their cards.
+
+A Claude Code card whose Remote Control link has not arrived 30 seconds after launch says the link is unavailable instead of waiting; Chat and Terminal still work.
+
 ## Technical reference
 
 <details>

@@ -76,3 +76,46 @@ The Claude mobile/web interface's exact rendering has not been manually checked.
 Protocol acceptance and session registration were checked against the real
 service. The bridge currently accepts text and completed assistant messages;
 it does not expose the native Codex terminal interface.
+
+## Dashboard chat tap (Claude Code 2.1.322)
+
+Observed on Claude Code 2.1.322 on 2026-11-12 while designing dashboard chat
+(`docs/superpowers/specs/2026-11-12-chat-core-design.md`). These are internal
+formats and behaviours, not a supported contract; an update can change them.
+Chat reads them in `crates/agent/src/chat/tap.rs` and `claude.rs`.
+
+- **Transcript records.** `user` with string content is a prompt; with
+  `tool_result` blocks it is a tool result; a text block starting
+  `[Request interrupted by user` marks a stopped turn. `assistant` writes one
+  line per content block (`thinking`, `text`, `tool_use`), several lines
+  sharing one `message.id`. `system` with subtype `turn_duration` (carrying
+  `durationMs`) ends a turn. `isSidechain: true` is subagent traffic and
+  `isMeta: true` is injected text. `<bash-input>` and
+  `<bash-stdout>`/`<bash-stderr>` user records are `!` shell commands.
+  `promptSource` is `typed`, `queued` or `system`.
+- **Pasted prompts (seen on 2.1.323).** A long bracketed paste, which is how
+  chat sends text, is recorded as
+  `\n\n<pasted_content id="N">\n…\n</pasted_content id="N">\n`; short ones are
+  recorded as typed. The tap unwraps the blocks before matching and display.
+- **Handed-back prompt.** Escape before any reply puts the prompt back in the
+  input box. Its `user` record stays in the file with no marker, and the next
+  prompt is written with the same `parentUuid`.
+- **The TUI's own queue.** `queue-operation` records: `enqueue` carries the
+  text, `dequeue` is followed by an ordinary `user` record, and `remove` with
+  reason `absorbed_mid_turn` means Claude took the message mid-turn; then
+  there is no `user` record, only an `attachment` of type `queued_command`
+  (`commandMode: "prompt"`) holding the text.
+- **Session state file.** `~/.claude/sessions/<pid>.json` carries `status`
+  (`busy`, `idle`, `waiting`, `shell`), `statusUpdatedAt` and `waitingFor`
+  (`dialog open`, `input needed`). Older versions write no `status`; chat then
+  falls back to the transcript. How quickly `status` follows a turn end, a
+  stop or a dialog was not timed.
+- **Keys.** A bracketed paste (`tmux paste-buffer -p`) followed by Enter about
+  0.4 s later is accepted as one prompt, multi-line included. Escape
+  interrupts a running tool in about 0.3 s; with a message in the TUI's own
+  queue, Escape stops the tool and then runs that message at once. Ctrl+U
+  clears to the start of a row, about two presses per line of a multi-line
+  input, and is harmless on an empty box.
+- **Key table (read from the installed program, not tested).** `ctrl+l` is
+  `chat:clearInput`; `ctrl+x enter` is `chat:queueSubmit`; `ctrl+enter` and
+  `ctrl+x ctrl+s` are `chat:sendNow`.

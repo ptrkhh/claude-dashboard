@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtemp, mkdir, writeFile, readFile, rm, stat, rename } from 'node:fs/promises';
+import { readFileSync, existsSync } from 'node:fs';
+import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -48,6 +50,11 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
  if(m.method==='account/read')send({account:{type:'apiKey'},requiresOpenaiAuth:false});
  if(['thread/start','thread/resume'].includes(m.method))send({thread:{id:'01234567-1234-1234-1234-0123456789ab'},model:'gpt-check',reasoningEffort:'low'});
  if(m.method==='thread/name/set')send({});
+ if(m.method==='thread/turns/list')send({data:[{id:'t1',items:[
+   {id:'u1',type:'userMessage',content:[{type:'text',text:'hello'}]},
+   {id:'a1',type:'agentMessage',text:'hi there',phase:'final'}]}],nextCursor:null});
+ if(['turn/steer','turn/interrupt'].includes(m.method))send({});
+ if(m.method==='turn/start')send({turn:{id:'t3',status:'inProgress'}});
 });
 `, { mode: 0o700 });
   await writeFile(join(dir, 'claude'), header + `
@@ -81,8 +88,28 @@ setInterval(()=>{const marker=process.env.CDASH_CHECK_ROOT+'/stop-remote';if(fs.
     for(let i=0;i<400;i++) { if(await check())return; await new Promise(r=>setTimeout(r,30)); }
     throw Error(`Native launcher condition timed out: ${output}`);
   };
-  return { dir, state, messages, child, wait, alive, output:()=>output };
+  const native = () => { try { return JSON.parse(readFileSync(state.replace(/\.json$/, '.native'), 'utf8')); } catch { return undefined; } };
+  const marker = join(dir, 'native-event');
+  // One notification per marker file, consumed before the next is written.
+  const inject = async notification => {
+    await wait(() => !existsSync(marker));
+    await writeFile(marker + '.tmp', JSON.stringify([notification]));
+    await rename(marker + '.tmp', marker);
+    await wait(() => !existsSync(marker));
+  };
+  const rpc = method => readFileSync(wire, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse)
+    .filter(m => m.rpc?.method === method).at(-1)?.rpc;
+  return { dir, state, messages, child, wait, alive, output:()=>output, native, inject, rpc };
 }
+
+async function client(path, first) {
+  const socket = createConnection(path); const lines = []; let buf = '';
+  socket.on('data', d => { buf += d; let i; while ((i = buf.indexOf('\n')) >= 0) { lines.push(JSON.parse(buf.slice(0, i))); buf = buf.slice(i + 1); } });
+  await new Promise(r => socket.once('connect', r));
+  socket.write(JSON.stringify(first) + '\n');
+  return { lines, write: o => socket.write(JSON.stringify(o) + '\n'), close: () => socket.destroy() };
+}
+const until = async (f, ms = 5000) => { const t = Date.now(); while (!f()) { if (Date.now() - t > ms) throw Error('timed out'); await new Promise(r => setTimeout(r, 10)); } };
 
 test('native launcher owns one backend, isolates credentials, and preserves TUI after RC exit', {timeout:15000}, async t => {
   const f=await fixture(t);
@@ -257,3 +284,35 @@ for (const platform of ['linux', 'android']) for (const resuming of [false, true
     assert.equal(f.child.exitCode, 0);
   });
 }
+
+test('the native supervisor serves chat: history, live events, send, steer and stop', { timeout: 20000 }, async t => {
+  const f = await fixture(t, undefined, process.platform, true);       // resuming, so history is replayed
+  await f.wait(() => f.native()?.chat_sock);                      // read <name>.native, as the other tests read it
+  const c = await client(f.native().chat_sock, { after: 0, epoch: null });
+  await until(() => c.lines.some(l => l.t === 'ready'));
+  // The fake's thread/turns/list returns one user message and one agent message.
+  assert.deepEqual(c.lines.filter(l => l.t === 'ev').map(l => l.ev.type), ['user', 'assistant']);
+  await f.inject({ method: 'turn/started', params: { turn: { id: 't2' } } });
+  await f.inject({ method: 'item/started', params: { turnId: 't2', item: { id: 'i1', type: 'commandExecution', command: 'ls', cwd: '/p', status: 'inProgress' } } });
+  await f.inject({ method: 'item/agentMessage/delta', params: { turnId: 't2', itemId: 'i2', delta: 'Do' } });
+  await f.inject({ method: 'item/completed', params: { turnId: 't2', item: { id: 'i1', type: 'commandExecution', command: 'ls', cwd: '/p', status: 'completed', exitCode: 0, aggregatedOutput: 'a\nb' } } });
+  await f.inject({ method: 'item/completed', params: { turnId: 't2', item: { id: 'i2', type: 'agentMessage', text: 'Done', phase: 'final' } } });
+  await until(() => c.lines.filter(l => l.t === 'ev').length >= 5);
+  const evs = c.lines.filter(l => l.t === 'ev').slice(2).map(l => l.ev);
+  assert.deepEqual(evs.map(e => e.message.content[0].type), ['tool_use', 'tool_result', 'text']);
+  assert.equal(evs[2].message.id, 'i2');
+  assert.deepEqual(c.lines.find(l => l.t === 'delta'), { t: 'delta', id: 'i2', text: 'Do' });
+  assert.ok(c.lines.some(l => l.t === 'state' && l.working === true));
+  c.write({ t: 'send', cid: 'c1', text: 'steer me', steer: true });
+  await until(() => f.rpc('turn/steer'));
+  assert.equal(f.rpc('turn/steer').params.expectedTurnId, 't2');
+  assert.equal(f.rpc('turn/steer').params.input[0].text, 'steer me');
+  await f.inject({ method: 'turn/completed', params: { turn: { id: 't2', status: 'interrupted' } } });
+  await until(() => c.lines.some(l => l.t === 'ev' && l.ev.type === 'result'));
+  assert.equal(c.lines.findLast(l => l.t === 'ev').ev.subtype, 'interrupted');
+  c.write({ t: 'send', cid: 'c2', text: 'fresh', steer: false });
+  await until(() => f.rpc('turn/start'));
+  assert.equal(f.rpc('turn/start').params.input[0].text, 'fresh');
+  c.close();
+  assert.ok(!String(f.output()).includes('"t":"'), 'no feed frame leaked onto the TUI');
+});
