@@ -70,7 +70,7 @@ impl Tap {
         }
         let out = match r.kind.as_str() {
             "queue-operation" => match (r.operation.as_deref(), r.content.as_ref().and_then(Value::as_str)) {
-                (Some("enqueue"), Some(text)) if !injected(text) => vec![json!({"type":"cdash","subtype":"queued","text":text})],
+                (Some("enqueue"), Some(text)) if !injected(text) => vec![json!({"type":"cdash","subtype":"queued","text":unwrap_pastes(text)})],
                 _ => Vec::new(),
             },
             "attachment" => steer(&r).into_iter().collect(),
@@ -121,7 +121,7 @@ impl Tap {
                 let args = between(t, "<command-args>", "</command-args>").unwrap_or("");
                 format!("{} {}", name.trim(), args.trim()).trim().to_string()
             }
-            None => text.to_string(),
+            None => unwrap_pastes(text),
         };
         let queued = r.source.as_deref() == Some("queued");
         let mut out = Vec::new();
@@ -136,6 +136,32 @@ impl Tap {
         out.push(prompt_event(r.uuid.as_deref(), &prompt, if queued { "queued" } else { "typed" }));
         out
     }
+}
+
+/// Claude Code records a long bracketed paste, which is how chat sends text, as
+/// `<pasted_content id="N">\n…\n</pasted_content id="N">`. Replace each complete
+/// block with its contents so the prompt reads, and matches, as what was sent.
+/// Anything not understood is left as written.
+fn unwrap_pastes(text: &str) -> String {
+    const OPEN: &str = "<pasted_content id=\"";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut changed = false;
+    while let Some(start) = rest.find(OPEN) {
+        let after = &rest[start + OPEN.len()..];
+        let Some(id_end) = after.find("\">") else { break };
+        let close = format!("</pasted_content id=\"{}\">", &after[..id_end]);
+        let body = &after[id_end + 2..];
+        let Some(body_end) = body.find(&close) else { break };
+        let inner = &body[..body_end];
+        let inner = inner.strip_prefix('\n').unwrap_or(inner);
+        out.push_str(&rest[..start]);
+        out.push_str(inner.strip_suffix('\n').unwrap_or(inner));
+        rest = &body[body_end + close.len()..];
+        changed = true;
+    }
+    out.push_str(rest);
+    if changed { out.trim().to_string() } else { out }
 }
 
 /// Text tools inject for the model's benefit; never shown as a user message.
@@ -154,7 +180,7 @@ fn steer(r: &Rec) -> Option<Value> {
     if a["type"] != "queued_command" || a["commandMode"] != "prompt" {
         return None;
     }
-    Some(prompt_event(r.uuid.as_deref(), a["prompt"].as_str()?, "steer"))
+    Some(prompt_event(r.uuid.as_deref(), &unwrap_pastes(a["prompt"].as_str()?), "steer"))
 }
 
 /// Rule 5: one event per `text` or `tool_use` block; thinking is status only.
@@ -281,4 +307,16 @@ mod tests {
         let (_, healthy) = run();
         assert!(!healthy.blind());
     }
+    #[test]
+    fn a_prompt_recorded_as_pasted_content_reads_as_the_text_that_was_pasted() {
+        // Claude Code 2.1.323 wraps a long bracketed paste, which is how chat sends text.
+        let mut tap = Tap::default();
+        let pasted = r#"{"type":"user","uuid":"p1","parentUuid":"x","promptSource":"typed","message":{"role":"user","content":"\n\n<pasted_content id=\"7722\">\nfirst line\nsecond line\n</pasted_content id=\"7722\">\n"}}"#;
+        assert_eq!(tap.feed(pasted)[0]["message"]["content"], "first line\nsecond line");
+        let mixed = r#"{"type":"user","uuid":"p2","parentUuid":"y","promptSource":"typed","message":{"role":"user","content":"look at this:\n\n<pasted_content id=\"8\">\nerror: boom\n</pasted_content id=\"8\">\n"}}"#;
+        assert_eq!(tap.feed(mixed)[0]["message"]["content"], "look at this:\n\nerror: boom", "typed text around a paste stays");
+        let unclosed = r#"{"type":"user","uuid":"p3","parentUuid":"z","promptSource":"typed","message":{"role":"user","content":"<pasted_content id=\"9\">\nhalf"}}"#;
+        assert_eq!(tap.feed(unclosed)[0]["message"]["content"], "<pasted_content id=\"9\">\nhalf", "anything not understood is left as written");
+    }
+
 }

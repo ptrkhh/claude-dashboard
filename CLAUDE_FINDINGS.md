@@ -93,6 +93,10 @@ Chat reads them in `crates/agent/src/chat/tap.rs` and `claude.rs`.
   `isMeta: true` is injected text. `<bash-input>` and
   `<bash-stdout>`/`<bash-stderr>` user records are `!` shell commands.
   `promptSource` is `typed`, `queued` or `system`.
+- **Pasted prompts (seen on 2.1.323).** A long bracketed paste, which is how
+  chat sends text, is recorded as
+  `\n\n<pasted_content id="N">\n…\n</pasted_content id="N">\n`; short ones are
+  recorded as typed. The tap unwraps the blocks before matching and display.
 - **Handed-back prompt.** Escape before any reply puts the prompt back in the
   input box. Its `user` record stays in the file with no marker, and the next
   prompt is written with the same `parentUuid`.

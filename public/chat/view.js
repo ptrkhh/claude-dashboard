@@ -49,14 +49,14 @@
     });
     $('#chat-sheet-close').addEventListener('click', () => $('#chat-sheet').close());
     log.addEventListener('click', e => {
-      const b = e.target.closest('[data-edit],[data-again]');
+      const b = e.target.closest('[data-edit],[data-again],[data-dismiss]');
       if (!b || !c) return;
-      const cid = b.dataset.edit ?? b.dataset.again;
+      const cid = b.dataset.edit ?? b.dataset.again ?? b.dataset.dismiss;
       const m = c.state.mine.find(x => x.cid === cid);
       if (!m) return;
       c.state.mine = c.state.mine.filter(x => x !== m);
       if (b.dataset.edit !== undefined) toBox(m.text);
-      else submitText(m.text);
+      else if (b.dataset.again !== undefined) submitText(m.text);
       schedule();
     });
     $('#chat-held').addEventListener('click', e => {
@@ -225,6 +225,10 @@
             again.dataset.again = r.cid;
             meta.append(again);
           }
+          const dismiss = el('button', '', 'Dismiss');
+          dismiss.type = 'button';
+          dismiss.dataset.dismiss = r.cid;
+          meta.append(dismiss);
         }
         n.append(meta);
       }
