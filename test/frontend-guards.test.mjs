@@ -563,3 +563,13 @@ test('a Claude card whose link never came says so instead of waiting', () => {
   assert.match(html, /Claude link unavailable/);
   assert.ok(!html.includes('Waiting for link'));
 });
+test('running cards put Chat and Open in Claude on one row and the session tools on the next', () => {
+  const card = runningCardWith({});
+  const rows = html => [...html.matchAll(/<div class="actions-row">(.*?)<\/div>/gs)].map(m => m[1]);
+  const full = rows(card({ name: 'cdash-a', dir: '/p/proj', sid: 's1', chat: true, rcLink: 'https://claude.ai/code/x' }));
+  assert.equal(full.length, 2);
+  assert.match(full[0], /data-chat="cdash-a".*Open in Claude/s);
+  assert.ok(!/data-term=|data-copy=|data-kill=/.test(full[0]));
+  assert.ok(/data-term=/.test(full[1]) && /data-copy=/.test(full[1]) && /data-kill=/.test(full[1]));
+  assert.equal(rows(card({ name: 'cdash-t', dir: '/p', provider: 'terminal' })).length, 1, 'a bare terminal has no empty row');
+});

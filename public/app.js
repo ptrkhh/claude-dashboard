@@ -355,7 +355,7 @@ function runningCard(r) {
         <span class="time">${fmtUp(r.uptimeSec)}</span>
       </div>
       ${peek}
-      <div class="actions">${chatBtn}${rc}${termBtn}${copyIdBtn(r.sid)}${kill}</div>
+      <div class="actions actions-stack">${[chatBtn + rc, termBtn + copyIdBtn(r.sid) + kill].filter(Boolean).map(row => `<div class="actions-row">${row}</div>`).join('')}</div>
     </div>`;
 }
 

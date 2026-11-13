@@ -148,10 +148,12 @@
 <div id="chat" class="chat" hidden>
   <div class="chat-bar">
     <button id="chat-close" class="icon-btn" type="button" aria-label="Close chat"></button>
-    <span id="chat-title" class="chat-title"></span>
-    <span id="chat-state" class="chat-state" role="status" aria-live="polite"></span>
-    <button id="chat-term" class="chat-bar-btn" type="button">Terminal</button>
-    <a id="chat-rc" class="chat-bar-btn" target="_blank" rel="noopener noreferrer" hidden>Open in Claude</a>
+    <div class="chat-heading">
+      <span id="chat-title" class="chat-title"></span>
+      <span id="chat-state" class="chat-state" role="status" aria-live="polite"></span>
+    </div>
+    <button id="chat-term" class="chat-bar-btn" type="button" aria-label="Terminal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 17l6-5-6-5"/><path d="M12 19h8"/></svg><span class="chat-bar-label">Terminal</span></button>
+    <a id="chat-rc" class="chat-bar-btn" target="_blank" rel="noopener noreferrer" aria-label="Open in Claude" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></svg><span class="chat-bar-label">Open in Claude</span></a>
   </div>
   <div id="chat-banner" class="chat-banner" role="status" hidden></div>
   <div id="chat-log" class="chat-log" aria-live="polite"></div>
@@ -165,7 +167,7 @@
 <dialog id="chat-sheet" class="dialog" aria-label="Tool details">
   <div class="dialog-body">
     <div class="dialog-head">
-      <span class="dialog-title">Details</span>
+      <span id="chat-sheet-title" class="dialog-title">Details</span>
       <button id="chat-sheet-close" class="icon-btn" type="button" aria-label="Close details">×</button>
     </div>
     <div id="chat-sheet-body" class="chat-sheet-body"></div>

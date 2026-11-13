@@ -231,11 +231,11 @@
       return n;
     }
     if (r.kind === 'tools') {
-      const b = el('button', 'chat-tool' + (r.running ? ' running' : ''));
+      const failed = r.calls.some(call => call.error);
+      const b = el('button', 'chat-tool' + (r.running ? ' running' : failed ? ' failed' : ''));
       b.type = 'button';
       b.dataset.tools = r.key;
-      b.append(el('span', 'chat-tool-label', r.label));
-      if (r.running) b.append(el('span', 'chat-spinner'));
+      b.append(el('span', r.running ? 'chat-spinner' : 'chat-tool-dot'), labelled(el('span', 'chat-tool-label'), r.label));
       return b;
     }
     if (r.kind === 'shell') {
@@ -246,6 +246,13 @@
       return n;
     }
     return el('div', 'chat-note', r.text);
+  }
+
+  // "Ran `npm test`": the command shows as code, without the backticks.
+  function labelled(node, text) {
+    const m = /^(.*?)`(.*)`$/s.exec(text);
+    if (m) node.append(m[1], el('code', '', m[2])); else node.textContent = text;
+    return node;
   }
 
   function render() {
@@ -277,6 +284,11 @@
       prev = n.el;
     }
     for (const [k, n] of x.nodes) if (!keep.has(k)) { n.el.remove(); x.nodes.delete(k); }
+    renderStatus();
+    renderBanner();
+    renderHeld();
+    renderComposer();
+    // Last: the held list and composer above change how tall the log is.
     if (x.paged) {
       x.paged = false;
       log.scrollTop = top + (log.scrollHeight - height); // older rows went on top; keep the view still
@@ -284,16 +296,13 @@
       log.scrollTop = log.scrollHeight;
     }
     $('#chat-jump').hidden = x.follow;
-    renderStatus();
-    renderBanner();
-    renderHeld();
-    renderComposer();
   }
 
   function renderHeld() {
     const box = $('#chat-held');
     const off = c.done || composerMode(c.state, false) === 'off';
     box.textContent = '';
+    if (c.state.held.length) box.append(el('div', 'chat-held-title', 'Held'));
     for (const h of c.state.held) {
       const item = el('div', 'chat-held-item');
       item.append(el('span', 'chat-held-text', h.text));
@@ -316,17 +325,22 @@
     const mode = c.done ? 'off' : composerMode(s, pending(s));
     const stop = mode === 'stop' && !input.value.trim();
     input.disabled = go.disabled = mode === 'off';
-    input.placeholder = s.working ? 'Queue a message…' : 'Message…';
+    input.placeholder = s.ended || c.done ? 'Session ended'
+      : s.unreadable ? 'Use Terminal for this session'
+      : s.waiting ? 'Answer in Terminal first'
+      : s.working ? 'Queue a message…' : 'Message…';
     go.textContent = stop ? 'Stop' : 'Send';
     go.classList.toggle('stop', stop);
   }
 
   function renderStatus() {
     const s = c.state;
-    $('#chat-state').textContent = s.ended || c.done ? 'Ended'
+    const state = $('#chat-state');
+    state.textContent = s.ended || c.done ? 'Ended'
       : s.waiting ? 'Needs an answer'
       : s.working ? 'Working… ' + Math.max(0, Math.round((Date.now() - c.since) / 1000)) + 's'
       : '';
+    state.classList.toggle('working', s.working && !s.waiting && !s.ended && !c.done);
   }
 
   function renderBanner() {
@@ -334,8 +348,8 @@
     const s = c.state;
     const [text, term] = c.link ? [c.link, false]
       : s.ended || c.done ? ['Session ended.', false]
-      : s.unreadable ? ['Chat cannot read this session. Use Terminal.', true]
-      : s.waiting ? ['This session is waiting for an answer.', true]
+      : s.unreadable ? ['Chat can’t read this session.', true]
+      : s.waiting ? ['Answer in Terminal to continue.', true]
       : ['', false];
     const sig = text + term;
     if (b.dataset.sig === sig) return;
@@ -357,10 +371,18 @@
     if (!row) return;
     const body = $('#chat-sheet-body');
     body.textContent = '';
+    const title = $('#chat-sheet-title');
+    title.textContent = '';
+    labelled(title, row.label);
     for (const call of row.calls) {
       const sec = el('section', 'chat-call');
-      sec.append(el('h3', 'chat-call-name', call.name));
-      sec.append(el('pre', 'chat-call-input', JSON.stringify(call.input, null, 2)));
+      const input = call.input || {};
+      // The command or the path when that is all there is to see; JSON otherwise.
+      const shown = typeof input.command === 'string' ? input.command
+        : typeof input.file_path === 'string' && Object.keys(input).length === 1 ? input.file_path
+        : JSON.stringify(input, null, 2);
+      sec.append(labelled(el('h3', 'chat-call-name'), cdashChatStore.toolLabel(call.name, input, call.done)));
+      sec.append(el('pre', 'chat-call-input', shown));
       if (call.done) sec.append(el('pre', 'chat-call-result' + (call.error ? ' error' : ''), call.result || '(no output)'));
       else sec.append(el('p', 'chat-call-wait', 'Running…'));
       body.append(sec);
